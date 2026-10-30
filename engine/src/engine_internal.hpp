@@ -28,9 +28,9 @@ struct RxEntry {
   std::unique_ptr<RxStream> stream;
 };
 
-// One receive socket per UDP port, shared by every input stream on that port. Datagrams are
-// dispatched to the streams by their destination group (and sender, when filtered), because on
-// Windows and Linux a socket sees every group any socket joined on that port.
+// A receive socket for up to 16 input streams on one UDP port. Datagrams are dispatched to the
+// streams by their destination group (and sender, when filtered), because on Windows and Linux a
+// socket can see every group any socket joined on that port.
 struct RxPort {
   uint16_t port = 0;
   std::string key;  // interface + sorted memberships; a different key means a new socket

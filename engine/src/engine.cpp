@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <map>
@@ -119,40 +120,53 @@ void Engine::Impl::rebuild_runtime(const Config& cfg, bool force) {
     }
   }
 
-  // ---- receive sockets: one per port, joined to every group used on that port ----
+  // ---- receive sockets: per port, at most kGroupsPerSocket groups each ----
+  // Linux limits a socket to 20 memberships (igmp_max_memberships), older Windows stacks too.
+  constexpr size_t kGroupsPerSocket = 16;
   std::map<uint16_t, std::vector<std::shared_ptr<RxEntry>>> by_port;
   for (const auto& e : next->rx)
     if (e->stream) by_port[e->port].push_back(e);
   for (auto& [port, entries] : by_port) {
-    std::set<std::pair<std::string, std::string>> memberships;
-    for (const auto& e : entries) memberships.insert({e->group, e->source});
-    std::ostringstream key;
-    key << iface;
-    for (const auto& [g, src] : memberships) key << '|' << g << '@' << src;
-    std::shared_ptr<RxPort> rp;
-    for (const auto& old_port : old->rx_ports)
-      if (old_port->port == port && old_port->key == key.str() && !force) rp = old_port;
-    if (!rp) {
-      rp = std::make_shared<RxPort>();
-      rp->port = port;
-      rp->key = key.str();
-      std::string err;
-      auto sock = platform::UdpSocket::open(port, &err);
-      if (!sock) {
-        for (const auto& e : entries) e->error = err;
-        continue;
-      }
-      rp->socket = std::move(*sock);
-      for (const auto& [g, src] : memberships) {
-        if (rp->socket.join(g, iface, src, &err)) continue;
-        for (const auto& e : entries)
-          if (e->group == g && e->source == src) e->error = err;
-      }
+    std::vector<std::pair<std::string, std::string>> memberships;
+    {
+      std::set<std::pair<std::string, std::string>> unique;
+      for (const auto& e : entries) unique.insert({e->group, e->source});
+      memberships.assign(unique.begin(), unique.end());
     }
-    rp->entries.clear();
-    for (const auto& e : entries)
-      if (e->error.empty()) rp->entries.push_back(e);
-    next->rx_ports.push_back(rp);
+    for (size_t first = 0; first < memberships.size(); first += kGroupsPerSocket) {
+      const size_t last = std::min(memberships.size(), first + kGroupsPerSocket);
+      const std::set<std::pair<std::string, std::string>> shard(memberships.begin() + first, memberships.begin() + last);
+      std::ostringstream key;
+      key << iface;
+      for (const auto& [g, src] : shard) key << '|' << g << '@' << src;
+      std::shared_ptr<RxPort> rp;
+      for (const auto& old_port : old->rx_ports)
+        if (old_port->port == port && old_port->key == key.str() && !force) rp = old_port;
+      if (!rp) {
+        rp = std::make_shared<RxPort>();
+        rp->port = port;
+        rp->key = key.str();
+        std::string err;
+        auto sock = platform::UdpSocket::open(port, &err);
+        if (!sock) {
+          for (const auto& e : entries)
+            if (shard.count({e->group, e->source})) e->error = err;
+          continue;
+        }
+        rp->socket = std::move(*sock);
+        for (const auto& [g, src] : shard) {
+          if (rp->socket.join(g, iface, src, &err)) continue;
+          for (const auto& e : entries)
+            if (e->group == g && e->source == src) e->error = err;
+        }
+      }
+      // A shard only dispatches to its own streams; on stacks that deliver every group joined on
+      // the port to every socket, other shards' packets are ignored here.
+      rp->entries.clear();
+      for (const auto& e : entries)
+        if (e->error.empty() && shard.count({e->group, e->source})) rp->entries.push_back(e);
+      next->rx_ports.push_back(rp);
+    }
   }
   for (const auto& e : next->rx)
     if (!e->error.empty() && e->stream) e->stream.reset();

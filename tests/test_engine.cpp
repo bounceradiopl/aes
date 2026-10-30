@@ -142,6 +142,30 @@ TEST_CASE("engine loopback: output stream comes back sample-exact on the input")
   h.client_pid = 0;
 }
 
+TEST_CASE("engine receives more inputs on one port than a socket may join") {
+  TestEngine t;
+  std::string err;
+  REQUIRE_MESSAGE(t.engine->start(&err), err);
+  constexpr int kDevices = 24;  // Linux allows 20 memberships per socket
+  auto cfg = t.engine->config();
+  for (int i = 0; i < kDevices; ++i) {
+    cfg.devices[i].enabled = true;
+    cfg.devices[i].tx_address = "239.69.202." + std::to_string(i + 1);
+  }
+  REQUIRE(t.engine->apply_config(cfg).ok);
+  cfg = t.engine->config();
+  for (int i = 0; i < kDevices; ++i) cfg.devices[i].rx_sdp = t.engine->output_sdp(i + 1);
+  REQUIRE(t.engine->apply_config(cfg).ok);
+  bp::sleep_ns(800'000'000);
+  const auto st = t.engine->status();
+  for (int i = 0; i < kDevices; ++i) {
+    INFO("device " << i + 1 << " error: " << st.devices[i].rx_error);
+    CHECK(st.devices[i].rx_error.empty());
+    CHECK(st.devices[i].rx.packets > 300);
+    CHECK(st.devices[i].rx.seq_errors == 0);
+  }
+}
+
 TEST_CASE("engine rejects invalid configuration and keeps the running one") {
   TestEngine t;
   std::string err;

@@ -2,7 +2,7 @@
 ; NSIS: instalator "BounceAES Master" z kreatorem Modern UI 2 (ten sam układ i branding co
 ; instalator aplikacji bounce). makensis działa natywnie na macOS/Linux/Windows.
 ;
-; Build:  makensis -DPAYLOAD=../../build-win BounceAES-setup.nsi   ->  BounceAES-Master-setup.exe
+; Build:  makensis [-DPAYLOAD=<katalog z plikami>] BounceAES-setup.nsi   ->  BounceAES-Master-setup.exe
 ;         PAYLOAD = katalog z BounceAESService.exe, BounceAESAsio.dll, BounceAESTray.exe,
 ;                   bounceaes-test.exe, ptp-sim.exe (build MinGW albo MSVC).
 ;
@@ -21,8 +21,9 @@ Unicode true
 !include "WinVer.nsh"
 
 !ifndef PAYLOAD
-  !define PAYLOAD "../../build-win"
+  !define PAYLOAD "${__FILEDIR__}\..\..\build-win"
 !endif
+!define ROOT "${__FILEDIR__}\..\.."  ; paths are relative to this script, not to the working directory
 
 !define APP "BounceAES Master"
 !define PUBLISHER "BOUNCE SP. Z O.O."
@@ -48,23 +49,23 @@ VIAddVersionKey "FileDescription" "${APP} - instalator"
 VIAddVersionKey "FileVersion" "${VER}"
 VIAddVersionKey "LegalCopyright" "GPL-3.0-or-later"
 
-!define MUI_ICON "../../tray/bounce.ico"
-!define MUI_UNICON "../../tray/bounce.ico"
+!define MUI_ICON "${ROOT}\tray\bounce.ico"
+!define MUI_UNICON "${ROOT}\tray\bounce.ico"
 !define MUI_ABORTWARNING
 
 !define MUI_HEADERIMAGE
 !define MUI_HEADERIMAGE_RIGHT
-!define MUI_HEADERIMAGE_BITMAP "branding/header.bmp"
-!define MUI_HEADERIMAGE_UNBITMAP "branding/header.bmp"
-!define MUI_WELCOMEFINISHPAGE_BITMAP "branding/wizard.bmp"
-!define MUI_UNWELCOMEFINISHPAGE_BITMAP "branding/wizard.bmp"
+!define MUI_HEADERIMAGE_BITMAP "${__FILEDIR__}\branding\header.bmp"
+!define MUI_HEADERIMAGE_UNBITMAP "${__FILEDIR__}\branding\header.bmp"
+!define MUI_WELCOMEFINISHPAGE_BITMAP "${__FILEDIR__}\branding\wizard.bmp"
+!define MUI_UNWELCOMEFINISHPAGE_BITMAP "${__FILEDIR__}\branding\wizard.bmp"
 
 !define MUI_WELCOMEPAGE_TITLE "$(WelcomeTitle)"
 !define MUI_WELCOMEPAGE_TEXT "$(WelcomeText)"
 !insertmacro MUI_PAGE_WELCOME
 !define MUI_LICENSEPAGE_CHECKBOX
 !define MUI_LICENSEPAGE_CHECKBOX_TEXT "$(LicCheck)"
-!insertmacro MUI_PAGE_LICENSE "../../LICENSE"
+!insertmacro MUI_PAGE_LICENSE "${ROOT}\LICENSE"
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_RUN "$INSTDIR\BounceAESTray.exe"
@@ -129,16 +130,16 @@ Section "BounceAES Master" SecMain
   SetShellVarContext all
   SetOutPath "$INSTDIR"
 
-  File "${PAYLOAD}/BounceAESService.exe"
-  File "${PAYLOAD}/BounceAESAsio.dll"
-  File "${PAYLOAD}/BounceAESTray.exe"
-  File "${PAYLOAD}/bounceaes-test.exe"
-  File "${PAYLOAD}/ptp-sim.exe"
-  File "/oname=LICENSE.txt" "../../LICENSE"
-  File "/oname=INSTRUKCJA.md" "../../docs/INSTALL.md"
-  File "/oname=TESTY.md" "../../docs/TESTING.md"
-  File "/oname=przyklad-orban.sdp" "../../tests/data/orban.sdp"
-  File "../../tray/bounce.ico"
+  File "${PAYLOAD}\BounceAESService.exe"
+  File "${PAYLOAD}\BounceAESAsio.dll"
+  File "${PAYLOAD}\BounceAESTray.exe"
+  File "${PAYLOAD}\bounceaes-test.exe"
+  File "${PAYLOAD}\ptp-sim.exe"
+  File "/oname=LICENSE.txt" "${ROOT}\LICENSE"
+  File "/oname=INSTRUKCJA.md" "${ROOT}\docs\INSTALL.md"
+  File "/oname=TESTY.md" "${ROOT}\docs\TESTING.md"
+  File "/oname=przyklad-orban.sdp" "${ROOT}\tests\data\orban.sdp"
+  File "${ROOT}\tray\bounce.ico"
 
   ; --- usługa: start automatyczny, restart po awarii po 5 s (trzykrotnie) ---
   nsExec::ExecToLog 'sc.exe create ${SERVICE} binPath= "\"$INSTDIR\BounceAESService.exe\"" start= auto DisplayName= "BounceAES Master"'

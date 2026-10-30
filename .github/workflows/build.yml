@@ -50,7 +50,7 @@ jobs:
         shell: pwsh
         run: |
           choco install nsis --no-progress -y
-          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /V2 /DPAYLOAD=..\..\build\Release installer\nsis\BounceAES-setup.nsi
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /V2 "/DPAYLOAD=$PWD\build\Release" installer\nsis\BounceAES-setup.nsi
       - name: Collect binaries
         shell: pwsh
         run: |
