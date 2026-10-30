@@ -96,7 +96,7 @@ LangString FinishText ${LANG_POLISH} "BounceAES Master został zainstalowany i d
 LangString FinishText ${LANG_ENGLISH} "BounceAES Master has been installed and is running.$\r$\n$\r$\nAutostart: the driver service starts with Windows, the tray icon at every logon. A $\"BounceAES Master$\" shortcut is on the desktop and in the Start menu.$\r$\n$\r$\nIn mAirList select the ASIO driver $\"BounceAES Master$\" (48 kHz, buffer 128)."
 LangString Need64 ${LANG_POLISH} "BounceAES Master wymaga 64-bitowego systemu Windows 10 lub 11."
 LangString Need64 ${LANG_ENGLISH} "BounceAES Master requires 64-bit Windows 10 or 11."
-LangString PtpWarn ${LANG_POLISH} "Włączony jest klient PTP usługi czasu Windows (w32time). Zajmuje on porty 319/320 i uniemożliwi synchronizację BounceAES Master.$\r$\n$\r$\nWyłącz go po instalacji (opis w INSTRUKCJA.md, rozdział 6)."
+LangString PtpWarn ${LANG_POLISH} "Włączony jest klient PTP usługi czasu Windows (w32time). Zajmuje on porty 319/320 i uniemożliwi synchronizację BounceAES Master.$\r$\n$\r$\nWyłącz go po instalacji (opis w INSTRUKCJA.md, rozdział 8)."
 LangString PtpWarn ${LANG_ENGLISH} "The Windows Time service PTP client (w32time) is enabled. It occupies ports 319/320 and prevents BounceAES Master from synchronising.$\r$\n$\r$\nDisable it after installation (see INSTALL.md, section 6)."
 
 Function .onInit
