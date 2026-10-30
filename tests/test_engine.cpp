@@ -156,8 +156,17 @@ TEST_CASE("engine receives more inputs on one port than a socket may join") {
   cfg = t.engine->config();
   for (int i = 0; i < kDevices; ++i) cfg.devices[i].rx_sdp = t.engine->output_sdp(i + 1);
   REQUIRE(t.engine->apply_config(cfg).ok);
-  bp::sleep_ns(800'000'000);
-  const auto st = t.engine->status();
+  // Windows activates multicast memberships with some delay per group, so wait for every input
+  // instead of assuming a fixed start-up time.
+  bam::EngineStatus st;
+  const int64_t deadline = bp::monotonic_ns() + 5'000'000'000;
+  for (;;) {
+    st = t.engine->status();
+    bool all = true;
+    for (int i = 0; i < kDevices; ++i) all = all && st.devices[i].rx.packets > 300;
+    if (all || bp::monotonic_ns() > deadline) break;
+    bp::sleep_ns(100'000'000);
+  }
   for (int i = 0; i < kDevices; ++i) {
     INFO("device " << i + 1 << " error: " << st.devices[i].rx_error);
     CHECK(st.devices[i].rx_error.empty());
