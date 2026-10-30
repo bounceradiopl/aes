@@ -45,6 +45,8 @@ PTP locked, offset −5,7 µs, opóźnienie ścieżki 143 µs, Synchronization L
 32 urządzenia: TxPkts 2 833 984, RxPkts 2 829 559, TxErr 0, RxUnderrun 0, RxOverrun 0, RxSeqErr 0, jitter ≤ 0,026 ms
 ```
 
+Jeśli sam program testowy spóźni się z okresem (obciążony komputer, maszyna CI), próbki zapisane przez niego po czasie nie są liczone jako błędy usługi; wynik podaje ich liczbę („…zapisanych przez klienta po czasie nie liczono”). Gdy takich próbek jest ponad 2%, test kończy się błędem jako niewiarygodny. Opcja `--stall-every N` celowo zacina klienta co N okresów i służy do sprawdzenia samego testu.
+
 Na Windows te same polecenia działają z plikami `.exe`. Pliku konfiguracji `--config` nie trzeba podawać, gdy usługa jest zainstalowana. Wtedy `--configure-loopback --interface` zmienia konfigurację zainstalowanej usługi, więc po teście trzeba ją przywrócić.
 
 ## 3. Test zgodności w sieci docelowej

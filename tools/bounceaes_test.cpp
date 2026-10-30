@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "bam/asio_bridge.hpp"
@@ -33,6 +34,7 @@ struct Options {
   int devices = 32;
   int seconds = 30;
   uint32_t buffer = 128;
+  int stall_every = 0;  // test of the tool itself: stall the client for 3 periods every N periods
   std::string password;
   std::string interface_ip;
   uint16_t port = bam::kDefaultHttpPort;
@@ -121,7 +123,15 @@ int loopback(const Options& o) {
     in_ptrs[ch] = in[ch].data();
   }
   bam::AsioBridge bridge(view);
-  std::vector<uint64_t> errors(channels, 0), checked(channels, 0);
+  std::vector<uint64_t> errors(channels, 0), checked(channels, 0), excused(channels, 0);
+  // Output samples the test client wrote after their period had passed. The service may drop
+  // them (it sends what was in the ring in time), so they are not counted against it.
+  std::vector<std::pair<uint64_t, uint64_t>> late_ranges;
+  auto written_late = [&](uint64_t x) {
+    for (const auto& [from, to] : late_ranges)
+      if (x >= from && x < to) return true;
+    return false;
+  };
   uint64_t periods = 0, missed = 0, stalls = 0, last_start = 0, last_counter = h.period_counter.load();
   const int64_t start = bp::monotonic_ns();
   const int64_t warmup_end = start + 1'000'000'000;
@@ -143,6 +153,7 @@ int loopback(const Options& o) {
         std::printf("  klient testowy przegapił %llu okres(y) po %llu okresach%s\n", static_cast<unsigned long long>(gap - 1),
                     static_cast<unsigned long long>(periods),
                     gap > bam::kOutputLeadBuffers ? " (dłużej niż wyprzedzenie wyjść: spodziewana cisza w strumieniu)" : "");
+        late_ranges.emplace_back(bam::AsioBridge::output_start(last_start + b, b), bam::AsioBridge::output_start(s, b) + b);
       }
       first = last_start + b;
     }
@@ -155,12 +166,18 @@ int loopback(const Options& o) {
     bridge.read_inputs(s, b, in_ptrs.data());
     h.client_heartbeat.fetch_add(1);
     ++periods;
+    if (o.stall_every > 0 && periods % o.stall_every == 0)
+      std::this_thread::sleep_for(std::chrono::microseconds(uint64_t(b) * 3'000'000 / bam::kSampleRate));
 
     if (bp::monotonic_ns() > warmup_end) {
       for (int ch = 0; ch < channels; ++ch) {
         const uint64_t lat = view.asio_route(ch / 2).delay;
         const uint64_t from = s - b - lat;
         for (uint32_t i = 0; i < b; ++i) {
+          if (written_late(from + i)) {
+            ++excused[ch];
+            continue;
+          }
           ++checked[ch];
           if (in[ch][i] != pattern(from + i, ch)) ++errors[ch];
         }
@@ -181,6 +198,14 @@ int loopback(const Options& o) {
   h.client_pid.compare_exchange_strong(me, 0);
 
   bool ok = true;
+  // a client that keeps missing its deadline does not test the service any more
+  const uint64_t excused_total = excused.empty() ? 0 : excused[0];
+  const uint64_t checked_total = checked.empty() ? 0 : checked[0];
+  if (excused_total * 50 > checked_total + excused_total) {
+    ok = false;
+    std::printf("Klient testowy spóźnił się z %llu próbkami na kanał (ponad 2%%): wynik niewiarygodny\n",
+                static_cast<unsigned long long>(excused_total));
+  }
   for (int ch = 0; ch < channels; ++ch) {
     const bool good = errors[ch] == 0 && checked[ch] > 0;
     ok &= good;
@@ -188,9 +213,12 @@ int loopback(const Options& o) {
       std::printf("Kanał %2d (%s): %llu błędnych próbek z %llu\n", ch, bam::channel_label(ch, "").c_str(),
                   static_cast<unsigned long long>(errors[ch]), static_cast<unsigned long long>(checked[ch]));
   }
-  std::printf("%s: %d kanałów, %llu okresów po %u próbek, %llu sprawdzonych próbek na kanał, pominięte okresy klienta: %llu\n",
+  std::printf("%s: %d kanałów, %llu okresów po %u próbek, %llu sprawdzonych próbek na kanał, pominięte okresy klienta: %llu",
               ok ? "OK" : "BŁĄD", channels, static_cast<unsigned long long>(periods), b,
-              static_cast<unsigned long long>(checked.empty() ? 0 : checked[0]), static_cast<unsigned long long>(missed));
+              static_cast<unsigned long long>(checked_total), static_cast<unsigned long long>(missed));
+  if (excused_total)
+    std::printf(" (%llu próbek na kanał zapisanych przez klienta po czasie nie liczono)", static_cast<unsigned long long>(excused_total));
+  std::printf("\n");
   if (!ok && stalls > 0)
     std::printf("Uwaga: klient testowy %llu raz(y) zatrzymał się dłużej niż wyprzedzenie wyjść (%u okresy). Takie przerwy dają ciszę\n"
                 "w strumieniu niezależnie od usługi; uruchom test na mniej obciążonym systemie albo z większym buforem (--buffer 256).\n",
@@ -201,7 +229,8 @@ int loopback(const Options& o) {
 void usage() {
   std::printf(
       "bounceaes-test --configure-loopback --password HASLO [--devices 32] [--port 8067] [--interface 127.0.0.1]\n"
-      "bounceaes-test --loopback [--seconds 30] [--devices 32] [--buffer 128]\n");
+      "bounceaes-test --loopback [--seconds 30] [--devices 32] [--buffer 128] [--stall-every N]\n"
+      "  --stall-every N  sprawdzenie samego testu: klient zacina się na 3 okresy co N okresów\n");
 }
 
 }  // namespace
@@ -216,6 +245,7 @@ int main(int argc, char** argv) {
     else if (a == "--devices") o.devices = std::atoi(next().c_str());
     else if (a == "--seconds") o.seconds = std::atoi(next().c_str());
     else if (a == "--buffer") o.buffer = static_cast<uint32_t>(std::atoi(next().c_str()));
+    else if (a == "--stall-every") o.stall_every = std::atoi(next().c_str());
     else if (a == "--password") o.password = next();
     else if (a == "--port") o.port = static_cast<uint16_t>(std::atoi(next().c_str()));
     else if (a == "--interface") o.interface_ip = next();
