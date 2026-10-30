@@ -28,11 +28,10 @@ int64_t median(std::deque<int64_t> v) {
   return v[v.size() / 2];
 }
 
-std::vector<uint8_t> port_key(const PortIdentity& p) {
-  std::vector<uint8_t> k(p.clock.bytes.begin(), p.clock.bytes.end());
-  k.push_back(static_cast<uint8_t>(p.port >> 8));
-  k.push_back(static_cast<uint8_t>(p.port));
-  return k;
+std::pair<uint64_t, uint16_t> port_key(const PortIdentity& p) {
+  uint64_t clock = 0;
+  for (uint8_t b : p.clock.bytes) clock = (clock << 8) | b;
+  return {clock, p.port};
 }
 }  // namespace
 

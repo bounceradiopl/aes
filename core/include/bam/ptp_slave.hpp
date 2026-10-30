@@ -61,7 +61,7 @@ class PtpSlave {
   MediaClock clock_;
   PtpState state_ = PtpState::Listening;
 
-  std::map<std::vector<uint8_t>, std::pair<PortIdentity, Foreign>> foreign_;  // key: port identity bytes
+  std::map<std::pair<uint64_t, uint16_t>, std::pair<PortIdentity, Foreign>> foreign_;  // key: port identity
   std::optional<PortIdentity> master_;
   ClockIdentity grandmaster_;
 
