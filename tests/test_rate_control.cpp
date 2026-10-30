@@ -56,7 +56,7 @@ TEST_CASE("drift resampler keeps a sine's level at ratio 1.0001") {
   for (int b = 0; b < 500; ++b) {
     for (int i = 0; i < kBlock; ++i) {
       const float v = static_cast<float>(0.5 * std::sin(phase));
-      phase += 2 * M_PI * 1000.0 / 48000.0;
+      phase += 2 * 3.14159265358979323846 * 1000.0 / 48000.0;
       in[i * 2] = in[i * 2 + 1] = v;
     }
     size_t offset = 0;
