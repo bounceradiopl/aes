@@ -1,0 +1,230 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BounceAES Master</title>
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <template id="brand-template">
+    <div class="brand">
+      <span class="brand-word">bounce</span>
+      <span class="brand-sub">AES Master</span>
+    </div>
+  </template>
+
+  <!-- Login / first-run password -->
+  <section id="auth" class="auth hidden">
+    <div class="auth-card">
+      <div class="brand-slot"></div>
+      <form id="login-form" class="hidden">
+        <label>Hasło
+          <input type="password" id="login-password" autocomplete="current-password" required>
+        </label>
+        <button type="submit" class="primary">Zaloguj</button>
+        <p class="form-error" id="login-error"></p>
+      </form>
+      <form id="setup-form" class="hidden">
+        <p class="hint">Pierwsze uruchomienie: ustaw hasło do panelu (co najmniej 8 znaków).</p>
+        <label>Nowe hasło
+          <input type="password" id="setup-password" autocomplete="new-password" minlength="8" required>
+        </label>
+        <label>Powtórz hasło
+          <input type="password" id="setup-password2" autocomplete="new-password" minlength="8" required>
+        </label>
+        <button type="submit" class="primary">Ustaw hasło</button>
+        <p class="form-error" id="setup-error"></p>
+      </form>
+      <p id="setup-remote" class="hint hidden">
+        Hasło do panelu nie jest jeszcze ustawione. Ustawia się je przy pierwszym otwarciu panelu na komputerze,
+        na którym działa usługa (adres <code>http://127.0.0.1:8067</code>).
+      </p>
+    </div>
+  </section>
+
+  <div id="app" class="hidden">
+    <header class="topbar">
+      <div class="brand-slot"></div>
+      <div class="pills">
+        <span class="pill" id="pill-ptp" title="Synchronizacja zegara PTP"><i></i><b>PTP</b><span>—</span></span>
+        <span class="pill" id="pill-asio" title="Aplikacja ASIO"><i></i><b>ASIO</b><span>—</span></span>
+        <span class="pill plain" id="pill-iface" title="Karta sieciowa AoIP"><b>Sieć</b><span>—</span></span>
+        <button class="ghost" id="logout">Wyloguj</button>
+      </div>
+    </header>
+
+    <nav class="tabs" role="tablist">
+      <a href="#config" data-tab="config">Konfiguracja</a>
+      <a href="#stats" data-tab="stats">Statystyki</a>
+      <a href="#logs" data-tab="logs">Logi</a>
+    </nav>
+
+    <main>
+      <!-- ================= Konfiguracja ================= -->
+      <section id="tab-config" class="tab">
+        <div class="card global">
+          <h2>Ustawienia globalne</h2>
+          <div class="grid">
+            <label>Karta sieciowa AoIP
+              <select id="g-iface"></select>
+            </label>
+            <label>Domena PTP
+              <input type="number" id="g-domain" min="0" max="127">
+            </label>
+            <label class="wide">Poziom nominalny PC
+              <span class="range-row">
+                <input type="range" id="g-level" min="-30" max="0" step="1">
+                <output id="g-level-out"></output>
+              </span>
+              <small id="g-level-hint"></small>
+            </label>
+            <label>Port panelu
+              <input type="number" id="g-port" min="1" max="65535">
+            </label>
+            <div class="actions-inline">
+              <button type="button" class="ghost" id="change-password">Zmień hasło</button>
+            </div>
+          </div>
+          <p class="field-error" data-issue="0"></p>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>Urządzenia</h2>
+            <label class="toggle"><input type="checkbox" id="only-active"> tylko aktywne</label>
+          </div>
+          <div class="table-wrap">
+            <table class="devices">
+              <thead>
+                <tr>
+                  <th class="c-num">#</th>
+                  <th>Aktywne</th>
+                  <th>Nazwa</th>
+                  <th>Wyjście (multicast)</th>
+                  <th>ptime</th>
+                  <th title="Wysyłaj ciszę, gdy aplikacja nie gra (Axia: KEEP CHANNEL ACTIVE)">Utrzymuj</th>
+                  <th>Wejście (źródło)</th>
+                  <th title="Opóźnienie odbioru">Opóźn. ms</th>
+                  <th>Poziomy we / wy</th>
+                </tr>
+              </thead>
+              <tbody id="device-rows"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= Statystyki ================= -->
+      <section id="tab-stats" class="tab hidden">
+        <div class="stats-top">
+          <div class="card">
+            <h2>Zegar PTP</h2>
+            <dl class="kv" id="ptp-kv"></dl>
+          </div>
+          <div class="card">
+            <h2>Usługa</h2>
+            <dl class="kv" id="svc-kv"></dl>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h2>Statystyki strumieni</h2>
+            <button class="ghost" id="reset-stats">Zeruj liczniki</button>
+          </div>
+          <div class="table-wrap">
+            <table class="stats">
+              <thead>
+                <tr>
+                  <th class="c-num">#</th><th>Nazwa</th>
+                  <th>TxPkts</th><th>TxErr</th><th>RxPkts</th><th>RxBytes</th>
+                  <th>RxUnderrun</th><th>RxOverrun</th><th>RxSeqErr</th><th>Jitter ms</th><th>Sygnał</th>
+                </tr>
+              </thead>
+              <tbody id="stats-rows"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= Logi ================= -->
+      <section id="tab-logs" class="tab hidden">
+        <div class="card">
+          <div class="card-head">
+            <h2>Dziennik zdarzeń</h2>
+            <button class="ghost" id="refresh-logs">Odśwież</button>
+          </div>
+          <div class="table-wrap">
+            <table class="logs"><tbody id="log-rows"></tbody></table>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div class="savebar hidden" id="savebar">
+      <span>Niezapisane zmiany</span>
+      <button class="ghost" id="discard">Odrzuć</button>
+      <button class="primary" id="save">Zapisz zmiany</button>
+    </div>
+    <div class="toasts" id="toasts"></div>
+  </div>
+
+  <!-- Dialogs -->
+  <dialog id="dlg-browse">
+    <form method="dialog">
+      <h3>Wybierz strumień z sieci <small id="browse-target"></small></h3>
+      <p class="hint">Strumienie AES67 ogłaszane w sieci (SAP). Lista odświeża się co kilka sekund.</p>
+      <div class="table-wrap tall">
+        <table class="streams">
+          <thead><tr><th>Nazwa</th><th>Źródło</th><th>Adres</th><th>Format</th><th></th></tr></thead>
+          <tbody id="browse-rows"></tbody>
+        </table>
+      </div>
+      <menu><button value="cancel" class="ghost">Zamknij</button></menu>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-paste">
+    <form method="dialog">
+      <h3>Wklej SDP źródła <small id="paste-target"></small></h3>
+      <p class="hint">Np. plik SDP z Orbana. Zostanie sprawdzony przy zapisie.</p>
+      <textarea id="paste-sdp" rows="16" spellcheck="false"></textarea>
+      <menu>
+        <button value="cancel" class="ghost">Anuluj</button>
+        <button value="ok" class="primary" id="paste-ok">Użyj</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-sdp">
+    <form method="dialog">
+      <h3>SDP wyjścia <small id="sdp-target"></small></h3>
+      <p class="hint">Skopiuj do odbiornika AES67 (np. Orban), jeśli nie korzysta z SAP.</p>
+      <textarea id="sdp-text" rows="16" readonly spellcheck="false"></textarea>
+      <menu>
+        <button type="button" class="ghost" id="sdp-copy">Kopiuj</button>
+        <button value="cancel" class="primary">Zamknij</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-password">
+    <form method="dialog" id="password-form">
+      <h3>Zmień hasło panelu</h3>
+      <label>Obecne hasło <input type="password" id="pw-current" autocomplete="current-password"></label>
+      <label>Nowe hasło <input type="password" id="pw-new" autocomplete="new-password" minlength="8"></label>
+      <label>Powtórz nowe hasło <input type="password" id="pw-new2" autocomplete="new-password" minlength="8"></label>
+      <p class="form-error" id="pw-error"></p>
+      <menu>
+        <button value="cancel" class="ghost">Anuluj</button>
+        <button type="button" class="primary" id="pw-save">Zmień</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>
