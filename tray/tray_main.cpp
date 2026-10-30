@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // BounceAESTray: status icon in the notification area. Polls the service's public /api/health
 // endpoint and opens the web panel as an app window (Microsoft Edge --app), or in the default browser.
+// It also runs BounceAESAudioBridge.exe (Windows audio in this user session) and restarts it if it stops.
 #include <windows.h>
 #include <shellapi.h>
 #include <commctrl.h>
 #include <winhttp.h>
 
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -20,6 +22,7 @@ constexpr UINT WM_TRAY = WM_APP + 1;
 constexpr UINT_PTR kPollTimer = 1;
 constexpr UINT_PTR kPromoteTimer = 2;  // Explorer registers the icon settings shortly after NIM_ADD
 constexpr UINT kPollMs = 2000;
+constexpr UINT_PTR kBridgeTimer = 3;
 enum Command : UINT { kOpenPanel = 100, kOpenStats, kExit };
 enum class Health { Ok, Warning, Down };
 
@@ -30,6 +33,11 @@ HICON g_icons[3] = {};
 Health g_health = Health::Down;
 std::string g_ptp;
 bool g_first_poll = true;
+
+// ---- audio bridge supervision ----
+HANDLE g_bridge = nullptr;
+ULONGLONG g_bridge_start_at = 0;  // GetTickCount64 time of the next start attempt
+std::deque<ULONGLONG> g_bridge_failures;
 
 std::wstring program_data() {
   wchar_t buf[MAX_PATH];
@@ -185,12 +193,56 @@ void promote_icon() {
   RegCloseKey(root);
 }
 
+std::wstring bridge_path() {
+  wchar_t path[MAX_PATH];
+  const DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+  std::wstring p(path, n);
+  return p.substr(0, p.find_last_of(L"\\/") + 1) + L"BounceAESAudioBridge.exe";
+}
+
+void start_bridge() {
+  std::wstring cmd = L"\"" + bridge_path() + L"\"";
+  STARTUPINFOW si{};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi{};
+  if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+    g_bridge_start_at = GetTickCount64() + 30000;  // missing file or no rights: try again later
+    return;
+  }
+  CloseHandle(pi.hThread);
+  g_bridge = pi.hProcess;
+}
+
+// Restart after 2 s; after three failures within a minute wait 30 s.
+void supervise_bridge() {
+  const ULONGLONG now = GetTickCount64();
+  if (g_bridge && WaitForSingleObject(g_bridge, 0) == WAIT_OBJECT_0) {
+    CloseHandle(g_bridge);
+    g_bridge = nullptr;
+    g_bridge_failures.push_back(now);
+    while (!g_bridge_failures.empty() && now - g_bridge_failures.front() > 60000) g_bridge_failures.pop_front();
+    g_bridge_start_at = now + (g_bridge_failures.size() >= 3 ? 30000 : 2000);
+  }
+  if (!g_bridge && now >= g_bridge_start_at) start_bridge();
+}
+
+void stop_bridge() {
+  if (!g_bridge) return;
+  if (HANDLE quit = OpenEventW(EVENT_MODIFY_STATE, FALSE, L"Local\\BounceAESAudioBridge.quit")) {
+    SetEvent(quit);
+    CloseHandle(quit);
+  }
+  if (WaitForSingleObject(g_bridge, 3000) != WAIT_OBJECT_0) TerminateProcess(g_bridge, 0);
+  CloseHandle(g_bridge);
+  g_bridge = nullptr;
+}
+
 void show_menu(HWND hwnd) {
   HMENU menu = CreatePopupMenu();
   AppendMenuW(menu, MF_STRING, kOpenPanel, L"Otwórz panel");
   AppendMenuW(menu, MF_STRING, kOpenStats, L"Statystyki");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-  AppendMenuW(menu, MF_STRING, kExit, L"Zakończ (usługa działa dalej)");
+  AppendMenuW(menu, MF_STRING, kExit, L"Zakończ (usługa działa dalej, audio Windows zatrzymane)");
   SetMenuDefaultItem(menu, kOpenPanel, FALSE);
   POINT pt;
   GetCursorPos(&pt);
@@ -209,12 +261,16 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       add_icon(hwnd);
       SetTimer(hwnd, kPollTimer, kPollMs, nullptr);
       SetTimer(hwnd, kPromoteTimer, 5000, nullptr);
+      SetTimer(hwnd, kBridgeTimer, 1000, nullptr);
+      start_bridge();
       poll();
       return 0;
     case WM_TIMER:
       if (wp == kPromoteTimer) {
         KillTimer(hwnd, kPromoteTimer);
         promote_icon();
+      } else if (wp == kBridgeTimer) {
+        supervise_bridge();
       } else {
         poll();
       }
@@ -247,6 +303,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_DESTROY:
       KillTimer(hwnd, kPollTimer);
+      KillTimer(hwnd, kBridgeTimer);
+      stop_bridge();
       Shell_NotifyIconW(NIM_DELETE, &g_nid);
       PostQuitMessage(0);
       return 0;

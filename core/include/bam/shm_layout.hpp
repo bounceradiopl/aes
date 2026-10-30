@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 
+#include "bam/clock.hpp"
 #include "bam/constants.hpp"
 #include "bam/timeline.hpp"
 
@@ -52,6 +53,13 @@ struct ShmHeader {
   std::atomic<uint32_t> ptp_state;
   std::atomic<uint32_t> output_latency_frames;
   std::atomic<uint32_t> device_active_mask;      // which ASIO pairs carry audio (any route)
+  // media clock mapping (local monotonic ns <-> PTP ns), for processes that run their own audio
+  // clock (the audio bridge); QueryPerformanceCounter is system wide on Windows
+  std::atomic<uint32_t> clock_version;           // seqlock
+  std::atomic<int64_t> clock_base_local;
+  std::atomic<int64_t> clock_base_ptp;
+  std::atomic<uint64_t> clock_rate_bits;         // double
+  std::atomic<uint64_t> clock_step_generation;   // changes when the clock jumps
   ShmAsioRoute asio_routes[kDeviceCount];        // where each ASIO input pair reads from
   std::atomic<uint32_t> routes_version;          // seqlock over asio_routes
   std::atomic<uint32_t> names_version;           // seqlock over device_names
@@ -106,6 +114,9 @@ class ShmView {
     uint32_t delay = 0;
   };
   AsioRoute asio_route(int pair) const;  // seqlock read
+
+  void publish_clock(const MediaClock& clock, uint64_t step_generation);  // seqlock write
+  MediaClock read_clock(uint64_t* step_generation) const;                 // seqlock read
 
   void set_device_name(int dev, std::string_view name);
   std::string device_name(int dev) const;

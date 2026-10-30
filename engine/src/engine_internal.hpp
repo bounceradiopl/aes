@@ -10,6 +10,7 @@
 #include <thread>
 #include <vector>
 
+#include "bam/bridge_protocol.hpp"
 #include "bam/clock.hpp"
 #include "bam/engine.hpp"
 #include "bam/platform/event.hpp"
@@ -20,6 +21,7 @@
 namespace bam {
 
 inline constexpr uint32_t kWinSourceDelayFrames = 960;  // D_src of Windows sources: 20 ms bridge buffer
+inline constexpr int64_t kBridgeStaleNs = 2'000'000'000;  // bridge heartbeat older than this: no user session
 
 // One received AES67 subscription, written to net_in(2n-2, 2n-1).
 struct RxEntry {
@@ -113,6 +115,13 @@ struct Engine::Impl {
   std::array<std::atomic<uint32_t>, kDeviceCount> net_delay;  // subscription D_src for the meters
   std::atomic<int64_t> last_client_active_ns{0};
 
+  // audio bridge (user session process)
+  uint64_t bridge_generation = 0;  // config_mutex
+  std::string bridge_request;      // last request body without the generation; config_mutex
+  mutable std::mutex bridge_mutex;
+  mutable uint64_t bridge_hb_seen = 0;
+  mutable int64_t bridge_hb_changed_ns = 0;
+
   std::atomic<bool> running{false};
   int64_t started_ns = 0;
   std::vector<std::thread> threads;
@@ -130,6 +139,9 @@ struct Engine::Impl {
   std::string build_output_sdp(const Config& cfg, int output) const;
   ApplyResult commit(Config next);  // validate, save, apply; config_mutex held by the caller
   float source_peak(const std::string& source_id, const RuntimeSet& rt, int side) const;
+  void publish_bridge_request(const Config& cfg, const RuntimeSet& rt);
+  bool bridge_alive() const;
+  std::optional<BridgeReport> bridge_report() const;  // only while the bridge is alive
 
   // workers
   void ptp_loop();

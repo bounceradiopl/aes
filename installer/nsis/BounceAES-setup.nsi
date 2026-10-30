@@ -4,7 +4,7 @@
 ;
 ; Build (z katalogu installer/nsis):  makensis [-DPAYLOAD=<bezwzględna ścieżka do plików>] BounceAES-setup.nsi
 ;         ->  BounceAES-Master-setup.exe obok skryptu
-;         PAYLOAD = katalog z BounceAESService.exe, BounceAESAsio.dll, BounceAESTray.exe,
+;         PAYLOAD = katalog z BounceAESService.exe, BounceAESAsio.dll, BounceAESTray.exe, BounceAESAudioBridge.exe,
 ;                   bounceaes-test.exe, ptp-sim.exe (build MinGW albo MSVC).
 ;
 ; Kreator: Welcome -> Licencja (GPLv3) -> folder -> Instalacja -> Finish.
@@ -118,6 +118,7 @@ FunctionEnd
 ; Zatrzymuje składniki, żeby pliki nie były zablokowane (aktualizacja i deinstalacja).
 !macro STOP_COMPONENTS
   nsExec::ExecToLog 'taskkill /F /IM BounceAESTray.exe'
+  nsExec::ExecToLog 'taskkill /F /IM BounceAESAudioBridge.exe'
   Pop $0
   nsExec::ExecToLog 'sc.exe stop ${SERVICE}'
   Pop $0
@@ -134,6 +135,7 @@ Section "BounceAES Master" SecMain
   File "${PAYLOAD}\BounceAESService.exe"
   File "${PAYLOAD}\BounceAESAsio.dll"
   File "${PAYLOAD}\BounceAESTray.exe"
+  File "${PAYLOAD}\BounceAESAudioBridge.exe"
   File "${PAYLOAD}\bounceaes-test.exe"
   File "${PAYLOAD}\ptp-sim.exe"
   File "/oname=LICENSE.txt" "${ROOT}\LICENSE"
@@ -231,6 +233,7 @@ Section "Uninstall"
   Delete "$INSTDIR\BounceAESService.exe"
   Delete "$INSTDIR\BounceAESAsio.dll"
   Delete "$INSTDIR\BounceAESTray.exe"
+  Delete "$INSTDIR\BounceAESAudioBridge.exe"
   Delete "$INSTDIR\bounceaes-test.exe"
   Delete "$INSTDIR\ptp-sim.exe"
   Delete "$INSTDIR\LICENSE.txt"

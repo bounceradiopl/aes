@@ -132,6 +132,17 @@ TEST_CASE("shared memory view layout") {
   view.write_report(std::string(70000, 'y'));
   CHECK(view.read_report(nullptr).size() == bam::kBridgeBufferBytes - 1);
 
+  // media clock mapping seqlock
+  bam::MediaClock clk;
+  clk.set_mapping(1000, 1'700'000'000'000'000'000, 1.000025);
+  view.publish_clock(clk, 5);
+  uint64_t gen = 0;
+  auto back = view.read_clock(&gen);
+  CHECK(gen == 5);
+  CHECK(back.base_local() == 1000);
+  CHECK(back.rate() == 1.000025);
+  CHECK(back.sample_at(123456789) == clk.sample_at(123456789));
+
   view.set_device_name(3, "Kraków");
   CHECK(view.device_name(3) == "Kraków");
   CHECK(view.header().names_version.load() % 2 == 0);

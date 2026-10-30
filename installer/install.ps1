@@ -15,10 +15,10 @@ Write-Host "Instalacja BounceAES Master do $Dest"
 if (Get-Service $Service -ErrorAction SilentlyContinue) {
     Stop-Service $Service -Force -ErrorAction SilentlyContinue
 }
-Get-Process BounceAESTray -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process BounceAESTray, BounceAESAudioBridge -ErrorAction SilentlyContinue | Stop-Process -Force
 
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
-foreach ($f in 'BounceAESService.exe', 'BounceAESAsio.dll', 'BounceAESTray.exe') {
+foreach ($f in 'BounceAESService.exe', 'BounceAESAsio.dll', 'BounceAESTray.exe', 'BounceAESAudioBridge.exe') {
     Copy-Item (Join-Path $Source $f) $Dest -Force
 }
 

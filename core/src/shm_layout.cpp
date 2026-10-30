@@ -108,6 +108,41 @@ ShmView::AsioRoute ShmView::asio_route(int pair) const {
   return r;
 }
 
+void ShmView::publish_clock(const MediaClock& clock, uint64_t step_generation) {
+  auto& h = header();
+  const double rate = clock.rate();
+  uint64_t bits;
+  std::memcpy(&bits, &rate, sizeof(bits));
+  h.clock_version.fetch_add(1, std::memory_order_acq_rel);
+  h.clock_base_local.store(clock.base_local(), std::memory_order_relaxed);
+  h.clock_base_ptp.store(clock.base_ptp(), std::memory_order_relaxed);
+  h.clock_rate_bits.store(bits, std::memory_order_relaxed);
+  h.clock_step_generation.store(step_generation, std::memory_order_relaxed);
+  h.clock_version.fetch_add(1, std::memory_order_acq_rel);
+}
+
+MediaClock ShmView::read_clock(uint64_t* step_generation) const {
+  const auto& h = header();
+  int64_t local = 0, ptp = 0;
+  uint64_t bits = 0, gen = 0;
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    const uint32_t v1 = h.clock_version.load(std::memory_order_acquire);
+    if (v1 & 1) continue;
+    local = h.clock_base_local.load(std::memory_order_relaxed);
+    ptp = h.clock_base_ptp.load(std::memory_order_relaxed);
+    bits = h.clock_rate_bits.load(std::memory_order_relaxed);
+    gen = h.clock_step_generation.load(std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_acquire);
+    if (h.clock_version.load(std::memory_order_acquire) == v1) break;
+  }
+  double rate;
+  std::memcpy(&rate, &bits, sizeof(rate));
+  MediaClock c;
+  c.set_mapping(local, ptp, rate == 0 ? 1.0 : rate);
+  if (step_generation) *step_generation = gen;
+  return c;
+}
+
 void ShmView::set_device_name(int dev, std::string_view name) {
   auto& h = header();
   h.names_version.fetch_add(1, std::memory_order_acq_rel);

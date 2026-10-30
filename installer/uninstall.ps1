@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Continue'
 $Dest = Join-Path $env:ProgramFiles 'BounceAES Master'
 $Service = 'BounceAESMaster'
 
-Get-Process BounceAESTray -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process BounceAESTray, BounceAESAudioBridge -ErrorAction SilentlyContinue | Stop-Process -Force
 if (Get-Service $Service -ErrorAction SilentlyContinue) {
     Stop-Service $Service -Force
     sc.exe delete $Service | Out-Null

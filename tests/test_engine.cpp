@@ -2,10 +2,13 @@
 #include <doctest/doctest.h>
 
 #include <cstdio>
+#include <functional>
 #include <fstream>
+#include <map>
 #include <vector>
 
 #include "bam/asio_bridge.hpp"
+#include "bam/bridge_protocol.hpp"
 #include "bam/engine.hpp"
 #include "bam/platform/event.hpp"
 #include "bam/platform/process.hpp"
@@ -97,7 +100,8 @@ struct FakeAsioHost {
     view->header().client_pid = 0;
   }
 
-  void run(int64_t ns) {
+  // per_buffer(p): called for every buffer start p the host plays, e.g. to feed other rings in step
+  void run(int64_t ns, const std::function<void(uint64_t)>& per_buffer = {}) {
     auto& h = view->header();
     bam::AsioBridge bridge(*view);
     std::vector<std::vector<int32_t>> out(2, std::vector<int32_t>(128));
@@ -124,6 +128,7 @@ struct FakeAsioHost {
         for (int ch = 0; ch < 2; ++ch)
           for (uint32_t i = 0; i < 128; ++i) out[ch][i] = ramp_value(bam::AsioBridge::output_start(p, 128) + i, ch);
         bridge.write_outputs(p, 128, out_ptrs.data());
+        if (per_buffer) per_buffer(p);
       }
       last_start = s;
       h.client_heartbeat.fetch_add(1);
@@ -236,6 +241,75 @@ TEST_CASE("engine local ASIO loopback: asio-in:3 <- asio-out:1 at no delay, rero
   REQUIRE(t.engine->set_route("asio-in:3", std::nullopt).ok);
   rec = host.asio_input(2, 0);
   for (auto v : rec) CHECK(v == 0);
+}
+
+TEST_CASE("engine with a (fake) audio bridge: win-app:test.exe -> net-out:1, request and report") {
+  TestEngine t;
+  t.start();
+  {
+    auto v = t.engine->routing();
+    for (const auto& n : v.sources) CHECK(n.group != "win");  // no bridge: nothing from Windows
+  }
+  t.set_output(1, "239.69.205.1");
+  t.route("net-out:1", "win-app:Test.exe");
+  REQUIRE(t.subscribe_to_output(1) == 1);
+
+  FakeAsioHost host(t);
+  auto& h = host.view->header();
+  h.bridge_pid = bp::current_pid();
+  bam::BridgeReport report;
+  report.generation = 1;
+  report.endpoints.push_back({"{0.0.0.00000000}.{spk}", "Głośniki", true, true});
+  report.endpoints.push_back({"{0.0.1.00000000}.{mic}", "Mikrofon", false, true});
+  report.apps.push_back({"test.exe", "Test", 4242});
+  report.slots.push_back({"win-app:test.exe", true, "", {-6, -6}});
+  host.view->write_report(bam::to_json(report));
+
+  uint32_t req_version = 0;
+  auto req = bam::request_from_json(host.view->read_request(&req_version));
+  REQUIRE(req);
+  REQUIRE(req->sources.size() == 1);
+  CHECK(req->sources[0].slot == 0);
+  CHECK(req->sources[0].id == "win-app:test.exe");
+  const uint64_t first_generation = req->generation;
+  CHECK(h.win_src_delay_frames.load() == 960);
+
+  // The bridge writes the application's audio into win_src pair 0 on the media clock; here it
+  // is fed in step with the fake ASIO host's buffers and heartbeats like the real bridge.
+  std::vector<int32_t> l(128), r(128);
+  host.run(1'500'000'000, [&](uint64_t p) {
+    for (uint32_t i = 0; i < 128; ++i) {
+      l[i] = ramp_value(p + i, 0);
+      r[i] = ramp_value(p + i, 1);
+    }
+    host.view->win_src(0).write(p, l.data(), 128);
+    host.view->win_src(1).write(p, r.data(), 128);
+    h.bridge_heartbeat.fetch_add(1);
+  });
+  CHECK(host.mismatches_net_in(0, 960) == 0);  // output 1 carries the app D_src (20 ms) behind
+
+  auto v = t.engine->routing();
+  std::map<std::string, bam::RouteNode> nodes;
+  for (const auto& n : v.sources) nodes[n.id] = n;
+  for (const auto& n : v.dests) nodes["dst " + n.id] = n;
+  REQUIRE(nodes.count("win-app:test.exe"));
+  CHECK(nodes["win-app:test.exe"].available);
+  CHECK(nodes["win-app:test.exe"].name == "Test");
+  CHECK(nodes.count("win-loop:{0.0.0.00000000}.{spk}"));
+  CHECK(nodes.count("win-in:{0.0.1.00000000}.{mic}"));
+  CHECK(nodes.count("dst win-out:{0.0.0.00000000}.{spk}"));
+  CHECK(t.engine->status().bridge_connected);
+
+  // a Windows destination is announced to the bridge with its source ring
+  t.route("win-out:{0.0.0.00000000}.{spk}", "net-in:1");
+  req = bam::request_from_json(host.view->read_request(nullptr));
+  REQUIRE(req);
+  REQUIRE(req->dests.size() == 1);
+  CHECK(req->dests[0].kind == bam::ShmSource::Net);
+  CHECK(req->dests[0].pair == 0);
+  CHECK(req->dests[0].delay_frames == kRxDelay);
+  CHECK(req->generation == first_generation + 1);
+  h.bridge_pid = 0;
 }
 
 TEST_CASE("engine receives more subscriptions on one port than a socket may join") {

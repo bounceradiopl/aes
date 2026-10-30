@@ -289,6 +289,7 @@ void Engine::Impl::rebuild_runtime(const Config& cfg, bool force) {
   }
 
   publish_shared_config(cfg, *next);
+  publish_bridge_request(cfg, *next);
   {
     std::lock_guard lock(runtime_mutex);
     runtime = next;
@@ -317,6 +318,41 @@ void Engine::Impl::publish_shared_config(const Config& cfg, const RuntimeSet& rt
   h.device_active_mask.store(mask);
   h.output_latency_frames.store(max_ptime_frames);
   h.win_src_delay_frames.store(kWinSourceDelayFrames);
+}
+
+void Engine::Impl::publish_bridge_request(const Config& cfg, const RuntimeSet& rt) {
+  BridgeRequest req;
+  for (const auto& [id, slot] : rt.win_slots) req.sources.push_back({slot, id});
+  std::sort(req.sources.begin(), req.sources.end(), [](const auto& a, const auto& b) { return a.slot < b.slot; });
+  for (const auto& [dst, src] : cfg.routes) {
+    auto d = parse_dest(dst);
+    if (!d || d->kind != DestKind::WinOut) continue;
+    const ResolvedSource r = resolve(cfg, rt, src);
+    req.dests.push_back({dst, r.kind, r.pair, r.delay});
+  }
+  const std::string body = to_json(req);  // generation 0: compared without it
+  if (body == bridge_request) return;
+  bridge_request = body;
+  req.generation = ++bridge_generation;
+  view->write_request(to_json(req));
+}
+
+bool Engine::Impl::bridge_alive() const {
+  if (!view) return false;
+  auto& h = view->header();
+  const int64_t now = platform::monotonic_ns();
+  const uint64_t hb = h.bridge_heartbeat.load(std::memory_order_acquire);
+  std::lock_guard lock(bridge_mutex);
+  if (hb != bridge_hb_seen) {
+    bridge_hb_seen = hb;
+    bridge_hb_changed_ns = now;
+  }
+  return h.bridge_pid.load() != 0 && hb != 0 && now - bridge_hb_changed_ns < kBridgeStaleNs;
+}
+
+std::optional<BridgeReport> Engine::Impl::bridge_report() const {
+  if (!bridge_alive()) return std::nullopt;
+  return report_from_json(view->read_report(nullptr));
 }
 
 bool Engine::Impl::save_config(const Config& cfg, std::string* error) const {
@@ -698,9 +734,8 @@ EngineStatus Engine::status() const {
     auto& h = m.view->header();
     s.asio_connected = h.client_pid.load() != 0 && h.client_running.load() != 0;
     s.asio_buffer_frames = h.client_pid.load() != 0 ? h.buffer_frames.load() : 0;
-    const uint32_t bridge = h.bridge_pid.load();
-    s.bridge_connected = bridge != 0 && platform::process_alive(bridge);
   }
+  s.bridge_connected = m.bridge_alive();
   const bool client_recent = now - m.last_client_active_ns.load() < 1'000'000'000;
   std::vector<DiscoveredStream> discovered;
   {
@@ -760,11 +795,6 @@ RoutingView Engine::routing() const {
   RoutingView v;
   const Config cfg = config();
   const auto snap = m.snapshot();
-  bool bridge = false;
-  if (m.view) {
-    const uint32_t pid = m.view->header().bridge_pid.load();
-    bridge = pid != 0 && platform::process_alive(pid);
-  }
   v.routes = cfg.routes;
 
   auto peaks = [&](RouteNode& n, const std::string& source) {
@@ -787,16 +817,61 @@ RoutingView Engine::routing() const {
     peaks(n, id);
     v.sources.push_back(std::move(n));
   }
-  std::set<std::string> win_sources, win_dests;
-  for (const auto& [dst, src] : cfg.routes) {
-    if (auto s = parse_source(src); s && is_windows(*s)) win_sources.insert(src);
-    if (auto d = parse_dest(dst); d && is_windows(*d)) win_dests.insert(dst);
-  }
+  // Windows: what the bridge reports in this user session, plus anything routed that it does not know
+  const auto report = m.bridge_report();
+  const bool bridge = report.has_value();
   const std::string no_bridge = "Audio Windows: brak sesji użytkownika";
-  for (const auto& id : win_sources) {
-    const ResolvedSource r = m.resolve(cfg, *snap, id);
-    RouteNode n{id, id.substr(id.find(':') + 1), "win", r.available && bridge, bridge ? r.note : no_bridge, {}};
-    peaks(n, id);
+  std::map<std::string, const BridgeSlotState*> slot_state;
+  if (report)
+    for (const auto& st : report->slots) slot_state[st.id] = &st;
+  std::vector<RouteNode> win_sources, win_dests;
+  std::set<std::string> listed;
+  auto win_node = [&](const std::string& id, const std::string& name) {
+    RouteNode n{id, name, "win", bridge, bridge ? std::string() : no_bridge, {}};
+    if (auto it = slot_state.find(id); it != slot_state.end() && !it->second->ok) {
+      n.available = false;
+      n.note = it->second->reason;
+    }
+    return n;
+  };
+  if (report) {
+    for (const auto& a : report->apps) {
+      const std::string id = "win-app:" + a.exe;
+      if (!listed.insert(id).second) continue;
+      win_sources.push_back(win_node(id, a.name.empty() ? a.exe : a.name));
+    }
+    for (const auto& e : report->endpoints) {
+      if (e.render) {
+        win_sources.push_back(win_node("win-loop:" + e.id, "Odsłuch: " + e.name));
+        listed.insert("win-loop:" + e.id);
+        win_dests.push_back(win_node("win-out:" + e.id, e.name));
+        listed.insert("win-out:" + e.id);
+      } else {
+        win_sources.push_back(win_node("win-in:" + e.id, e.name));
+        listed.insert("win-in:" + e.id);
+      }
+    }
+  }
+  for (const auto& [dst, src] : cfg.routes) {
+    if (auto sp = parse_source(src); sp && is_windows(*sp) && listed.insert(src).second) {
+      RouteNode n = win_node(src, sp->key);
+      if (bridge && n.available) {
+        n.available = false;
+        n.note = sp->kind == SourceKind::WinApp ? "aplikacja nie działa" : "urządzenie niedostępne";
+      }
+      win_sources.push_back(std::move(n));
+    }
+    if (auto dp = parse_dest(dst); dp && is_windows(*dp) && listed.insert(dst).second) {
+      RouteNode n = win_node(dst, dp->key);
+      if (bridge) {
+        n.available = false;
+        n.note = "urządzenie niedostępne";
+      }
+      win_dests.push_back(std::move(n));
+    }
+  }
+  for (auto& n : win_sources) {
+    peaks(n, n.id);
     v.sources.push_back(std::move(n));
   }
 
@@ -816,9 +891,8 @@ RoutingView Engine::routing() const {
     peaks(n, it == cfg.routes.end() ? std::string() : it->second);
     v.dests.push_back(std::move(n));
   }
-  for (const auto& id : win_dests) {
-    RouteNode n{id, id.substr(id.find(':') + 1), "win", bridge, bridge ? std::string() : no_bridge, {}};
-    auto it = cfg.routes.find(id);
+  for (auto& n : win_dests) {
+    auto it = cfg.routes.find(n.id);
     peaks(n, it == cfg.routes.end() ? std::string() : it->second);
     v.dests.push_back(std::move(n));
   }

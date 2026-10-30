@@ -27,9 +27,22 @@ void Engine::Impl::period_loop() {
   int64_t last_liveness = 0;
   uint32_t last_pid = 0;
 
+  MediaClock published;
+  uint64_t published_generation = ~0ull;
+
   while (running) {
     h.heartbeat.fetch_add(1, std::memory_order_release);
     const int64_t now = platform::monotonic_ns();
+    {
+      const MediaClock c = clock.get();
+      const uint64_t g = clock.step_generation();
+      if (g != published_generation || c.base_local() != published.base_local() || c.base_ptp() != published.base_ptp() ||
+          c.rate() != published.rate()) {
+        view->publish_clock(c, g);
+        published = c;
+        published_generation = g;
+      }
+    }
     const uint32_t pid = h.client_pid.load(std::memory_order_acquire);
 
     if (pid != last_pid) {
@@ -86,6 +99,7 @@ void Engine::Impl::monitor_loop() {
   while (running) {
     for (int i = 0; i < 20 && running; ++i) platform::sleep_ns(100'000'000);
     if (!running) break;
+    bridge_alive();  // keeps the bridge heartbeat observation fresh
     std::string configured;
     {
       std::lock_guard lock(config_mutex);
