@@ -58,14 +58,15 @@ Wykonuj w oknie serwisowym, bo test wysyła strumienie do sieci AoIP.
    - *PTP*: Delay_Req co ~1 s z identyfikatora BounceAES, odpowiedzi Delay_Resp od grandmastera; komputer w roli slave nie wysyła Announce ani Sync;
    - *SAP*: ogłoszenia co 30 s, a przy wyłączeniu wyjścia pakiet usunięcia.
 
-## 4. Lista kontrolna Windows 11 (wersja 1.1)
+## 4. Lista kontrolna Windows 11 (wersja 1.1.1)
 
 Ręcznie, na komputerze z Windows 11, z zalogowanym użytkownikiem (ikona w zasobniku uruchamia BounceAES Audio Bridge). Pasek panelu ma pokazywać **Windows: aktywne**.
 
 | # | Scenariusz | Oczekiwany wynik |
 |---|---|---|
 | 1 | Przeglądarka → AoIP: odtwórz dźwięk w Chrome, w Routingu połącz **Windows → Chrome** z wyjściem AoIP 1, odbierz wyjście na drugim komputerze albo w Orbanie | czysty dźwięk; po zamknięciu i ponownym otwarciu Chrome dźwięk wraca w ciągu ~2 s |
-| 2 | AoIP → VB-CABLE → nagrywanie: subskrypcja → **Windows → CABLE Input**, nagrywanie z *CABLE Output* w Audacity | nagranie bez trzasków, bez narastającego opóźnienia |
+| 2 | AoIP → VB-CABLE → nagrywanie: **Wirtualne karty… → Z sieci**, „CABLE: do aplikacji” ← subskrypcja → *Odbieraj*; nagrywanie z *CABLE Output* w Audacity | nagranie bez trzasków, bez narastającego opóźnienia |
+| 2a | Aplikacja → VB-CABLE → AoIP: mAirList (lub Audacity) gra na *CABLE Input*; **Wirtualne karty… → Do sieci**, „CABLE: z aplikacji” → wyjście 1 → *Wysyłaj* | czysty dźwięk na odbiorniku; w siatce karta na początku grupy Windows z oznaczeniem „wirt.”; brak osobnego wiersza „CABLE Output” |
 | 3 | Odsłuch: subskrypcja → **Windows → Słuchawki** | czysty dźwięk; po odłączeniu słuchawek kratka szarzeje („urządzenie niedostępne”), po podłączeniu dźwięk wraca |
 | 4 | Dwa komputery Bounce, oba w roli „automatyczna” | dokładnie jeden pokazuje **PTP: master**, drugi **PTP: slave**; strumień z A odbierany na B bez RxUnderrun; po zatrzymaniu usługi na masterze drugi przejmuje rolę w ≤ 10 s |
 | 5 | Orban (albo inne urządzenie AES67 z zegarem PTP) w sieci | oba komputery są slave'ami Orbana; w SDP wyjść (`a=ts-refclk`) identyfikator Orbana |

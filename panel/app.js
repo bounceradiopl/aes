@@ -174,12 +174,15 @@ async function loadRouting() {
   try {
     const r = await api("/api/routing");
     if (!r.ok) return;
-    const before = state.routing ? JSON.stringify({ s: state.routing.sources.map((n) => [n.id, n.name, n.available, n.note]),
-      d: state.routing.dests.map((n) => [n.id, n.name, n.available, n.note]), r: state.routing.routes }) : "";
+    const before = state.routing ? JSON.stringify({ s: state.routing.sources.map((n) => [n.id, n.name, n.available, n.note, n.virtual]),
+      d: state.routing.dests.map((n) => [n.id, n.name, n.available, n.note, n.virtual]), r: state.routing.routes }) : "";
     state.routing = r.data;
-    const after = JSON.stringify({ s: r.data.sources.map((n) => [n.id, n.name, n.available, n.note]),
-      d: r.data.dests.map((n) => [n.id, n.name, n.available, n.note]), r: r.data.routes });
-    if (before !== after) renderMatrix(); else applyRoutingMeters();
+    const after = JSON.stringify({ s: r.data.sources.map((n) => [n.id, n.name, n.available, n.note, n.virtual]),
+      d: r.data.dests.map((n) => [n.id, n.name, n.available, n.note, n.virtual]), r: r.data.routes });
+    if (before !== after) {
+      renderMatrix();
+      if ($("#dlg-virtual").open) renderVirtual();
+    } else applyRoutingMeters();
   } catch { /* shown by the auth screen */ }
 }
 
@@ -243,7 +246,7 @@ function renderMatrix() {
       continue;
     }
     const n = c.node;
-    head2.append(el("th", { class: "dst" + (c.first ? " first" : "") + (n.available ? "" : " unavailable"), title: `${n.name}\n${n.id}${n.note ? "\n" + n.note : ""}` },
+    head2.append(el("th", { class: "dst" + (c.first ? " first" : "") + (n.available ? "" : " unavailable"), title: `${n.name}\n${n.id}${virtualText(n)}${n.note ? "\n" + n.note : ""}` },
       el("span", {}, n.name)));
   }
 
@@ -258,8 +261,8 @@ function renderMatrix() {
     if (!g.collapsed) {
       for (const n of g.nodes) {
         const row = el("tr", { class: n.available ? "" : "unavailable" },
-          el("th", { class: "src", title: `${n.id}${n.note ? "\n" + n.note : ""}` },
-            el("span", { class: "src-name" }, n.name), meter(`r-${n.id}`)));
+          el("th", { class: "src", title: `${n.id}${virtualText(n)}${n.note ? "\n" + n.note : ""}` },
+            el("span", { class: "src-name" }, n.name), n.virtual ? el("i", { class: "vtag" }, "wirt.") : null, meter(`r-${n.id}`)));
         for (const c of columns) {
           if (c.placeholder) { row.append(el("td", { class: "cell placeholder first" })); continue; }
           const on = v.routes[c.node.id] === n.id;
@@ -295,14 +298,28 @@ function applyRoutingMeters() {
   }
 }
 
+// "ASIO: Warszawa" — the group tells apart a source and an output that share a name
+function sourceLabel(id) {
+  const group = GROUPS.find(([g]) => g === state.routing?.sources.find((n) => n.id === id)?.group);
+  return group ? `${group[1]}: ${sourceName(id)}` : sourceName(id);
+}
+
+function virtualText(n) { return n.virtual ? `\nwirtualna karta: ${n.virtual}` : ""; }
+
 async function toggleRoute(dst, src) {
   const on = state.routing.routes[dst] === src;
-  const r = await api("/api/routing", { method: "PUT", body: JSON.stringify({ dst, src: on ? null : src }) });
-  if (!r.ok) { toast(issuesText(r, "Nie można zmienić połączenia"), "err"); return; }
+  return setRoute(dst, on ? null : src);
+}
+
+async function setRoute(dst, src) {
+  const r = await api("/api/routing", { method: "PUT", body: JSON.stringify({ dst, src }) });
+  if (!r.ok) { toast(issuesText(r, "Nie można zmienić połączenia"), "err"); return false; }
   for (const n of r.data.notices || []) toast(n, "warn");
   state.routing = r.data.routing;
   syncRoutes(r.data.routing.routes);
   renderMatrix();
+  if ($("#dlg-virtual").open) renderVirtual();
+  return true;
 }
 
 // Routes change immediately (routing tab), so both the saved config and the draft follow them.
@@ -311,6 +328,68 @@ function syncRoutes(routes) {
   if (state.draft) state.draft.routes = clone(routes);
   if (state.draft) renderOutputs();
 }
+
+// ---------------------------------------------------------------- virtual sound cards
+// Quick routes between virtual cards (VB-CABLE, ...) and AoIP: the same routes as the matrix.
+function renderVirtual() {
+  const v = state.routing;
+  const box = $("#virtual-body");
+  if (!v) { box.replaceChildren(); return; }
+  const vSources = v.sources.filter((n) => n.virtual);
+  const vDests = v.dests.filter((n) => n.virtual);
+  const outputs = v.dests.filter((n) => n.group === "net");
+  const netSources = v.sources.filter((n) => n.group === "net");
+  const bridgeDown = state.live && !state.live.bridge?.connected;
+  if (!vSources.length && !vDests.length) {
+    box.replaceChildren(el("p", { class: "hint" }, bridgeDown
+      ? "Audio Windows nie działa: ikona BounceAES Master w zasobniku uruchamia je po zalogowaniu użytkownika."
+      : "Nie wykryto wirtualnej karty. Zainstaluj darmowy VB-CABLE (vb-audio.com/Cable) jako administrator, uruchom komputer ponownie i ustaw CABLE Input oraz CABLE Output na 48 000 Hz."));
+    return;
+  }
+  const feeding = (src) => outputs.filter((o) => v.routes[o.id] === src).map((o) => o.name);
+  const option = (value, text) => el("option", { value }, text);
+
+  const sendRows = vSources.map((n) => {
+    const sel = el("select", { "aria-label": `Wyjście AoIP dla ${n.name}` },
+      ...outputs.map((o) => option(o.id, v.routes[o.id] && v.routes[o.id] !== n.id ? `${o.name} — teraz gra ${sourceLabel(v.routes[o.id])}` : o.name)));
+    const free = outputs.find((o) => !v.routes[o.id]);
+    if (free) sel.value = free.id;
+    const now = feeding(n.id);
+    return el("tr", {},
+      el("td", {}, n.name, el("div", { class: "hint" }, n.virtual)),
+      el("td", {}, now.length ? now.join(", ") : el("span", { class: "hint" }, "—")),
+      el("td", {}, outputs.length ? sel : el("span", { class: "hint" }, "brak włączonych wyjść")),
+      el("td", {}, outputs.length ? el("button", { type: "button", class: "mini primary", onclick: () => setRoute(sel.value, n.id) }, "Wysyłaj") : null));
+  });
+  const recvRows = vDests.map((d) => {
+    const cur = v.routes[d.id];
+    const sel = el("select", { "aria-label": `Źródło dla ${d.name}` }, ...netSources.map((s) => option(s.id, s.name)));
+    if (cur && netSources.some((s) => s.id === cur)) sel.value = cur;
+    return el("tr", {},
+      el("td", {}, d.name, el("div", { class: "hint" }, d.virtual)),
+      el("td", {}, cur ? sourceLabel(cur) : el("span", { class: "hint" }, "—")),
+      el("td", {}, netSources.length ? sel : el("span", { class: "hint" }, "brak subskrypcji")),
+      el("td", {},
+        netSources.length ? el("button", { type: "button", class: "mini primary", onclick: () => setRoute(d.id, sel.value) }, "Odbieraj") : null,
+        cur ? el("button", { type: "button", class: "mini", onclick: () => setRoute(d.id, null) }, "Rozłącz") : null));
+  });
+  const table = (caption, hint, head, rows) => [
+    el("h4", { class: "virtual-head" }, caption), el("p", { class: "hint" }, hint),
+    el("div", { class: "table-wrap" }, el("table", { class: "streams" },
+      el("thead", {}, el("tr", {}, ...head.map((h) => el("th", {}, h)))),
+      el("tbody", {}, ...(rows.length ? rows : [el("tr", {}, el("td", { colSpan: 4, class: "hint" }, "brak"))]))))];
+  box.replaceChildren(
+    ...table("Do sieci", "Aplikacja gra na wirtualnej karcie (np. CABLE Input), dźwięk idzie na wyjście AoIP.",
+      ["Karta", "Teraz na", "Wyjście AoIP", ""], sendRows),
+    ...table("Z sieci", "Strumień AoIP trafia na kartę; aplikacja nagrywa z jej drugiego końca (np. CABLE Output).",
+      ["Karta", "Teraz gra", "Subskrypcja", ""], recvRows));
+}
+
+$("#open-virtual").addEventListener("click", async () => {
+  await loadRouting();
+  renderVirtual();
+  $("#dlg-virtual").showModal();
+});
 
 $("#only-used").addEventListener("change", renderMatrix);
 $("#add-source").addEventListener("click", () => openBrowse());

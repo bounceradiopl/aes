@@ -64,6 +64,7 @@ struct RouteNode {
   bool available = true;
   std::string note;   // why it is unavailable, or extra info
   float peak_db[2] = {-120, -120};
+  std::string virtual_device;  // family of a recognised virtual sound card ("VB-CABLE"), else empty
 };
 
 struct RoutingView {

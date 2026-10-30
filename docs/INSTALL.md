@@ -98,13 +98,14 @@ Siatka jak w Dante Controller: **wiersze to źródła, kolumny to cele**. Klikni
 | ASIO | to, co aplikacja ASIO gra na „BounceAES NN” |
 | Windows: aplikacja | dźwięk jednego programu (np. Chrome, Spotify), przechwytywany wprost z procesu — **Windows 11** |
 | Windows: Odsłuch: urządzenie | wszystko, co Windows gra na danym urządzeniu (loopback) |
-| Windows: urządzenie nagrywające | mikrofon, wejście liniowe, CABLE Output |
+| Windows: wirtualna karta „…: z aplikacji” | to, co aplikacje grają na wirtualnej karcie (np. CABLE Input) |
+| Windows: urządzenie nagrywające | mikrofon, wejście liniowe |
 
 | Cel | Co to jest |
 |---|---|
 | Sieć AoIP | wyjścia AoIP |
 | ASIO | wejścia „BounceAES NN”, z których nagrywa aplikacja ASIO |
-| Windows | urządzenia odtwarzające: słuchawki, głośniki, CABLE Input |
+| Windows | urządzenia odtwarzające: słuchawki, głośniki; wirtualna karta „…: do aplikacji” |
 
 Opóźnienie połączenia zależy od źródła: subskrypcja — jej opóźnienie odbioru; ASIO — jeden bufor; Windows — 20 ms (bufor urządzenia i dopasowanie zegara).
 
@@ -116,15 +117,20 @@ Zalecenia:
 - Dźwięk przeglądarki do AoIP: w siatce połącz **Windows → Chrome** (albo Edge, Firefox) z wyjściem AoIP. Nie trzeba zmieniać urządzenia w samej przeglądarce.
 - Odsłuch strumienia AoIP: połącz subskrypcję z celem **Windows → Słuchawki**.
 
-### VB-CABLE: wirtualna karta dla aplikacji, które jej wymagają
-Część programów (np. komunikatory, programy do nagrywania) potrzebuje urządzenia audio do wyboru w swoich ustawieniach. Do tego służy darmowy **VB-CABLE** (VB-Audio, donationware), instalowany osobno:
+### Wirtualne karty (VB-CABLE): dla aplikacji, które wymagają karty dźwiękowej
+Część programów (np. komunikatory, programy do nagrywania, mAirList bez ASIO) potrzebuje urządzenia audio do wyboru w swoich ustawieniach. Do tego służy darmowy **VB-CABLE** (VB-Audio, donationware, podpisany przez Microsoft — działa przy włączonym Secure Boot). Licencja VB-Audio nie pozwala dołączyć go do instalatora, więc instaluje się go osobno (link jest też na ostatniej stronie instalatora):
 
-1. Pobierz VB-CABLE Driver Pack ze strony vb-audio.com, rozpakuj i uruchom `VBCABLE_Setup_x64.exe` jako administrator → *Install Driver*. Uruchom komputer ponownie.
+1. Pobierz VB-CABLE Driver Pack ze strony vb-audio.com/Cable, rozpakuj i uruchom `VBCABLE_Setup_x64.exe` jako administrator → *Install Driver*. Uruchom komputer ponownie.
 2. W Panelu dźwięku ustaw **CABLE Input** (odtwarzanie) i **CABLE Output** (nagrywanie) na 48 000 Hz, 24 bity.
-3. **Aplikacja → AoIP:** w aplikacji wybierz wyjście *CABLE Input*; w siatce połącz **Windows → Odsłuch: CABLE Input** (albo **CABLE Output**) z wyjściem AoIP.
-4. **AoIP → aplikacja:** w siatce połącz subskrypcję z celem **Windows → CABLE Input**; w aplikacji wybierz wejście *CABLE Output*.
+3. W panelu BounceAES: **Routing → Wirtualne karty…**
+   - **Do sieci:** przy „CABLE: z aplikacji” wybierz wyjście AoIP → *Wysyłaj*. W aplikacji wybierz wyjście *CABLE Input*.
+   - **Z sieci:** przy „CABLE: do aplikacji” wybierz subskrypcję → *Odbieraj*. W aplikacji wybierz wejście *CABLE Output*.
 
-Jeden VB-CABLE to jedna para stereo; kolejne kable (A+B, C+D) VB-Audio udostępnia za dobrowolną opłatą.
+To samo widać w siatce: wirtualne karty są na początku grupy Windows, z oznaczeniem „wirt.”. Drugi koniec kabla (CABLE Output) nie jest pokazywany jako osobne źródło, bo niesie ten sam dźwięk z większym opóźnieniem; połączenia z wersji 1.1 z „CABLE Output” działają dalej i pozostają widoczne.
+
+Rozpoznawane wirtualne karty (po nazwie sterownika, także po zmianie nazwy urządzenia w Windows): VB-CABLE, CABLE-A…D, Hi-Fi Cable, Voicemeeter, Virtual Audio Cable (Line N), Virtual Audio Driver, Steam Streaming, Scream. Jeden VB-CABLE to jedna para stereo; kolejne kable (A+B, C+D) VB-Audio udostępnia za dobrowolną opłatą.
+
+**Otwarte sterowniki (Virtual Audio Driver, Scream).** Stan na październik 2026: nie mają podpisu Microsoftu i na Windows 11 z Secure Boot kończą się błędem 52 („Windows nie może zweryfikować podpisu”). Działają tylko w trybie testowym Windows (wyłączony Secure Boot, `bcdedit /set testsigning on`), czego nie zalecamy na komputerach emisyjnych. Gdy taki sterownik dostanie podpis, wystarczy go zainstalować — BounceAES Master rozpozna go bez aktualizacji.
 
 ### Dwa komputery z BounceAES Master
 1. Na komputerze A włącz wyjście i połącz je ze źródłem (np. ASIO albo aplikacją Windows). W sieci pojawi się strumień „STACJA-A / nazwa wyjścia”.

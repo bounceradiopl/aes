@@ -25,6 +25,6 @@ inline constexpr const char* kPtpGroup = "224.0.1.129";
 inline constexpr int kMulticastTtl = 15;
 
 inline constexpr const char* kProductName = "BounceAES Master";
-inline constexpr const char* kVersion = "1.1.0";
+inline constexpr const char* kVersion = "1.1.1";
 
 }  // namespace bam

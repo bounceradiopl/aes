@@ -4,7 +4,7 @@ Otwarty (GPLv3) sterownik audio **AES67** dla **Windows 10/11 x64** z interfejse
 
 - **32 wyjścia i 32 subskrypcje stereo**, każde jako osobny strumień AES67 (RTP L24/48 kHz, multicast), oraz 32 + 32 pary ASIO.
 - **Routing jak w Dante Controller**: siatka źródła × cele. Dowolne źródło (subskrypcja AoIP, wyjście ASIO, aplikacja Windows, urządzenie Windows) do dowolnego celu (wyjście AoIP, wejście ASIO, urządzenie Windows), zmiana od razu, bez przerywania innych strumieni.
-- **Audio Windows bez sterownika jądra**: dźwięk dowolnej aplikacji (np. przeglądarki) przechwytywany wprost z procesu (Windows 11), odsłuch i wejścia urządzeń Windows, odtwarzanie strumieni AoIP na słuchawkach. Aplikacje, które wymagają karty dźwiękowej, korzystają z darmowego VB-CABLE.
+- **Audio Windows bez sterownika jądra**: dźwięk dowolnej aplikacji (np. przeglądarki) przechwytywany wprost z procesu (Windows 11), odsłuch i wejścia urządzeń Windows, odtwarzanie strumieni AoIP na słuchawkach. Aplikacje, które wymagają karty dźwiękowej, korzystają z darmowego VB-CABLE: panel rozpoznaje wirtualne karty (VB-CABLE, Voicemeeter, Virtual Audio Cable, Virtual Audio Driver i inne) i łączy je z AoIP jednym kliknięciem („Wirtualne karty…”).
 - **PTPv2** (IEEE 1588, profil AES67, E2E): komputer podąża za grandmasterem (Orban, Omnia, konsola) albo sam zostaje masterem, gdy w sieci nie ma lepszego zegara (BMCA, role: automatyczna, preferowany master, tylko slave).
 - **SAP**: wyjścia są ogłaszane jako „stacja / wyjście”, strumienie innych urządzeń i innych komputerów Bounce można dodać z listy.
 - **Panel WWW** wzorowany na oknie konfiguracji Axii, z logo Bounce. Działa w przeglądarce i jako okno aplikacji z ikony w zasobniku.

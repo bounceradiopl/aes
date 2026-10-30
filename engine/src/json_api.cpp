@@ -127,6 +127,7 @@ json routing_json(const RoutingView& v) {
                      {"group", n.group},
                      {"available", n.available},
                      {"note", n.note},
+                     {"virtual", n.virtual_device},
                      {"db", db_pair(n.peak_db)}});
     }
     return out;

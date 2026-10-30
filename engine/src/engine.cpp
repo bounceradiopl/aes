@@ -11,6 +11,7 @@
 #include "bam/meters.hpp"
 #include "bam/platform/process.hpp"
 #include "bam/platform/time.hpp"
+#include "bam/virtual_device.hpp"
 #include "engine_internal.hpp"
 
 namespace bam {
@@ -807,13 +808,13 @@ RoutingView Engine::routing() const {
     if (!sub.enabled) continue;
     const std::string id = "net-in:" + std::to_string(i + 1);
     const ResolvedSource r = m.resolve(cfg, *snap, id);
-    RouteNode n{id, sub.name.empty() ? "Subskrypcja " + two_digits(i + 1) : sub.name, "net", r.available, r.note, {}};
+    RouteNode n{id, sub.name.empty() ? "Subskrypcja " + two_digits(i + 1) : sub.name, "net", r.available, r.note, {}, {}};
     peaks(n, id);
     v.sources.push_back(std::move(n));
   }
   for (int i = 0; i < kDeviceCount; ++i) {
     const std::string id = "asio-out:" + std::to_string(i + 1);
-    RouteNode n{id, asio_label(cfg, i + 1), "asio", true, {}, {}};
+    RouteNode n{id, asio_label(cfg, i + 1), "asio", true, {}, {}, {}};
     peaks(n, id);
     v.sources.push_back(std::move(n));
   }
@@ -827,7 +828,7 @@ RoutingView Engine::routing() const {
   std::vector<RouteNode> win_sources, win_dests;
   std::set<std::string> listed;
   auto win_node = [&](const std::string& id, const std::string& name) {
-    RouteNode n{id, name, "win", bridge, bridge ? std::string() : no_bridge, {}};
+    RouteNode n{id, name, "win", bridge, bridge ? std::string() : no_bridge, {}, {}};
     if (auto it = slot_state.find(id); it != slot_state.end() && !it->second->ok) {
       n.available = false;
       n.note = it->second->reason;
@@ -840,15 +841,32 @@ RoutingView Engine::routing() const {
       if (!listed.insert(id).second) continue;
       win_sources.push_back(win_node(id, a.name.empty() ? a.exe : a.name));
     }
+    // Virtual sound cards: applications play into the render end, so its loopback is the source
+    // and the render end the destination; the capture end of a loop cable carries the same audio
+    // later and is listed only while something is routed from it.
+    std::set<std::string> cable_render_ends;
+    for (const auto& e : report->endpoints)
+      if (auto vd = classify_virtual_device(e.name); vd && e.render && !vd->pair_key.empty())
+        cable_render_ends.insert(vd->pair_key);
+    std::set<std::string> routed_sources;
+    for (const auto& [dst, src] : cfg.routes) routed_sources.insert(src);
     for (const auto& e : report->endpoints) {
+      const auto vd = classify_virtual_device(e.name);
+      const std::string label = vd && !vd->cable.empty() ? vd->cable : e.name;
+      auto tagged = [&](RouteNode n) {
+        if (vd) n.virtual_device = vd->family;
+        return n;
+      };
       if (e.render) {
-        win_sources.push_back(win_node("win-loop:" + e.id, "Odsłuch: " + e.name));
+        win_sources.push_back(tagged(win_node("win-loop:" + e.id, vd ? label + ": z aplikacji" : "Odsłuch: " + e.name)));
         listed.insert("win-loop:" + e.id);
-        win_dests.push_back(win_node("win-out:" + e.id, e.name));
+        win_dests.push_back(tagged(win_node("win-out:" + e.id, vd && !vd->cable.empty() ? label + ": do aplikacji" : e.name)));
         listed.insert("win-out:" + e.id);
       } else {
-        win_sources.push_back(win_node("win-in:" + e.id, e.name));
-        listed.insert("win-in:" + e.id);
+        const std::string id = "win-in:" + e.id;
+        if (vd && cable_render_ends.count(vd->pair_key) && !routed_sources.count(id)) continue;
+        win_sources.push_back(tagged(win_node(id, vd && !vd->cable.empty() ? label + ": wyjście kabla" : e.name)));
+        listed.insert(id);
       }
     }
   }
@@ -870,6 +888,12 @@ RoutingView Engine::routing() const {
       win_dests.push_back(std::move(n));
     }
   }
+  // virtual sound cards first: they are what a studio routes most
+  auto virtual_first = [](std::vector<RouteNode>& list) {
+    std::stable_partition(list.begin(), list.end(), [](const RouteNode& n) { return !n.virtual_device.empty(); });
+  };
+  virtual_first(win_sources);
+  virtual_first(win_dests);
   for (auto& n : win_sources) {
     peaks(n, n.id);
     v.sources.push_back(std::move(n));
@@ -879,14 +903,14 @@ RoutingView Engine::routing() const {
   for (int i = 0; i < kDeviceCount; ++i) {
     if (!cfg.outputs[i].enabled) continue;
     const std::string id = "net-out:" + std::to_string(i + 1);
-    RouteNode n{id, output_label(cfg, i + 1), "net", true, cfg.outputs[i].address, {}};
+    RouteNode n{id, output_label(cfg, i + 1), "net", true, cfg.outputs[i].address, {}, {}};
     auto it = cfg.routes.find(id);
     peaks(n, it == cfg.routes.end() ? std::string() : it->second);
     v.dests.push_back(std::move(n));
   }
   for (int i = 0; i < kDeviceCount; ++i) {
     const std::string id = "asio-in:" + std::to_string(i + 1);
-    RouteNode n{id, asio_label(cfg, i + 1), "asio", true, {}, {}};
+    RouteNode n{id, asio_label(cfg, i + 1), "asio", true, {}, {}, {}};
     auto it = cfg.routes.find(id);
     peaks(n, it == cfg.routes.end() ? std::string() : it->second);
     v.dests.push_back(std::move(n));

@@ -28,7 +28,7 @@ Unicode true
 
 !define APP "BounceAES Master"
 !define PUBLISHER "BOUNCE SP. Z O.O."
-!define VER "1.1.0"
+!define VER "1.1.1"
 !define SERVICE "BounceAESMaster"
 !define CLSID "{6B1F3C2A-8E4D-4B7A-9C51-2A7E0D4B3F10}"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\BounceAESMaster"
@@ -43,7 +43,7 @@ RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 InstallColors F72868 050505
 
-VIProductVersion "1.1.0.0"
+VIProductVersion "1.1.1.0"
 VIAddVersionKey "ProductName" "${APP}"
 VIAddVersionKey "CompanyName" "${PUBLISHER}"
 VIAddVersionKey "FileDescription" "${APP} - instalator"
@@ -74,6 +74,8 @@ VIAddVersionKey "LegalCopyright" "GPL-3.0-or-later"
 !define MUI_FINISHPAGE_SHOWREADME "${PANEL_URL}"
 !define MUI_FINISHPAGE_SHOWREADME_TEXT "$(OpenPanel)"
 !define MUI_FINISHPAGE_TEXT "$(FinishText)"
+!define MUI_FINISHPAGE_LINK "$(CableLink)"
+!define MUI_FINISHPAGE_LINK_LOCATION "https://vb-audio.com/Cable/"
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -94,10 +96,12 @@ LangString OpenPanel ${LANG_POLISH} "Otwórz panel w przeglądarce (ustaw hasło
 LangString OpenPanel ${LANG_ENGLISH} "Open the web panel (set the password)"
 LangString FinishText ${LANG_POLISH} "BounceAES Master został zainstalowany i działa.$\r$\n$\r$\nAutostart: usługa ze sterownikiem uruchamia się razem z Windows, ikona w zasobniku przy każdym logowaniu. Skrót $\"BounceAES Master$\" jest na pulpicie i w menu Start.$\r$\n$\r$\nW mAirList wybierz sterownik ASIO $\"BounceAES Master$\" (48 kHz, bufor 128)."
 LangString FinishText ${LANG_ENGLISH} "BounceAES Master has been installed and is running.$\r$\n$\r$\nAutostart: the driver service starts with Windows, the tray icon at every logon. A $\"BounceAES Master$\" shortcut is on the desktop and in the Start menu.$\r$\n$\r$\nIn mAirList select the ASIO driver $\"BounceAES Master$\" (48 kHz, buffer 128)."
+LangString CableLink ${LANG_POLISH} "Darmowa wirtualna karta VB-CABLE (dla aplikacji bez ASIO)"
+LangString CableLink ${LANG_ENGLISH} "Free VB-CABLE virtual sound card (for applications without ASIO)"
 LangString Need64 ${LANG_POLISH} "BounceAES Master wymaga 64-bitowego systemu Windows 10 lub 11."
 LangString Need64 ${LANG_ENGLISH} "BounceAES Master requires 64-bit Windows 10 or 11."
 LangString PtpWarn ${LANG_POLISH} "Włączony jest klient PTP usługi czasu Windows (w32time). Zajmuje on porty 319/320 i uniemożliwi synchronizację BounceAES Master.$\r$\n$\r$\nWyłącz go po instalacji (opis w INSTRUKCJA.md, rozdział 8)."
-LangString PtpWarn ${LANG_ENGLISH} "The Windows Time service PTP client (w32time) is enabled. It occupies ports 319/320 and prevents BounceAES Master from synchronising.$\r$\n$\r$\nDisable it after installation (see INSTALL.md, section 6)."
+LangString PtpWarn ${LANG_ENGLISH} "The Windows Time service PTP client (w32time) is enabled. It occupies ports 319/320 and prevents BounceAES Master from synchronising.$\r$\n$\r$\nDisable it after installation (see INSTALL.md, section 8)."
 
 Function .onInit
   ${IfNot} ${RunningX64}

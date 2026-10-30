@@ -74,6 +74,7 @@
             <h2>Routing</h2>
             <div class="head-tools">
               <label class="toggle"><input type="checkbox" id="only-used"> tylko używane</label>
+              <button type="button" class="ghost" id="open-virtual">Wirtualne karty…</button>
               <button type="button" class="ghost" id="add-source">Dodaj źródło…</button>
             </div>
           </div>
@@ -258,6 +259,17 @@
       </div>
       <menu>
         <button type="button" class="ghost" id="browse-paste">Wklej SDP…</button>
+        <button value="cancel" class="primary">Zamknij</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-virtual">
+    <form method="dialog">
+      <h3>Wirtualne karty <small>VB-CABLE i inne karty dla aplikacji Windows</small></h3>
+      <p class="hint">Aplikacja (np. mAirList, komunikator) wybiera wirtualną kartę jak zwykłą kartę dźwiękową. Tu łączysz ją ze strumieniami AoIP jednym kliknięciem; to samo widać później w siatce routingu.</p>
+      <div id="virtual-body"></div>
+      <menu>
         <button value="cancel" class="primary">Zamknij</button>
       </menu>
     </form>

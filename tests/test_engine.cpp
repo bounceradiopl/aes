@@ -312,6 +312,63 @@ TEST_CASE("engine with a (fake) audio bridge: win-app:test.exe -> net-out:1, req
   h.bridge_pid = 0;
 }
 
+TEST_CASE("engine routing view: virtual sound cards are labelled, listed first and paired") {
+  TestEngine t;
+  t.start();
+  FakeAsioHost host(t);
+  auto& h = host.view->header();
+  h.bridge_pid = bp::current_pid();
+  const std::string cable_in = "{0.0.0.00000000}.{cin}", cable_out = "{0.0.1.00000000}.{cout}";
+  bam::BridgeReport report;
+  report.generation = 1;
+  report.endpoints.push_back({"{0.0.0.00000000}.{spk}", "Głośniki (Realtek(R) Audio)", true, true});
+  report.endpoints.push_back({cable_in, "CABLE Input (VB-Audio Virtual Cable)", true, false});
+  report.endpoints.push_back({cable_out, "CABLE Output (VB-Audio Virtual Cable)", false, false});
+  report.endpoints.push_back({"{0.0.1.00000000}.{mic}", "Mikrofon (USB Audio CODEC)", false, true});
+  report.endpoints.push_back({"{0.0.0.00000000}.{vad}", "Speakers (Virtual Audio Driver)", true, false});
+  host.view->write_report(bam::to_json(report));
+  host.run(300'000'000, [&](uint64_t) { h.bridge_heartbeat.fetch_add(1); });
+
+  auto win_nodes = [](const std::vector<bam::RouteNode>& list) {
+    std::vector<bam::RouteNode> out;
+    for (const auto& n : list)
+      if (n.group == "win") out.push_back(n);
+    return out;
+  };
+  auto find = [](const std::vector<bam::RouteNode>& list, const std::string& id) -> const bam::RouteNode* {
+    for (const auto& n : list)
+      if (n.id == id) return &n;
+    return nullptr;
+  };
+  auto v = t.engine->routing();
+  auto src = win_nodes(v.sources), dst = win_nodes(v.dests);
+  REQUIRE(src.size() == 4);  // two loopbacks of render ends, the VAD loopback, the USB microphone
+  CHECK(src[0].id == "win-loop:" + cable_in);
+  CHECK(src[0].name == "CABLE: z aplikacji");
+  CHECK(src[0].virtual_device == "VB-CABLE");
+  CHECK(src[1].name == "Speakers (Virtual Audio Driver): z aplikacji");
+  CHECK(src[1].virtual_device == "Virtual Audio Driver");
+  CHECK(find(src, "win-in:" + cable_out) == nullptr);  // the cable's other end is the same audio
+  REQUIRE(find(src, "win-in:{0.0.1.00000000}.{mic}"));
+  CHECK(find(src, "win-in:{0.0.1.00000000}.{mic}")->virtual_device.empty());
+  REQUIRE(find(src, "win-loop:{0.0.0.00000000}.{spk}"));
+  CHECK(find(src, "win-loop:{0.0.0.00000000}.{spk}")->name == "Odsłuch: Głośniki (Realtek(R) Audio)");
+  REQUIRE(!dst.empty());
+  CHECK(dst[0].id == "win-out:" + cable_in);
+  CHECK(dst[0].name == "CABLE: do aplikacji");
+  CHECK(dst[0].virtual_device == "VB-CABLE");
+
+  // something already routed from the capture end stays visible and usable
+  t.set_output(1, "239.69.205.2");
+  t.route("net-out:1", "win-in:" + cable_out);
+  v = t.engine->routing();
+  const auto* routed = find(v.sources, "win-in:" + cable_out);
+  REQUIRE(routed);
+  CHECK(routed->name == "CABLE: wyjście kabla");
+  CHECK(routed->available);
+  h.bridge_pid = 0;
+}
+
 TEST_CASE("engine receives more subscriptions on one port than a socket may join") {
   TestEngine t;
   t.start();
