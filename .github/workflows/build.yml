@@ -46,17 +46,11 @@ jobs:
         run: cmake --build build --config Release
       - name: Tests
         run: ctest --test-dir build -C Release --output-on-failure
-      - name: Install WiX
+      - name: Build NSIS installer
+        shell: pwsh
         run: |
-          dotnet tool install --global wix --version 5.0.2
-          wix extension add -g WixToolset.Util.wixext/5.0.2
-          wix extension add -g WixToolset.Firewall.wixext/5.0.2
-      - name: Build MSI
-        working-directory: installer
-        run: >
-          wix build BounceAES.wxs -arch x64 -d BinDir=..\build\Release
-          -ext WixToolset.Util.wixext -ext WixToolset.Firewall.wixext
-          -o ..\BounceAES-Master-1.0.0-x64.msi
+          choco install nsis --no-progress -y
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /V2 /DPAYLOAD=..\..\build\Release installer\nsis\BounceAES-setup.nsi
       - name: Collect binaries
         shell: pwsh
         run: |
@@ -65,8 +59,8 @@ jobs:
           Copy-Item installer\install.ps1, installer\uninstall.ps1, LICENSE dist\
       - uses: actions/upload-artifact@v4
         with:
-          name: BounceAES-Master-msi
-          path: BounceAES-Master-1.0.0-x64.msi
+          name: BounceAES-Master-setup
+          path: installer/nsis/BounceAES-Master-setup.exe
       - uses: actions/upload-artifact@v4
         with:
           name: BounceAES-Master-binaries

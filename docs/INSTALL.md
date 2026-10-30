@@ -9,14 +9,16 @@
 
 ## 2. Instalacja
 
-1. Uruchom `BounceAES-Master-1.0.0-x64.msi` jako administrator.
+1. Uruchom `BounceAES-Master-setup.exe` i potwierdź uprawnienia administratora.
 2. Instalator:
    - kopiuje pliki do `C:\Program Files\BounceAES Master`,
-   - instaluje usługę **BounceAES Master** (`BounceAESMaster`, start automatyczny, restart po awarii po 5 s),
+   - instaluje usługę **BounceAES Master** (`BounceAESMaster`, start automatyczny razem z Windows, restart po awarii po 5 s),
    - rejestruje sterownik ASIO **BounceAES Master**,
    - dodaje regułę zapory dla usługi (RTP 5004, PTP 319/320, SAP 9875, panel 8067),
-   - dodaje ikonę w zasobniku do autostartu.
-3. Bez MSI (np. przy testowaniu buildu z CI): w PowerShellu jako administrator, w folderze z plikami, uruchom
+   - dodaje ikonę w zasobniku do autostartu (przy każdym logowaniu),
+   - tworzy skrót **BounceAES Master** na pulpicie i w menu Start.
+3. Pasek zadań: ikona BounceAES Master w obszarze powiadomień jest zawsze widoczna. Aby mieć też przypięty skrót, kliknij prawym przyciskiem skrót na pulpicie → *Pokaż więcej opcji* → *Przypnij do paska zadań* (Windows nie pozwala instalatorom robić tego samodzielnie).
+4. Bez instalatora (np. przy testowaniu buildu z CI): w PowerShellu jako administrator, w folderze z plikami, uruchom
    `powershell -ExecutionPolicy Bypass -File install.ps1`. Odinstalowanie: `uninstall.ps1`.
 
 Konfiguracja i logi znajdują się w `C:\ProgramData\BounceAES Master\` (`config.json`, `logs\bounceaes.log`). Ostrzeżenia i błędy trafiają też do Dziennika zdarzeń Windows (Aplikacja, źródło "BounceAES Master").

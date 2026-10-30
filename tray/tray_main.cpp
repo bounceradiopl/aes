@@ -18,6 +18,7 @@ namespace {
 
 constexpr UINT WM_TRAY = WM_APP + 1;
 constexpr UINT_PTR kPollTimer = 1;
+constexpr UINT_PTR kPromoteTimer = 2;  // Explorer registers the icon settings shortly after NIM_ADD
 constexpr UINT kPollMs = 2000;
 enum Command : UINT { kOpenPanel = 100, kOpenStats, kExit };
 enum class Health { Ok, Warning, Down };
@@ -151,6 +152,37 @@ void add_icon(HWND hwnd) {
   Shell_NotifyIconW(NIM_SETVERSION, &g_nid);
 }
 
+// Windows 11 hides new notification icons behind the ^ overflow. On first run, mark ours as
+// "always shown" (HKCU\Control Panel\NotifyIconSettings\<id>\IsPromoted). A choice the user
+// made later in Settings is respected: the value is only written when it does not exist yet.
+void promote_icon() {
+  wchar_t self[MAX_PATH];
+  if (!GetModuleFileNameW(nullptr, self, MAX_PATH)) return;
+  const std::wstring exe_name = std::filesystem::path(self).filename().wstring();
+  HKEY root;
+  if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\NotifyIconSettings", 0, KEY_READ, &root) != ERROR_SUCCESS) return;
+  wchar_t sub[256];
+  for (DWORD i = 0;; ++i) {
+    DWORD len = 256;
+    if (RegEnumKeyExW(root, i, sub, &len, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
+    HKEY key;
+    if (RegOpenKeyExW(root, sub, 0, KEY_READ | KEY_SET_VALUE, &key) != ERROR_SUCCESS) continue;
+    wchar_t path[1024];
+    DWORD size = sizeof(path), type = 0;
+    if (RegQueryValueExW(key, L"ExecutablePath", nullptr, &type, reinterpret_cast<BYTE*>(path), &size) == ERROR_SUCCESS &&
+        type == REG_SZ) {
+      const std::wstring p(path);
+      const bool ours = p.size() >= exe_name.size() && _wcsicmp(p.c_str() + p.size() - exe_name.size(), exe_name.c_str()) == 0;
+      if (ours && RegQueryValueExW(key, L"IsPromoted", nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) {
+        const DWORD one = 1;
+        RegSetValueExW(key, L"IsPromoted", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&one), sizeof(one));
+      }
+    }
+    RegCloseKey(key);
+  }
+  RegCloseKey(root);
+}
+
 void show_menu(HWND hwnd) {
   HMENU menu = CreatePopupMenu();
   AppendMenuW(menu, MF_STRING, kOpenPanel, L"Otwórz panel");
@@ -174,10 +206,16 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CREATE:
       add_icon(hwnd);
       SetTimer(hwnd, kPollTimer, kPollMs, nullptr);
+      SetTimer(hwnd, kPromoteTimer, 5000, nullptr);
       poll();
       return 0;
     case WM_TIMER:
-      poll();
+      if (wp == kPromoteTimer) {
+        KillTimer(hwnd, kPromoteTimer);
+        promote_icon();
+      } else {
+        poll();
+      }
       return 0;
     case WM_TRAY:
       switch (LOWORD(lp)) {
@@ -217,9 +255,13 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
-  HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\BounceAESMasterTray");
-  if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
   g_instance = instance;
+  HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\BounceAESMasterTray");
+  if (GetLastError() == ERROR_ALREADY_EXISTS) {
+    // Already running (e.g. started again from the desktop shortcut): just open the panel.
+    open_panel(L"");
+    return 0;
+  }
   g_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
   g_icons[static_cast<int>(Health::Ok)] = load_status_icon(2);
   g_icons[static_cast<int>(Health::Warning)] = load_status_icon(3);

@@ -3,3 +3,4 @@ build*/
 *.user
 .vs/
 out/
+installer/nsis/*.exe

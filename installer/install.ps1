@@ -45,6 +45,13 @@ New-ItemProperty -Force -Path $evt -Name TypesSupported -PropertyType DWord -Val
 netsh advfirewall firewall delete rule name="BounceAES Master" | Out-Null
 netsh advfirewall firewall add rule name="BounceAES Master" dir=in action=allow program="$exe" enable=yes profile=any | Out-Null
 
+# Desktop shortcut (all users)
+$lnk = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'BounceAES Master.lnk'
+$sh = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+$sh.TargetPath = Join-Path $Dest 'BounceAESTray.exe'
+$sh.Description = 'Panel i stan BounceAES Master'
+$sh.Save()
+
 # Tray application at logon
 New-ItemProperty -Force -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'BounceAES Master' `
     -Value "`"$(Join-Path $Dest 'BounceAESTray.exe')`"" | Out-Null

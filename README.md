@@ -38,7 +38,7 @@ Każda próbka ma pozycję na wspólnej osi czasu, wyznaczonej przez zegar PTP (
 ## Instalacja
 
 Instrukcja: [docs/INSTALL.md](docs/INSTALL.md). W skrócie:
-1. Uruchom `BounceAES-Master-1.0.0-x64.msi` (z artefaktów CI).
+1. Uruchom `BounceAES-Master-setup.exe` (instalator NSIS, z artefaktów CI albo zbudowany lokalnie).
 2. Otwórz panel (ikona w zasobniku albo `http://127.0.0.1:8067`) i ustaw hasło.
 3. Wybierz kartę sieciową AoIP, włącz urządzenia, przypisz źródła wejść.
 4. W mAirList wybierz sterownik ASIO **BounceAES Master**.
@@ -53,7 +53,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-- **Windows (MSVC):** `cmake -S . -B build -A x64 && cmake --build build --config Release` (Visual Studio 2022 lub nowsze). Instalator MSI buduje WiX 5 (zobacz [.github/workflows/build.yml](.github/workflows/build.yml)).
+- **Windows (MSVC):** `cmake -S . -B build -A x64 && cmake --build build --config Release` (Visual Studio 2022 lub nowsze). Instalator buduje NSIS: `makensis -DPAYLOAD=<katalog z plikami .exe/.dll> installer/nsis/BounceAES-setup.nsi` (działa też na macOS/Linuksie, `brew install makensis`).
 - **Kompilacja skrośna z macOS/Linuksa:** `cmake -S . -B build-win -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake -DCMAKE_BUILD_TYPE=Release`.
 - **macOS/Linux:** usługę można uruchomić do testów: `build/BounceAESService --console --config moja.json`. Sterownik ASIO i aplikacja w zasobniku powstają tylko na Windows.
 
@@ -73,7 +73,7 @@ Panel pokazuje logotyp Bounce ([panel/logo.svg](panel/logo.svg), biała wersja) 
 | `tray/` | aplikacja w zasobniku |
 | `panel/` | panel WWW (HTML/CSS/JS) |
 | `tools/` | `bounceaes-test` (test pętli), `ptp-sim` (testowy master PTP) |
-| `installer/` | WiX (MSI), skrypty PowerShell |
+| `installer/` | instalator NSIS (`nsis/`), skrypty PowerShell |
 | `tests/` | testy jednostkowe i integracyjne (doctest) |
 
 ## Licencja
