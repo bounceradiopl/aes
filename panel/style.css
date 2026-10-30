@@ -119,8 +119,8 @@ table { border-collapse: collapse; width: 100%; }
 th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 500; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
 td { padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 tbody tr:hover td { background: rgba(255, 255, 255, 0.015); }
-tr.off td { color: var(--muted); }
-tr.off td:not(:first-child):not(:nth-child(2)) { opacity: 0.5; }
+tr.off td, tr.off input, tr.off select, tr.off .source .label { color: var(--muted); }  /* 5.6:1, still readable and editable */
+tr.off .meters, tr.off .dot { opacity: 0.4; }  /* non-text only */
 .c-num { width: 32px; color: var(--muted); font-family: var(--mono); font-size: 12px; }
 
 /* device table: fields read as text until hovered or edited */
