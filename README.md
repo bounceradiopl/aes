@@ -53,7 +53,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-- **Windows (MSVC):** `cmake -S . -B build -G "Visual Studio 17 2022" -A x64 && cmake --build build --config Release`. Instalator MSI buduje WiX 5 (zobacz [.github/workflows/build.yml](.github/workflows/build.yml)).
+- **Windows (MSVC):** `cmake -S . -B build -A x64 && cmake --build build --config Release` (Visual Studio 2022 lub nowsze). Instalator MSI buduje WiX 5 (zobacz [.github/workflows/build.yml](.github/workflows/build.yml)).
 - **Kompilacja skrośna z macOS/Linuksa:** `cmake -S . -B build-win -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake -DCMAKE_BUILD_TYPE=Release`.
 - **macOS/Linux:** usługę można uruchomić do testów: `build/BounceAESService --console --config moja.json`. Sterownik ASIO i aplikacja w zasobniku powstają tylko na Windows.
 
