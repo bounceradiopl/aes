@@ -37,18 +37,26 @@ void RxStream::on_packet(std::span<const uint8_t> bytes, uint64_t now_sample, in
   }
   const size_t frames = pkt->payload.size() / bytes_per_frame_;
 
-  if (started_ && pkt->header.sequence == last_seq_) return;  // duplicate (network or loopback)
-  if (started_ && pkt->header.sequence != static_cast<uint16_t>(last_seq_ + 1)) {
-    seq_errors_.fetch_add(1, std::memory_order_relaxed);
-  }
-  last_seq_ = pkt->header.sequence;
+  // A sequence number not newer than the last one is a duplicate or a reordered packet: its samples
+  // are still written (idempotent, may fill a hole) but it is not counted again.
+  const int16_t seq_delta = seq_started_ ? static_cast<int16_t>(pkt->header.sequence - last_seq_) : 1;
+  const bool fresh = seq_delta > 0;
 
   const uint64_t ts = unwrap_rtp_timestamp(pkt->header.timestamp, now_sample);
   const int64_t deadline = static_cast<int64_t>(now_sample) - latency_;
   if (static_cast<int64_t>(ts + frames) <= deadline ||
       static_cast<int64_t>(ts) > static_cast<int64_t>(now_sample) + kMaxFutureFrames) {
-    overruns_.fetch_add(1, std::memory_order_relaxed);
+    if (fresh) {
+      overruns_.fetch_add(1, std::memory_order_relaxed);
+      last_seq_ = pkt->header.sequence;
+      seq_started_ = true;
+    }
     return;
+  }
+  if (fresh) {
+    if (seq_delta > 1) seq_errors_.fetch_add(1, std::memory_order_relaxed);
+    last_seq_ = pkt->header.sequence;
+    seq_started_ = true;
   }
 
   if (scratch_l_.size() < frames) {
@@ -61,6 +69,8 @@ void RxStream::on_packet(std::span<const uint8_t> bytes, uint64_t now_sample, in
   if (sdp_.channels == 2) apply_gain(scratch_r_.data(), frames, gain_);
   left_.write(ts, scratch_l_.data(), frames);
   right_.write(ts, sdp_.channels == 2 ? scratch_r_.data() : scratch_l_.data(), frames);
+
+  if (!fresh) return;
 
   // RFC 3550 interarrival jitter, in samples.
   const double transit = static_cast<double>(static_cast<int64_t>(now_sample) - static_cast<int64_t>(ts));

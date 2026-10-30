@@ -47,6 +47,7 @@ class RxStream {
   std::atomic<int64_t> last_packet_ns_{0};
 
   bool started_ = false;
+  bool seq_started_ = false;
   uint16_t last_seq_ = 0;
   uint64_t highest_end_ = 0;
   uint64_t checked_until_ = 0;

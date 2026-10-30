@@ -135,8 +135,22 @@ TEST_CASE("duplicate packets are ignored") {
   rx.on_packet(p0, 48, 1);
   rx.on_packet(p0, 49, 2);
   rx.on_packet(make_packet(48, 11, 2, 48), 96, 3);
+  rx.on_packet(p0, 100, 4);  // late duplicate after a newer packet
   CHECK(rx.stats().seq_errors == 0);
+  CHECK(rx.stats().overruns == 0);
   CHECK(rx.stats().packets == 2);
+}
+
+TEST_CASE("reordered packet fills its hole without extra errors") {
+  RingStorage l, r;
+  bam::RxStream rx(make_sdp(2), l.ring(), r.ring(), 240, 1.0);
+  rx.on_packet(make_packet(0, 1, 2, 48), 48, 1);
+  rx.on_packet(make_packet(96, 3, 2, 48), 144, 2);  // gap: 1 error
+  rx.on_packet(make_packet(48, 2, 2, 48), 150, 3);  // late arrival of 2, still in time
+  CHECK(rx.stats().seq_errors == 1);
+  std::vector<int32_t> out(48);
+  l.ring().read(48, out.data(), 48);
+  CHECK(out[0] == (48 << 8));
 }
 
 TEST_CASE("underruns counted at deadline") {
