@@ -130,6 +130,7 @@ int main(int argc, char** argv) {
     }
   }
   if (config_path.empty()) config_path = default_config_path();
+  bam::platform::ensure_directory(dir_of(config_path));  // CreateDirectory does not create parents
   install_file_sink(dir_of(config_path) + kSep + "logs");
 
 #ifdef _WIN32

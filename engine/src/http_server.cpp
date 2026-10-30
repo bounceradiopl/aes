@@ -19,7 +19,7 @@ namespace {
 using api::json;
 
 constexpr const char* kCookie = "bam_session";
-constexpr int kHttpThreads = 16;
+constexpr int kHttpThreads = 32;  // every open panel tab holds one thread for its SSE feed
 
 void send_json(httplib::Response& res, const json& j, int status = 200) {
   res.status = status;

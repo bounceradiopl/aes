@@ -18,12 +18,24 @@
 namespace bam {
 
 struct RxEntry {
-  int device = 0;  // 1..32
+  int device = 0;   // 1..32
   std::string key;  // parameters that require a rebuild when changed
   std::string source_name;
   std::string error;
+  std::string group;   // multicast address the stream is received on
+  std::string source;  // sender address from a=source-filter, may be empty
+  uint16_t port = 0;
   std::unique_ptr<RxStream> stream;
+};
+
+// One receive socket per UDP port, shared by every input stream on that port. Datagrams are
+// dispatched to the streams by their destination group (and sender, when filtered), because on
+// Windows and Linux a socket sees every group any socket joined on that port.
+struct RxPort {
+  uint16_t port = 0;
+  std::string key;  // interface + sorted memberships; a different key means a new socket
   platform::UdpSocket socket;
+  std::vector<std::shared_ptr<RxEntry>> entries;
 };
 
 struct TxEntry {
@@ -37,6 +49,7 @@ struct TxEntry {
 // Immutable snapshot of the streams; swapped as a whole when the configuration changes.
 struct RuntimeSet {
   std::vector<std::shared_ptr<RxEntry>> rx;
+  std::vector<std::shared_ptr<RxPort>> rx_ports;
   std::vector<std::shared_ptr<TxEntry>> tx;
 };
 

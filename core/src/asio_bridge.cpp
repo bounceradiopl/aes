@@ -22,7 +22,7 @@ void AsioBridge::read_inputs(uint64_t period_start, uint32_t frames, int32_t* co
 
 void AsioBridge::write_outputs(uint64_t period_start, uint32_t frames, const int32_t* const* out_bufs) {
   for (int ch = 0; ch < kChannelCount; ++ch) {
-    view_.output(ch).write(period_start + frames, out_bufs[ch], frames);
+    view_.output(ch).write(output_start(period_start, frames), out_bufs[ch], frames);
   }
 }
 

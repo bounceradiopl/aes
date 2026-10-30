@@ -128,7 +128,7 @@ ASIOError BounceAsio::getLatencies(long* input_latency, long* output_latency) {
     if (mask & (1u << d)) min_rx = std::min(min_rx, header().rx_latency_frames[d].load());
   if (min_rx == 0xFFFFFFFF) min_rx = 240;
   if (input_latency) *input_latency = b + static_cast<long>(min_rx);
-  if (output_latency) *output_latency = b + static_cast<long>(header().output_latency_frames.load());
+  if (output_latency) *output_latency = static_cast<long>(kOutputLeadBuffers) * b + static_cast<long>(header().output_latency_frames.load());
   return ASE_OK;
 }
 

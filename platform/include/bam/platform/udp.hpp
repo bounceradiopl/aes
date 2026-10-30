@@ -21,8 +21,10 @@ std::vector<NetInterface> list_interfaces();
 std::string default_interface_ip();  // first up, non-loopback IPv4, or "" when none
 
 // Non-blocking IPv4 UDP socket bound to 0.0.0.0:port with address reuse, so several sockets
-// (and other AES67 software) can share port 5004/319/320/9875. Each socket only receives the
-// multicast groups it joined itself.
+// (and other AES67 software) can share port 5004/319/320/9875.
+// Whether a socket receives only the groups it joined itself is platform dependent (BSD/macOS: yes,
+// Windows and Linux: every group joined on that port). Callers that share a port between streams
+// therefore dispatch on the destination address reported by recv().
 class UdpSocket {
  public:
   UdpSocket() = default;
@@ -39,7 +41,9 @@ class UdpSocket {
   void leave_all();
   bool set_multicast_out(const std::string& iface_ip, int ttl, bool loopback);
   bool send_to(std::span<const uint8_t> data, const std::string& ip, uint16_t port);
-  int recv(std::span<uint8_t> buf, std::string* from_ip);  // bytes, or -1 when nothing pending / error
+  // Returns the datagram size, or -1 when nothing is pending. to_ip receives the destination
+  // (multicast group) address from the IP header.
+  int recv(std::span<uint8_t> buf, std::string* from_ip, std::string* to_ip = nullptr);
 
   intptr_t native() const { return fd_; }
   bool valid() const { return fd_ != kInvalid; }

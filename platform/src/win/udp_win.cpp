@@ -3,7 +3,9 @@
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 #include <mstcpip.h>
+#include <mswsock.h>
 
+#include <cstring>
 #include <mutex>
 
 #include "bam/platform/udp.hpp"
@@ -29,6 +31,16 @@ in_addr to_addr(const std::string& ip) {
 std::string wsa_error(const char* what) { return std::string(what) + " (WSA " + std::to_string(WSAGetLastError()) + ")"; }
 
 SOCKET sock(intptr_t fd) { return static_cast<SOCKET>(fd); }
+
+LPFN_WSARECVMSG recvmsg_fn(SOCKET s) {
+  static LPFN_WSARECVMSG fn = nullptr;
+  if (!fn) {
+    GUID guid = WSAID_WSARECVMSG;
+    DWORD bytes = 0;
+    WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER, &guid, sizeof(guid), &fn, sizeof(fn), &bytes, nullptr, nullptr);
+  }
+  return fn;
+}
 }  // namespace
 
 bool net_init() {
@@ -114,6 +126,8 @@ std::optional<UdpSocket> UdpSocket::open(uint16_t port, std::string* error) {
   BOOL no = FALSE;
   DWORD ret = 0;
   WSAIoctl(s, SIO_UDP_CONNRESET, &no, sizeof(no), nullptr, 0, &ret, nullptr, nullptr);
+  DWORD pktinfo = 1;
+  setsockopt(s, IPPROTO_IP, IP_PKTINFO, reinterpret_cast<const char*>(&pktinfo), sizeof(pktinfo));
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(port);
@@ -189,18 +203,36 @@ bool UdpSocket::send_to(std::span<const uint8_t> data, const std::string& ip, ui
                   reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == static_cast<int>(data.size());
 }
 
-int UdpSocket::recv(std::span<uint8_t> buf, std::string* from_ip) {
+int UdpSocket::recv(std::span<uint8_t> buf, std::string* from_ip, std::string* to_ip) {
   sockaddr_in from{};
-  int len = sizeof(from);
-  int n = ::recvfrom(sock(fd_), reinterpret_cast<char*>(buf.data()), static_cast<int>(buf.size()), 0,
-                     reinterpret_cast<sockaddr*>(&from), &len);
-  if (n == SOCKET_ERROR) return -1;
+  WSABUF wbuf{static_cast<ULONG>(buf.size()), reinterpret_cast<char*>(buf.data())};
+  alignas(WSACMSGHDR) char control[128];
+  WSAMSG msg{};
+  msg.name = reinterpret_cast<sockaddr*>(&from);
+  msg.namelen = sizeof(from);
+  msg.lpBuffers = &wbuf;
+  msg.dwBufferCount = 1;
+  msg.Control.buf = control;
+  msg.Control.len = sizeof(control);
+  DWORD n = 0;
+  LPFN_WSARECVMSG fn = recvmsg_fn(sock(fd_));
+  if (!fn || fn(sock(fd_), &msg, &n, nullptr, nullptr) == SOCKET_ERROR) return -1;
+  char b[INET_ADDRSTRLEN];
   if (from_ip) {
-    char b[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &from.sin_addr, b, sizeof(b));
     *from_ip = b;
   }
-  return n;
+  if (to_ip) {
+    to_ip->clear();
+    for (WSACMSGHDR* c = WSA_CMSG_FIRSTHDR(&msg); c; c = WSA_CMSG_NXTHDR(&msg, c)) {
+      if (c->cmsg_level != IPPROTO_IP || c->cmsg_type != IP_PKTINFO) continue;
+      IN_PKTINFO pi{};
+      std::memcpy(&pi, WSA_CMSG_DATA(c), sizeof(pi));
+      inet_ntop(AF_INET, &pi.ipi_addr, b, sizeof(b));
+      *to_ip = b;
+    }
+  }
+  return static_cast<int>(n);
 }
 
 int wait_readable(std::span<UdpSocket* const> sockets, int timeout_ms, std::vector<uint8_t>& ready) {

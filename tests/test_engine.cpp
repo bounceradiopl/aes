@@ -99,7 +99,7 @@ TEST_CASE("engine loopback: output stream comes back sample-exact on the input")
     }
     for (uint64_t p = first; p <= s; p += 128) {
       for (int ch = 0; ch < 2; ++ch)
-        for (uint32_t i = 0; i < 128; ++i) out[ch][i] = ramp_value(p + 128 + i, ch);
+        for (uint32_t i = 0; i < 128; ++i) out[ch][i] = ramp_value(bam::AsioBridge::output_start(p, 128) + i, ch);
       bridge.write_outputs(p, 128, out_ptrs.data());
     }
     last_start = s;

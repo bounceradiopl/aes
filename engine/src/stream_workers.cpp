@@ -22,31 +22,34 @@ void Engine::Impl::rx_loop() {
   std::vector<uint8_t> ready;
   int64_t last_tick = 0, last_meter = 0;
 
+  std::string from_ip, to_ip;
   while (running) {
     const auto snap = snapshot();
     std::vector<platform::UdpSocket*> socks;
-    std::vector<RxEntry*> entries;
-    for (const auto& e : snap->rx) {
-      if (!e->stream) continue;
-      socks.push_back(&e->socket);
-      entries.push_back(e.get());
-    }
+    for (const auto& rp : snap->rx_ports) socks.push_back(&rp->socket);
     platform::wait_readable(socks, 2, ready);
 
     const MediaClock clk = clock.get();
     for (size_t i = 0; i < socks.size(); ++i) {
       if (!ready[i]) continue;
       int n;
-      while ((n = socks[i]->recv(buf, nullptr)) >= 0) {
+      while ((n = socks[i]->recv(buf, &from_ip, &to_ip)) >= 0) {
         const int64_t now = platform::monotonic_ns();
-        entries[i]->stream->on_packet(std::span<const uint8_t>(buf.data(), static_cast<size_t>(n)), clk.sample_at(now), now);
+        const uint64_t now_s = clk.sample_at(now);
+        const std::span<const uint8_t> pkt(buf.data(), static_cast<size_t>(n));
+        for (const auto& e : snap->rx_ports[i]->entries) {
+          if (e->group != to_ip) continue;
+          if (!e->source.empty() && e->source != from_ip) continue;
+          e->stream->on_packet(pkt, now_s, now);
+        }
       }
     }
 
     const int64_t now = platform::monotonic_ns();
     const uint64_t now_s = clk.sample_at(now);
     if (now - last_tick >= kTickNs) {
-      for (auto* e : entries) e->stream->on_tick(now_s);
+      for (const auto& e : snap->rx)
+        if (e->stream) e->stream->on_tick(now_s);
       last_tick = now;
     }
     if (now - last_meter >= kMeterNs && view) {

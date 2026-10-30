@@ -7,6 +7,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #include <cstring>
@@ -90,6 +91,11 @@ std::optional<UdpSocket> UdpSocket::open(uint16_t port, std::string* error) {
 #endif
   int rcvbuf = 4 * 1024 * 1024;
   setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+#ifdef __APPLE__
+  setsockopt(fd, IPPROTO_IP, IP_RECVDSTADDR, &one, sizeof(one));  // destination address per datagram
+#else
+  setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &one, sizeof(one));
+#endif
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(port);
@@ -167,15 +173,41 @@ bool UdpSocket::send_to(std::span<const uint8_t> data, const std::string& ip, ui
          static_cast<ssize_t>(data.size());
 }
 
-int UdpSocket::recv(std::span<uint8_t> buf, std::string* from_ip) {
+int UdpSocket::recv(std::span<uint8_t> buf, std::string* from_ip, std::string* to_ip) {
   sockaddr_in from{};
-  socklen_t len = sizeof(from);
-  ssize_t n = ::recvfrom(static_cast<int>(fd_), buf.data(), buf.size(), 0, reinterpret_cast<sockaddr*>(&from), &len);
+  iovec iov{buf.data(), buf.size()};
+  alignas(cmsghdr) char control[128];
+  msghdr msg{};
+  msg.msg_name = &from;
+  msg.msg_namelen = sizeof(from);
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+  msg.msg_control = control;
+  msg.msg_controllen = sizeof(control);
+  ssize_t n = ::recvmsg(static_cast<int>(fd_), &msg, 0);
   if (n < 0) return -1;
+  char b[INET_ADDRSTRLEN];
   if (from_ip) {
-    char b[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &from.sin_addr, b, sizeof(b));
     *from_ip = b;
+  }
+  if (to_ip) {
+    to_ip->clear();
+    for (cmsghdr* c = CMSG_FIRSTHDR(&msg); c; c = CMSG_NXTHDR(&msg, c)) {
+      if (c->cmsg_level != IPPROTO_IP) continue;
+      in_addr dst{};
+#ifdef __APPLE__
+      if (c->cmsg_type != IP_RECVDSTADDR) continue;
+      std::memcpy(&dst, CMSG_DATA(c), sizeof(dst));
+#else
+      if (c->cmsg_type != IP_PKTINFO) continue;
+      in_pktinfo pi{};
+      std::memcpy(&pi, CMSG_DATA(c), sizeof(pi));
+      dst = pi.ipi_addr;
+#endif
+      inet_ntop(AF_INET, &dst, b, sizeof(b));
+      *to_ip = b;
+    }
   }
   return static_cast<int>(n);
 }

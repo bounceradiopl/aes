@@ -115,7 +115,7 @@ int loopback(const Options& o) {
   }
   bam::AsioBridge bridge(view);
   std::vector<uint64_t> errors(channels, 0), checked(channels, 0);
-  uint64_t periods = 0, missed = 0, last_start = 0, last_counter = h.period_counter.load();
+  uint64_t periods = 0, missed = 0, stalls = 0, last_start = 0, last_counter = h.period_counter.load();
   const int64_t start = bp::monotonic_ns();
   const int64_t warmup_end = start + 1'000'000'000;
   const int64_t end = start + int64_t(o.seconds) * 1'000'000'000 + 1'000'000'000;
@@ -129,12 +129,19 @@ int loopback(const Options& o) {
     const uint64_t s = h.period_start_sample.load();
     uint64_t first = s;
     if (last_start) {
-      if (s - last_start > b) ++missed;
+      if (s - last_start > b) {
+        ++missed;
+        const uint64_t gap = (s - last_start) / b;
+        if (gap > bam::kOutputLeadBuffers) ++stalls;
+        std::printf("  klient testowy przegapił %llu okres(y) po %llu okresach%s\n", static_cast<unsigned long long>(gap - 1),
+                    static_cast<unsigned long long>(periods),
+                    gap > bam::kOutputLeadBuffers ? " (dłużej niż wyprzedzenie wyjść: spodziewana cisza w strumieniu)" : "");
+      }
       first = last_start + b;
     }
     for (uint64_t p = first; p <= s; p += b) {
       for (int ch = 0; ch < channels; ++ch)
-        for (uint32_t i = 0; i < b; ++i) out[ch][i] = pattern(p + b + i, ch);
+        for (uint32_t i = 0; i < b; ++i) out[ch][i] = pattern(bam::AsioBridge::output_start(p, b) + i, ch);
       bridge.write_outputs(p, b, out_ptrs.data());
     }
     last_start = s;
@@ -177,6 +184,10 @@ int loopback(const Options& o) {
   std::printf("%s: %d kanałów, %llu okresów po %u próbek, %llu sprawdzonych próbek na kanał, pominięte okresy klienta: %llu\n",
               ok ? "OK" : "BŁĄD", channels, static_cast<unsigned long long>(periods), b,
               static_cast<unsigned long long>(checked.empty() ? 0 : checked[0]), static_cast<unsigned long long>(missed));
+  if (!ok && stalls > 0)
+    std::printf("Uwaga: klient testowy %llu raz(y) zatrzymał się dłużej niż wyprzedzenie wyjść (%u okresy). Takie przerwy dają ciszę\n"
+                "w strumieniu niezależnie od usługi; uruchom test na mniej obciążonym systemie albo z większym buforem (--buffer 256).\n",
+                static_cast<unsigned long long>(stalls), bam::kOutputLeadBuffers);
   return ok ? 0 : 1;
 }
 

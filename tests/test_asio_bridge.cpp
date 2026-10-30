@@ -37,7 +37,7 @@ TEST_CASE("inputs are read latency + one buffer behind the period start") {
   CHECK(buf[0] == 0);
 }
 
-TEST_CASE("outputs are written one buffer ahead") {
+TEST_CASE("outputs are written kOutputLeadBuffers ahead") {
   Shm shm;
   auto view = shm.view();
   bam::AsioBridge bridge(view);
@@ -47,11 +47,12 @@ TEST_CASE("outputs are written one buffer ahead") {
   outs[1] = data.data();
   bridge.write_outputs(4800, 128, outs.data());
   std::vector<int32_t> back(128);
-  view.output(1).read(4800 + 128, back.data(), 128);
+  CHECK(bam::AsioBridge::output_start(4800, 128) == 4800 + 256);
+  view.output(1).read(4800 + 256, back.data(), 128);
   CHECK(back == data);
   // channel without a buffer gets valid silence
   std::vector<int32_t> silent(128, 7);
-  view.output(0).read(4800 + 128, silent.data(), 128);
+  view.output(0).read(4800 + 256, silent.data(), 128);
   for (auto v : silent) CHECK(v == 0);
 }
 

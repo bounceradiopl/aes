@@ -98,6 +98,35 @@ TEST_CASE("multicast sockets only receive their own groups") {
   CHECK(ready[0] == 0);
 }
 
+TEST_CASE("recv reports the destination group on a shared socket") {
+  const std::string iface = "127.0.0.1";
+  std::string err;
+  auto rx = bp::UdpSocket::open(15005, &err);
+  REQUIRE_MESSAGE(rx, err);
+  REQUIRE_MESSAGE(rx->join("239.69.200.11", iface, "", &err), err);
+  REQUIRE_MESSAGE(rx->join("239.69.200.12", iface, "", &err), err);
+  auto tx = bp::UdpSocket::open(0, &err);
+  REQUIRE(tx);
+  REQUIRE(tx->set_multicast_out(iface, 1, true));
+  for (const char* group : {"239.69.200.11", "239.69.200.12"}) {
+    const std::vector<uint8_t> msg = {9};
+    REQUIRE(tx->send_to(msg, group, 15005));
+    std::vector<uint8_t> buf(16);
+    std::string from, to;
+    const int64_t end = bp::monotonic_ns() + 500'000'000;
+    int n = -1;
+    while (n < 0 && bp::monotonic_ns() < end) {
+      n = rx->recv(buf, &from, &to);
+      if (n < 0) bp::sleep_ns(1'000'000);
+    }
+    REQUIRE(n == 1);
+    CHECK(to == group);
+    CHECK(from == "127.0.0.1");
+    while (rx->recv(buf, nullptr) >= 0) {
+    }
+  }
+}
+
 TEST_CASE("interfaces are listed") {
   auto list = bp::list_interfaces();
   CHECK_FALSE(list.empty());

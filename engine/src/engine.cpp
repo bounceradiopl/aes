@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <cmath>
 #include <fstream>
+#include <map>
+#include <set>
 #include <sstream>
 
 #include "bam/auth.hpp"
@@ -108,21 +110,54 @@ void Engine::Impl::rebuild_runtime(const Config& cfg, bool force) {
       } else {
         const auto& s = *parsed.stream;
         e->source_name = s.session_name;
-        std::string err;
-        auto sock = platform::UdpSocket::open(s.port, &err);
-        if (!sock) {
-          e->error = err;
-        } else if (!sock->join(s.multicast_address, iface, s.source_filter, &err)) {
-          e->error = err;
-        } else {
-          e->socket = std::move(*sock);
-          e->stream = std::make_unique<RxStream>(s, view->input(i * 2), view->input(i * 2 + 1), us_to_frames(d.rx_latency_us), to_app);
-        }
+        e->group = s.multicast_address;
+        e->source = s.source_filter;
+        e->port = s.port;
+        e->stream = std::make_unique<RxStream>(s, view->input(i * 2), view->input(i * 2 + 1), us_to_frames(d.rx_latency_us), to_app);
       }
-      if (!e->error.empty()) log_warning("Urządzenie " + device_label(dev) + ": wejście nieaktywne: " + e->error);
       next->rx.push_back(e);
     }
   }
+
+  // ---- receive sockets: one per port, joined to every group used on that port ----
+  std::map<uint16_t, std::vector<std::shared_ptr<RxEntry>>> by_port;
+  for (const auto& e : next->rx)
+    if (e->stream) by_port[e->port].push_back(e);
+  for (auto& [port, entries] : by_port) {
+    std::set<std::pair<std::string, std::string>> memberships;
+    for (const auto& e : entries) memberships.insert({e->group, e->source});
+    std::ostringstream key;
+    key << iface;
+    for (const auto& [g, src] : memberships) key << '|' << g << '@' << src;
+    std::shared_ptr<RxPort> rp;
+    for (const auto& old_port : old->rx_ports)
+      if (old_port->port == port && old_port->key == key.str() && !force) rp = old_port;
+    if (!rp) {
+      rp = std::make_shared<RxPort>();
+      rp->port = port;
+      rp->key = key.str();
+      std::string err;
+      auto sock = platform::UdpSocket::open(port, &err);
+      if (!sock) {
+        for (const auto& e : entries) e->error = err;
+        continue;
+      }
+      rp->socket = std::move(*sock);
+      for (const auto& [g, src] : memberships) {
+        if (rp->socket.join(g, iface, src, &err)) continue;
+        for (const auto& e : entries)
+          if (e->group == g && e->source == src) e->error = err;
+      }
+    }
+    rp->entries.clear();
+    for (const auto& e : entries)
+      if (e->error.empty()) rp->entries.push_back(e);
+    next->rx_ports.push_back(rp);
+  }
+  for (const auto& e : next->rx)
+    if (!e->error.empty() && e->stream) e->stream.reset();
+  for (const auto& e : next->rx)
+    if (!e->error.empty()) log_warning("Urządzenie " + device_label(e->device) + ": wejście nieaktywne: " + e->error);
 
   {
     std::lock_guard lock(runtime_mutex);

@@ -190,7 +190,7 @@ Używamy programowych znaczników czasu. Oczekiwana dokładność to dziesiątki
 
 ### 5.4 Wyjście (aplikacja → sieć)
 
-1. W okresie `k` aplikacja wypełnia bufor wyjściowy. Jego próbki trafiają na oś czasu pod `[(k+1)·B, (k+2)·B)`.
+1. W okresie `k` aplikacja wypełnia bufor wyjściowy. Jego próbki trafiają na oś czasu pod `[(k+2)·B, (k+3)·B)`. Dwa bufory wyprzedzenia dają aplikacji zapas całego dodatkowego okresu: spóźniony (albo nadrobiony po pominięciu) callback nadal zdąży przed wysłaniem pakietu, więc w strumieniu nie powstaje dziura.
 2. `tx` wysyła pakiet o znaczniku `T` (próbki `[T, T+P)`, gdzie `P` to ptime w próbkach), gdy `N(teraz) ≥ T + P`.
 3. Jeśli pakiet nie zdążył (np. przy przeciążeniu systemu), jest wysyłany natychmiast. Przy opóźnieniu większym niż 2·P jest pomijany i liczony jako TxErr.
 4. **Utrzymuj strumień** (odpowiednik KEEP CHANNEL ACTIVE z Axii):
@@ -204,7 +204,7 @@ Używamy programowych znaczników czasu. Oczekiwana dokładność to dziesiątki
 - Sterownik ASIO ma wątek z priorytetem MMCSS "Pro Audio". Wątek czeka na zdarzenie, kopiuje bufory między osią czasu a buforami ASIO i wywołuje `bufferSwitchTimeInfo`.
 - Rozmiary bufora: 64, 128, 256 i 512 próbek, domyślnie 128. Rozmiar wybiera aplikacja przy `createBuffers` i jest zapisywany w nagłówku pamięci współdzielonej.
 - Częstotliwość próbkowania: tylko 48 000 Hz (`canSampleRate` odrzuca inne).
-- Raportowane opóźnienia: wejście `B + Lrx` (dla najmniejszego `Lrx` aktywnych wejść), wyjście `B + P`.
+- Raportowane opóźnienia: wejście `B + Lrx` (dla najmniejszego `Lrx` aktywnych wejść), wyjście `2B + P`.
 - Pozycja próbki i znacznik czasu w `ASIOTime` pochodzą z `N`.
 - Kilka aplikacji ASIO jednocześnie nie jest obsługiwanych. Druga aplikacja dostaje `ASE_NotPresent` z komunikatem "urządzenie zajęte".
 
