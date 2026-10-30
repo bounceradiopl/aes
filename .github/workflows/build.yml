@@ -21,11 +21,12 @@ jobs:
         run: cmake --build build
       - name: Unit and integration tests
         run: ctest --test-dir build --output-on-failure
-      - name: Loopback test (32 devices, PTP simulator, 20 s)
+      - name: Loopback test (32 pairs, PTP simulator, 20 s)
         run: |
           mkdir run && cd run
           ../build/ptp-sim --iface 127.0.0.1 > ptp.log 2>&1 &
-          printf '{"interface_ip":"127.0.0.1"}' > bounceaes-config.json
+          # slave only: follow ptp-sim (which has the lowest priority and would otherwise lose the election)
+          printf '{"version":2,"interface_ip":"127.0.0.1","ptp_role":"slave"}' > bounceaes-config.json
           ../build/BounceAESService --console > service.log 2>&1 &
           sleep 2
           curl -sf -H 'Content-Type: application/json' -d '{"password":"ci-haslo-123"}' http://127.0.0.1:8067/api/setup
@@ -58,7 +59,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory dist | Out-Null
-          Copy-Item build\Release\BounceAESService.exe, build\Release\BounceAESAsio.dll, build\Release\BounceAESTray.exe, build\Release\bounceaes-test.exe, build\Release\ptp-sim.exe dist\
+          Copy-Item build\Release\BounceAESService.exe, build\Release\BounceAESAsio.dll, build\Release\BounceAESTray.exe, build\Release\BounceAESAudioBridge.exe, build\Release\bounceaes-test.exe, build\Release\ptp-sim.exe dist\
           Copy-Item installer\install.ps1, installer\uninstall.ps1, LICENSE dist\
       - uses: actions/upload-artifact@v4
         with:

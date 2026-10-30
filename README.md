@@ -2,9 +2,11 @@
 
 Otwarty (GPLv3) sterownik audio **AES67** dla **Windows 10/11 x64** z interfejsem **ASIO**. Napisany od zera jako zamiennik Axia IP-Audio Driver dla sieci, w których pracują wyłącznie urządzenia AES67 (np. Orban Optimod).
 
-- **32 wejścia i 32 wyjścia stereo** (64 + 64 kanały ASIO), każde jako osobny strumień AES67 (RTP L24/48 kHz, multicast).
-- **PTPv2** (IEEE 1588, profil AES67, E2E): sterownik podąża za grandmasterem w sieci. Bez resamplingu i bez dryfu.
-- **SAP**: własne wyjścia są ogłaszane w sieci, a strumienie innych urządzeń można wybrać z listy.
+- **32 wyjścia i 32 subskrypcje stereo**, każde jako osobny strumień AES67 (RTP L24/48 kHz, multicast), oraz 32 + 32 pary ASIO.
+- **Routing jak w Dante Controller**: siatka źródła × cele. Dowolne źródło (subskrypcja AoIP, wyjście ASIO, aplikacja Windows, urządzenie Windows) do dowolnego celu (wyjście AoIP, wejście ASIO, urządzenie Windows), zmiana od razu, bez przerywania innych strumieni.
+- **Audio Windows bez sterownika jądra**: dźwięk dowolnej aplikacji (np. przeglądarki) przechwytywany wprost z procesu (Windows 11), odsłuch i wejścia urządzeń Windows, odtwarzanie strumieni AoIP na słuchawkach. Aplikacje, które wymagają karty dźwiękowej, korzystają z darmowego VB-CABLE.
+- **PTPv2** (IEEE 1588, profil AES67, E2E): komputer podąża za grandmasterem (Orban, Omnia, konsola) albo sam zostaje masterem, gdy w sieci nie ma lepszego zegara (BMCA, role: automatyczna, preferowany master, tylko slave).
+- **SAP**: wyjścia są ogłaszane jako „stacja / wyjście”, strumienie innych urządzeń i innych komputerów Bounce można dodać z listy.
 - **Panel WWW** wzorowany na oknie konfiguracji Axii, z logo Bounce. Działa w przeglądarce i jako okno aplikacji z ikony w zasobniku.
 - **Bez sterownika jądra**: całość działa w trybie użytkownika, więc nie wymaga podpisu Microsoftu i nie grozi niebieskim ekranem.
 
@@ -13,13 +15,14 @@ Otwarty (GPLv3) sterownik audio **AES67** dla **Windows 10/11 x64** z interfejse
 ```
  sieć AoIP (AES67, PTP)
         │
- BounceAESService.exe ── usługa Windows: PTP, 32× RX, 32× TX, SAP, panel WWW :8067
-        │  pamięć współdzielona (oś czasu próbek) + zdarzenie okresu
- BounceAESAsio.dll ───── sterownik ASIO ładowany przez mAirList / inną aplikację
- BounceAESTray.exe ───── ikona stanu w zasobniku, otwiera panel
+ BounceAESService.exe ──── usługa Windows: PTP slave/master, 32× RX, 32× TX, routing, SAP, panel WWW :8067
+        │  pamięć współdzielona: oś czasu próbek, tabela routingu, zegar, zdarzenie okresu
+ BounceAESAsio.dll ─────── sterownik ASIO ładowany przez mAirList / inną aplikację
+ BounceAESAudioBridge.exe ─ audio Windows w sesji użytkownika (WASAPI, przechwytywanie procesów)
+ BounceAESTray.exe ─────── ikona stanu w zasobniku, otwiera panel, nadzoruje bridge
 ```
 
-Każda próbka ma pozycję na wspólnej osi czasu, wyznaczonej przez zegar PTP (`mediaclk:direct=0`). Odbiór zapisuje pakiet RTP dokładnie pod jego znacznikiem czasu. Aplikacja ASIO czyta wejścia z opóźnieniem ustawionym osobno dla każdego wejścia, a jej wyjścia trafiają do sieci w kolejnym okresie bufora. Szczegóły w [specyfikacji](docs/superpowers/specs/2026-10-30-bounceaes-master-design.md).
+Każda próbka ma pozycję na wspólnej osi czasu, wyznaczonej przez zegar PTP (`mediaclk:direct=0`). Każde źródło zapisuje swój ring na tej osi i deklaruje opóźnienie gotowości `D_src` (subskrypcja: opóźnienie odbioru, ASIO: 0, Windows: 20 ms), a cel czyta z pozycji „teraz − `D_src`”. Dzięki temu każde połączenie działa bez kopiowania i bez dodatkowych wątków. Audio Windows ma własny zegar urządzenia, więc bridge dopasowuje je do PTP resamplerem z regulatorem PI. Szczegóły: [specyfikacja 1.0](docs/superpowers/specs/2026-10-30-bounceaes-master-design.md), [specyfikacja 1.1](docs/superpowers/specs/2026-10-30-bounceaes-routing-ptp-windows-design.md).
 
 ## Porównanie z Axia IP-Audio Driver
 
@@ -28,7 +31,8 @@ Każda próbka ma pozycję na wspólnej osi czasu, wyznaczonej przez zegar PTP (
 | Livewire (Standard Streams, Livestreams), zegar Livewire | AES67 (RTP L16/L24), zegar PTPv2 |
 | Urządzenia WDM "Axia Wave01…" (sterownik jądra) | ASIO, kanały "BounceAES 01 L/R…" |
 | Kanał Livewire wyjścia | Adres multicast wyjścia |
-| Browse… (lista kanałów Livewire) | Przeglądaj… (strumienie z SAP) lub wklejenie SDP |
+| Browse… (lista kanałów Livewire) | Dodaj źródło… (strumienie z SAP) lub wklejenie SDP |
+| urządzenia WDM dla dowolnej aplikacji | przechwytywanie aplikacji i urządzeń Windows w siatce routingu, VB-CABLE dla aplikacji wymagających karty |
 | KEEP CHANNEL ACTIVE | Utrzymuj strumień |
 | PC Audio Nominal Level | Poziom nominalny PC (domyślnie −20 dBFS = bez zmian) |
 | Livewire Statistics (TxPkts, RxPkts, RxUr, RxOr, RxSeqErr, Jitter, Synchronization Lost) | Statystyki z tymi samymi licznikami |
@@ -40,8 +44,10 @@ Każda próbka ma pozycję na wspólnej osi czasu, wyznaczonej przez zegar PTP (
 Instrukcja: [docs/INSTALL.md](docs/INSTALL.md). W skrócie:
 1. Uruchom `BounceAES-Master-setup.exe` (instalator NSIS, z artefaktów CI albo zbudowany lokalnie).
 2. Otwórz panel (ikona w zasobniku albo `http://127.0.0.1:8067`) i ustaw hasło.
-3. Wybierz kartę sieciową AoIP, włącz urządzenia, przypisz źródła wejść.
-4. W mAirList wybierz sterownik ASIO **BounceAES Master**.
+3. W zakładce **Konfiguracja** wybierz kartę sieciową AoIP, nazwę stacji, rolę PTP i włącz wyjścia.
+4. **Dodaj źródło…** subskrybuje strumienie z sieci (Orban, Omnia, inny komputer Bounce).
+5. W zakładce **Routing** połącz źródła z celami.
+6. W mAirList wybierz sterownik ASIO **BounceAES Master**.
 
 ## Budowanie
 
@@ -65,12 +71,13 @@ Panel pokazuje logotyp Bounce ([panel/logo.svg](panel/logo.svg), biała wersja) 
 
 | Katalog | Zawartość |
 |---|---|
-| `core/` | logika niezależna od systemu: SDP, RTP, PTP, SAP, oś czasu, strumienie, konfiguracja, hasła |
+| `core/` | logika niezależna od systemu: SDP, RTP, PTP (slave/master), SAP, oś czasu, routing, strumienie, konfiguracja, regulator i resampler, hasła |
 | `platform/` | gniazda, pamięć współdzielona, zdarzenia, zegary: implementacje Windows i POSIX |
 | `engine/` | usługa: wątki, API HTTP, panel wbudowany w plik exe |
 | `service/` | punkt wejścia: usługa Windows lub `--console` |
 | `asio/` | sterownik ASIO (COM) |
 | `tray/` | aplikacja w zasobniku |
+| `bridge/` | BounceAES Audio Bridge: WASAPI, przechwytywanie procesów, resampling |
 | `panel/` | panel WWW (HTML/CSS/JS) |
 | `tools/` | `bounceaes-test` (test pętli), `ptp-sim` (testowy master PTP) |
 | `installer/` | instalator NSIS (`nsis/`), skrypty PowerShell |
@@ -80,4 +87,4 @@ Panel pokazuje logotyp Bounce ([panel/logo.svg](panel/logo.svg), biała wersja) 
 
 GPL-3.0-or-later. ASIO SDK firmy Steinberg jest wykorzystywane na licencji GPLv3 (podwójna licencja SDK 2.3.4). ASIO jest znakiem towarowym Steinberg Media Technologies GmbH. Projekt nie zawiera kodu ani plików binarnych Telos/Axia.
 
-Zależności: [doctest](https://github.com/doctest/doctest) (MIT), [nlohmann/json](https://github.com/nlohmann/json) (MIT), [cpp-httplib](https://github.com/yhirose/cpp-httplib) (MIT).
+Zależności: [doctest](https://github.com/doctest/doctest) (MIT), [nlohmann/json](https://github.com/nlohmann/json) (MIT), [cpp-httplib](https://github.com/yhirose/cpp-httplib) (MIT), [libsamplerate](https://github.com/libsndfile/libsamplerate) 0.2.2 (BSD-2-Clause). VB-CABLE (VB-Audio, donationware) nie jest częścią projektu; instaluje się go osobno, jeśli jest potrzebny.

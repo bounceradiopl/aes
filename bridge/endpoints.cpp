@@ -9,6 +9,7 @@
 #include <tlhelp32.h>
 
 #include <algorithm>
+#include <cctype>
 #include <map>
 #include <set>
 
