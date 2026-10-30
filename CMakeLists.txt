@@ -6,6 +6,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+# MSVC: static C/C++ runtime, so the service, tray and the ASIO driver (loaded into mAirList)
+# run on any Windows 10/11 without the Visual C++ Redistributable.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 option(BAM_BUILD_TESTS "Build unit tests" ON)
 option(BAM_BUILD_TOOLS "Build test tools" ON)
