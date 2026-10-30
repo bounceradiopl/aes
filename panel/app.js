@@ -73,16 +73,6 @@ function fmtUptime(s) {
 }
 
 // ---------------------------------------------------------------- brand / logo
-async function detectLogo() {
-  for (const name of ["logo.svg", "logo.png"]) {
-    try {
-      const r = await fetch(name, { method: "HEAD" });
-      if (r.ok) return name;
-    } catch { /* ignore */ }
-  }
-  return null;
-}
-
 function renderBrand() {
   const tpl = $("#brand-template");
   for (const slot of $$(".brand-slot")) {
@@ -212,10 +202,9 @@ function renderDevices() {
       el("td", { class: "c-num" }, pad2(n)),
       el("td", {}, el("input", { type: "checkbox", checked: dev.enabled, onchange: (e) => { set("enabled", e.target.checked); row.classList.toggle("off", !e.target.checked); } })),
       el("td", {}, el("input", { type: "text", value: dev.name, maxLength: 40, dataset: { field: "name" }, oninput: (e) => set("name", e.target.value) })),
-      el("td", {},
+      el("td", {}, el("div", { class: "inline" },
         el("input", { type: "text", class: "addr", value: dev.tx_address, dataset: { field: "tx_address" }, oninput: (e) => set("tx_address", e.target.value.trim()) }),
-        " ",
-        el("button", { type: "button", class: "mini ghost", title: "Pokaż SDP wyjścia", onclick: () => openSdp(n) }, "SDP")),
+        el("button", { type: "button", class: "mini ghost", title: "Pokaż SDP wyjścia", onclick: () => openSdp(n) }, "SDP"))),
       el("td", {}, ptime),
       el("td", {}, el("input", { type: "checkbox", checked: dev.keep_active, onchange: (e) => set("keep_active", e.target.checked) })),
       el("td", {}, sourceCell(dev, i)),
@@ -475,9 +464,9 @@ async function boot() {
 }
 
 (async function init() {
-  state.logo = await detectLogo();
-  renderBrand();
   const { data } = await api("/api/auth-state");
+  state.logo = data.logo || null;  // panel/logo.svg or logo.png, when the file is bundled
+  renderBrand();
   if (data.logged_in) boot();
   else showAuth();
 })();

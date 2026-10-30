@@ -120,7 +120,15 @@ struct HttpServer::Impl {
     });
 
     server.Get("/api/auth-state", [this](const httplib::Request& req, httplib::Response& res) {
-      send_json(res, {{"password_set", !engine.config().password_hash.empty()}, {"logged_in", authorized(req)}, {"local", is_local(req)}});
+      json logo = nullptr;
+      for (size_t i = 0; i < kPanelAssetCount; ++i) {
+        const std::string path = kPanelAssets[i].path;
+        if (path == "/logo.svg" || (path == "/logo.png" && logo.is_null())) logo = path.substr(1);
+      }
+      send_json(res, {{"password_set", !engine.config().password_hash.empty()},
+                      {"logged_in", authorized(req)},
+                      {"local", is_local(req)},
+                      {"logo", logo}});
     });
 
     server.Post("/api/setup", [this](const httplib::Request& req, httplib::Response& res) {
