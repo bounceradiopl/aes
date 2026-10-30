@@ -184,8 +184,8 @@ function sourceCell(dev, i) {
     el("span", { class: "dot", dataset: { sig: i } }),
     label,
     el("button", { type: "button", class: "mini", onclick: () => openBrowse(i) }, "Przeglądaj…"),
-    el("button", { type: "button", class: "mini ghost", onclick: () => openPaste(i), title: "Wklej SDP" }, "SDP…"),
-    info ? el("button", { type: "button", class: "mini ghost", title: "Usuń źródło", onclick: () => { state.draft.devices[i].rx_sdp = ""; markDirty(); renderDevices(); } }, "✕") : null);
+    el("button", { type: "button", class: "mini", onclick: () => openPaste(i), title: "Wklej SDP źródła" }, "SDP…"),
+    info ? el("button", { type: "button", class: "mini", title: "Usuń źródło", onclick: () => { state.draft.devices[i].rx_sdp = ""; markDirty(); renderDevices(); } }, "Usuń") : null);
 }
 
 function renderDevices() {
@@ -204,7 +204,7 @@ function renderDevices() {
       el("td", {}, el("input", { type: "text", value: dev.name, maxLength: 40, dataset: { field: "name" }, oninput: (e) => set("name", e.target.value) })),
       el("td", {}, el("div", { class: "inline" },
         el("input", { type: "text", class: "addr", value: dev.tx_address, dataset: { field: "tx_address" }, oninput: (e) => set("tx_address", e.target.value.trim()) }),
-        el("button", { type: "button", class: "mini ghost", title: "Pokaż SDP wyjścia", onclick: () => openSdp(n) }, "SDP"))),
+        el("button", { type: "button", class: "mini", title: "Pokaż SDP wyjścia", onclick: () => openSdp(n) }, "SDP"))),
       el("td", {}, ptime),
       el("td", {}, el("input", { type: "checkbox", checked: dev.keep_active, onchange: (e) => set("keep_active", e.target.checked) })),
       el("td", {}, sourceCell(dev, i)),
@@ -366,7 +366,9 @@ function applyLive() {
   for (const span of $$("[data-meter]")) {
     const [i, key, ch] = span.dataset.meter.split("-");
     const d = byIndex.get(Number(i));
-    span.style.setProperty("--v", d ? meterValue(d[key][Number(ch)]) : 0);
+    const db = d ? d[key][Number(ch)] : -120;
+    span.style.setProperty("--v", meterValue(db));
+    span.classList.toggle("clip", db > -1);
   }
   for (const dot of $$("[data-sig]")) {
     const n = Number(dot.dataset.sig) + 1;
