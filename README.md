@@ -59,7 +59,7 @@ ctest --test-dir build --output-on-failure
 
 ### Logo w panelu
 
-Panel pokazuje znak "bounce" z dopiskiem "AES Master". Aby użyć oryginalnego logo, umieść plik `logo.svg` (zalecany) albo `logo.png` w katalogu [panel/](panel/) i przebuduj projekt. Plik zostanie wbudowany w usługę i wyświetlony w nagłówku oraz na ekranie logowania.
+Panel pokazuje logotyp Bounce ([panel/logo.svg](panel/logo.svg), biała wersja) z dopiskiem "AES Master". Aby go zmienić, podmień plik `panel/logo.svg` (albo dodaj `logo.png`) i przebuduj projekt. Plik jest wbudowywany w usługę. Bez pliku logo panel pokazuje znak tekstowy "bounce".
 
 ## Struktura
 
