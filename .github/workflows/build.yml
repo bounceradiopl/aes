@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Loopback multicast and unprivileged PTP ports (tests never use a real network)
+        run: |
+          sudo ip link set lo multicast on
+          sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build
+      - name: Unit and integration tests
+        run: ctest --test-dir build --output-on-failure
+      - name: Loopback test (32 devices, PTP simulator, 20 s)
+        run: |
+          mkdir run && cd run
+          ../build/ptp-sim --iface 127.0.0.1 > ptp.log 2>&1 &
+          printf '{"interface_ip":"127.0.0.1"}' > bounceaes-config.json
+          ../build/BounceAESService --console > service.log 2>&1 &
+          sleep 2
+          curl -sf -H 'Content-Type: application/json' -d '{"password":"ci-haslo-123"}' http://127.0.0.1:8067/api/setup
+          ../build/bounceaes-test --configure-loopback --devices 32 --password ci-haslo-123 --interface 127.0.0.1
+          sleep 3
+          ../build/bounceaes-test --loopback --seconds 20 --devices 32
+      - name: Service log
+        if: always()
+        run: cat run/service.log || true
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (MSVC x64)
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Tests
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Install WiX
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add -g WixToolset.Util.wixext/5.0.2
+          wix extension add -g WixToolset.Firewall.wixext/5.0.2
+      - name: Build MSI
+        working-directory: installer
+        run: >
+          wix build BounceAES.wxs -arch x64 -d BinDir=..\build\Release
+          -ext WixToolset.Util.wixext -ext WixToolset.Firewall.wixext
+          -o ..\BounceAES-Master-1.0.0-x64.msi
+      - name: Collect binaries
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item build\Release\BounceAESService.exe, build\Release\BounceAESAsio.dll, build\Release\BounceAESTray.exe, build\Release\bounceaes-test.exe, build\Release\ptp-sim.exe dist\
+          Copy-Item installer\install.ps1, installer\uninstall.ps1, LICENSE dist\
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BounceAES-Master-msi
+          path: BounceAES-Master-1.0.0-x64.msi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BounceAES-Master-binaries
+          path: dist
