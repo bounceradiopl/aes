@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 cmake_minimum_required(VERSION 3.24)
-project(BounceAESMaster VERSION 1.0.0 LANGUAGES CXX)
+project(BounceAESMaster VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -35,11 +35,29 @@ target_include_directories(bam_thirdparty SYSTEM INTERFACE
   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/doctest
   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/httplib)
 
+# libsamplerate 0.2.2 (BSD-2-Clause), variable-ratio resampling for the Windows audio bridge
+add_library(bam_samplerate STATIC
+  third_party/libsamplerate/samplerate.c
+  third_party/libsamplerate/src_sinc.c
+  third_party/libsamplerate/src_linear.c
+  third_party/libsamplerate/src_zoh.c)
+target_include_directories(bam_samplerate SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libsamplerate)
+target_compile_definitions(bam_samplerate PRIVATE HAVE_STDBOOL_H ENABLE_SINC_FAST_CONVERTER ENABLE_SINC_MEDIUM_CONVERTER
+  PACKAGE="libsamplerate" VERSION="0.2.2")
+if(MSVC)
+  target_compile_options(bam_samplerate PRIVATE /W0)
+else()
+  target_compile_options(bam_samplerate PRIVATE -w)
+  if(NOT WIN32)
+    target_link_libraries(bam_samplerate PUBLIC m)
+  endif()
+endif()
+
 # ---- core ----
 file(GLOB BAM_CORE_SOURCES CONFIGURE_DEPENDS core/src/*.cpp)
 add_library(bam_core STATIC ${BAM_CORE_SOURCES})
 target_include_directories(bam_core PUBLIC core/include)
-target_link_libraries(bam_core PUBLIC bam_thirdparty Threads::Threads)
+target_link_libraries(bam_core PUBLIC bam_thirdparty bam_samplerate Threads::Threads)
 
 # ---- platform ----
 if(WIN32)
