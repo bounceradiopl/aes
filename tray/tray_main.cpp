@@ -3,10 +3,9 @@
 // endpoint and opens the web panel as an app window (Microsoft Edge --app), or in the default browser.
 #include <windows.h>
 #include <shellapi.h>
+#include <commctrl.h>
 #include <winhttp.h>
 
-#include <algorithm>
-#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -53,43 +52,13 @@ std::wstring panel_url(const wchar_t* fragment = L"") {
   return L"http://127.0.0.1:" + std::to_wstring(panel_port()) + L"/" + fragment;
 }
 
-// Colored status dot with a thin dark rim, drawn at the system small-icon size.
-HICON make_icon(COLORREF color) {
-  const int size = GetSystemMetrics(SM_CXSMICON);
-  BITMAPV5HEADER bi{};
-  bi.bV5Size = sizeof(bi);
-  bi.bV5Width = size;
-  bi.bV5Height = -size;
-  bi.bV5Planes = 1;
-  bi.bV5BitCount = 32;
-  bi.bV5Compression = BI_BITFIELDS;
-  bi.bV5RedMask = 0x00FF0000;
-  bi.bV5GreenMask = 0x0000FF00;
-  bi.bV5BlueMask = 0x000000FF;
-  bi.bV5AlphaMask = 0xFF000000;
-  void* bits = nullptr;
-  HDC dc = GetDC(nullptr);
-  HBITMAP color_bmp = CreateDIBSection(dc, reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS, &bits, nullptr, 0);
-  ReleaseDC(nullptr, dc);
-  auto* px = static_cast<uint32_t*>(bits);
-  const double c = (size - 1) / 2.0, r = size / 2.0 - 0.5;
-  for (int y = 0; y < size; ++y) {
-    for (int x = 0; x < size; ++x) {
-      const double d = std::hypot(x - c, y - c);
-      double a = std::clamp(r - d + 0.5, 0.0, 1.0);  // anti-aliased edge
-      const bool rim = d > r - 1.5;
-      const uint32_t rgb = rim ? 0x202020 : (uint32_t(GetRValue(color)) << 16) | (uint32_t(GetGValue(color)) << 8) | GetBValue(color);
-      const auto alpha = static_cast<uint32_t>(a * 255);
-      // premultiplied alpha
-      const uint32_t rr = ((rgb >> 16) & 0xFF) * alpha / 255, gg = ((rgb >> 8) & 0xFF) * alpha / 255, bb = (rgb & 0xFF) * alpha / 255;
-      px[y * size + x] = (alpha << 24) | (rr << 16) | (gg << 8) | bb;
-    }
+// Bounce AES logo with a status badge (resources 2-4), at the DPI-correct notification-area size.
+HICON load_status_icon(int resource) {
+  HICON icon = nullptr;
+  if (FAILED(LoadIconMetric(g_instance, MAKEINTRESOURCEW(resource), LIM_SMALL, &icon))) {
+    icon = static_cast<HICON>(LoadImageW(g_instance, MAKEINTRESOURCEW(resource), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                                         GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
   }
-  HBITMAP mask = CreateBitmap(size, size, 1, 1, nullptr);
-  ICONINFO ii{TRUE, 0, 0, mask, color_bmp};
-  HICON icon = CreateIconIndirect(&ii);
-  DeleteObject(mask);
-  DeleteObject(color_bmp);
   return icon;
 }
 
@@ -252,9 +221,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
   g_instance = instance;
   g_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
-  g_icons[static_cast<int>(Health::Ok)] = make_icon(RGB(47, 191, 113));
-  g_icons[static_cast<int>(Health::Warning)] = make_icon(RGB(242, 179, 61));
-  g_icons[static_cast<int>(Health::Down)] = make_icon(RGB(255, 77, 94));
+  g_icons[static_cast<int>(Health::Ok)] = load_status_icon(2);
+  g_icons[static_cast<int>(Health::Warning)] = load_status_icon(3);
+  g_icons[static_cast<int>(Health::Down)] = load_status_icon(4);
 
   WNDCLASSEXW wc{};
   wc.cbSize = sizeof(wc);

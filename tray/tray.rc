@@ -2,6 +2,9 @@
 #include <windows.h>
 
 1 ICON "bounce.ico"
+2 ICON "status-ok.ico"
+3 ICON "status-warn.ico"
+4 ICON "status-down.ico"
 1 24 "tray.manifest"
 
 VS_VERSION_INFO VERSIONINFO

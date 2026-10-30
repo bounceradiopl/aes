@@ -6,8 +6,8 @@
   --line: #2a303c;
   --text: #e7e9ee;
   --muted: #8a93a5;
-  --accent: #ff5a36;        /* text, borders, focus on dark surfaces */
-  --accent-strong: #c63a1c; /* filled buttons carrying white text */
+  --accent: #ff4f96;        /* brand pink (#ec1b6c) lifted for text, borders, focus on dark surfaces */
+  --accent-strong: #c8145a; /* brand pink deepened for filled buttons carrying white text */
   --accent-ink: #ffffff;
   --ok: #2fbf71;
   --warn: #f2b33d;
