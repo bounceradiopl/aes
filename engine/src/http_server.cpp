@@ -93,8 +93,9 @@ struct HttpServer::Impl {
       return;
     }
     const ApplyResult r = engine.apply_config(*cfg);
-    send_json(res, {{"ok", r.ok}, {"issues", api::issues_json(r.issues)}, {"notices", r.notices}, {"config", api::config_json(engine.config())}},
-              r.ok ? 200 : 400);
+    json out = api::result_json(r);
+    out["config"] = api::config_json(engine.config());
+    send_json(res, out, r.ok ? 200 : 400);
   }
 
   void routes() {
@@ -115,8 +116,11 @@ struct HttpServer::Impl {
       send_json(res, {{"service", "ok"},
                       {"product", kProductName},
                       {"version", st.version},
+                      {"station_name", st.station_name},
                       {"ptp", api::ptp_state_code(st)},
-                      {"asio_connected", st.asio_connected}});
+                      {"ptp_role", ptp_role_name(st.ptp_role)},
+                      {"asio_connected", st.asio_connected},
+                      {"bridge_connected", st.bridge_connected}});
     });
 
     server.Get("/api/auth-state", [this](const httplib::Request& req, httplib::Response& res) {
@@ -186,44 +190,84 @@ struct HttpServer::Impl {
       if (!body) return;
       if (!body->is_object()) return send_error(res, 400, "oczekiwano obiektu JSON");
       json patch = *body;
-      if (patch.contains("devices")) {
-        // devices are matched by position; merge each one onto the current device
-        json current = json::parse(config_to_json(engine.config()));
-        json merged = current["devices"];
-        const auto& arr = patch["devices"];
-        if (!arr.is_array()) return send_error(res, 400, "\"devices\" musi być tablicą");
+      patch.erase("version");
+      // outputs, subscriptions and asio_names are matched by position; each entry is merged onto
+      // the current one, so a client may send only the entries (and fields) it changes.
+      json current = json::parse(config_to_json(engine.config()));
+      for (const char* key : {"outputs", "subscriptions", "asio_names"}) {
+        if (!patch.contains(key)) continue;
+        const auto& arr = patch[key];
+        if (!arr.is_array()) return send_error(res, 400, std::string("\"") + key + "\" musi być tablicą");
+        json merged = current[key];
         for (size_t i = 0; i < arr.size() && i < merged.size(); ++i) {
-          json d = arr[i];
-          d.erase("index");
-          merged[i].merge_patch(d);
+          json item = arr[i];
+          if (item.is_null()) continue;
+          if (item.is_object() && merged[i].is_object()) {
+            item.erase("index");
+            merged[i].merge_patch(item);
+          } else {
+            merged[i] = item;
+          }
         }
-        patch["devices"] = merged;
+        patch[key] = merged;
       }
       apply_patch(patch, res);
     });
 
-    server.Get(R"(/api/devices/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
+    auto output_sdp = [this](const httplib::Request& req, httplib::Response& res) {
       const int n = std::stoi(req.matches[1]);
-      if (n < 1 || n > kDeviceCount) return send_error(res, 404, "brak urządzenia");
-      send_json(res, api::device_json(engine.config().devices[n - 1], n));
+      if (n < 1 || n > kDeviceCount) return send_error(res, 404, "brak wyjścia");
+      res.set_content(engine.output_sdp(n), "application/sdp");
+    };
+    server.Get(R"(/api/outputs/(\d+)/sdp)", output_sdp);
+    server.Get(R"(/api/devices/(\d+)/sdp)", output_sdp);  // 1.0 path
+
+    server.Get("/api/routing", [this](const httplib::Request&, httplib::Response& res) {
+      send_json(res, api::routing_json(engine.routing()));
     });
 
-    server.Put(R"(/api/devices/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
-      const int n = std::stoi(req.matches[1]);
-      if (n < 1 || n > kDeviceCount) return send_error(res, 404, "brak urządzenia");
+    server.Put("/api/routing", [this](const httplib::Request& req, httplib::Response& res) {
       auto body = parse_body(req, res);
       if (!body) return;
-      json current = json::parse(config_to_json(engine.config()));
-      json d = *body;
-      d.erase("index");
-      current["devices"][n - 1].merge_patch(d);
-      apply_patch({{"devices", current["devices"]}}, res);
+      if (!body->is_object() || !body->contains("dst") || !(*body)["dst"].is_string())
+        return send_error(res, 400, "oczekiwano {\"dst\": \"...\", \"src\": \"...\" | null}");
+      std::optional<std::string> src;
+      if (body->contains("src") && !(*body)["src"].is_null()) {
+        if (!(*body)["src"].is_string()) return send_error(res, 400, "\"src\" musi być tekstem albo null");
+        src = (*body)["src"].get<std::string>();
+      }
+      const ApplyResult r = engine.set_route((*body)["dst"].get<std::string>(), src);
+      json out = api::result_json(r);
+      if (r.ok) out["routing"] = api::routing_json(engine.routing());
+      send_json(res, out, r.ok ? 200 : 400);
     });
 
-    server.Get(R"(/api/devices/(\d+)/sdp)", [this](const httplib::Request& req, httplib::Response& res) {
+    server.Post("/api/subscriptions", [this](const httplib::Request& req, httplib::Response& res) {
+      auto body = parse_body(req, res);
+      if (!body) return;
+      std::string what;
+      if (body->is_object() && body->contains("sdp") && (*body)["sdp"].is_string()) {
+        what = (*body)["sdp"].get<std::string>();
+        if (what.rfind("v=", 0) != 0) return send_error(res, 400, "SDP musi zaczynać się od \"v=\"");
+      } else if (body->is_object() && body->contains("sap_id") && (*body)["sap_id"].is_string()) {
+        what = (*body)["sap_id"].get<std::string>();
+        if (what.rfind("v=", 0) == 0) return send_error(res, 400, "nieprawidłowy identyfikator strumienia SAP");
+      } else {
+        return send_error(res, 400, "oczekiwano {\"sdp\": \"...\"} albo {\"sap_id\": \"...\"}");
+      }
+      const ApplyResult r = engine.add_subscription(what);
+      json out = api::result_json(r);
+      if (r.ok) out["config"] = api::config_json(engine.config());
+      send_json(res, out, r.ok ? 200 : 400);
+    });
+
+    server.Delete(R"(/api/subscriptions/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
       const int n = std::stoi(req.matches[1]);
-      if (n < 1 || n > kDeviceCount) return send_error(res, 404, "brak urządzenia");
-      res.set_content(engine.output_sdp(n), "application/sdp");
+      if (n < 1 || n > kDeviceCount) return send_error(res, 404, "brak subskrypcji");
+      const ApplyResult r = engine.remove_subscription(n);
+      json out = api::result_json(r);
+      if (r.ok) out["config"] = api::config_json(engine.config());
+      send_json(res, out, r.ok ? 200 : 400);
     });
 
     server.Get("/api/streams", [this](const httplib::Request&, httplib::Response& res) {

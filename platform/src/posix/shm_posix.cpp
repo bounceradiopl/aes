@@ -9,6 +9,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 
 #include "bam/platform/event.hpp"
 #include "bam/platform/process.hpp"
@@ -177,5 +178,21 @@ std::string program_data_dir() { return "."; }
 bool ensure_directory(const std::string& path) { return mkdir(path.c_str(), 0755) == 0 || errno == EEXIST; }
 
 bool replace_file(const std::string& from, const std::string& to) { return ::rename(from.c_str(), to.c_str()) == 0; }
+
+bool copy_file(const std::string& from, const std::string& to) {
+  std::ifstream in(from, std::ios::binary);
+  if (!in) return false;
+  std::ofstream out(to, std::ios::binary | std::ios::trunc);
+  out << in.rdbuf();
+  return out.good();
+}
+
+std::string computer_name() {
+  char buf[256] = {};
+  if (gethostname(buf, sizeof(buf) - 1) != 0) return {};
+  std::string s(buf);
+  if (const auto dot = s.find('.'); dot != std::string::npos) s.resize(dot);
+  return s;
+}
 
 }  // namespace bam::platform

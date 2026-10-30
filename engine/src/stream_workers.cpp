@@ -54,16 +54,17 @@ void Engine::Impl::rx_loop() {
     }
     if (now - last_meter >= kMeterNs && view) {
       last_meter = now;
-      auto& h = view->header();
+      // Each source ring is metered where its destinations read it: D_src behind "now".
+      auto meter = [&](const ChannelRing& ring, uint64_t delay, std::atomic<float>& peak) {
+        if (now_s <= delay + kMeterFrames) return;
+        ring.read(now_s - delay - kMeterFrames, scratch.data(), kMeterFrames);
+        peak.store(peak_dbfs(scratch.data(), kMeterFrames), std::memory_order_relaxed);
+      };
       for (int ch = 0; ch < kChannelCount; ++ch) {
-        const uint64_t lat = h.rx_latency_frames[ch / 2].load(std::memory_order_relaxed);
-        if (now_s > lat + kMeterFrames) {
-          view->input(ch).read(now_s - lat - kMeterFrames, scratch.data(), kMeterFrames);
-          in_peak[ch].store(peak_dbfs(scratch.data(), kMeterFrames), std::memory_order_relaxed);
-          view->output(ch).read(now_s - kMeterFrames, scratch.data(), kMeterFrames);
-          out_peak[ch].store(peak_dbfs(scratch.data(), kMeterFrames), std::memory_order_relaxed);
-        }
+        meter(view->net_in(ch), net_delay[ch / 2].load(std::memory_order_relaxed), net_peak[ch]);
+        meter(view->asio_out(ch), 0, asio_peak[ch]);
       }
+      for (int ch = 0; ch < kWinChannels; ++ch) meter(view->win_src(ch), kWinSourceDelayFrames, win_peak[ch]);
     }
   }
 }
@@ -97,7 +98,7 @@ void Engine::Impl::tx_loop() {
     std::lock_guard lock(tx_socket_mutex);
     if (!tx_socket) continue;
     for (const auto& e : snap->tx) {
-      if (e->keep_active || client_recent) {
+      if (e->keep_active || client_recent || !e->follows_asio) {
         TxEntry* entry = e.get();
         entry->stream->pump(now_s, [&](std::span<const uint8_t> p) {
           // A full socket buffer (non-blocking send) clears within microseconds: retry briefly.

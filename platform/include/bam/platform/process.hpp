@@ -11,5 +11,8 @@ std::string program_data_dir();  // Windows: %ProgramData%\BounceAES Master; POS
 bool ensure_directory(const std::string& path);
 // Atomically replaces `to` with `from` (rename over an existing file).
 bool replace_file(const std::string& from, const std::string& to);
+// Copies `from` to `to`, overwriting it.
+bool copy_file(const std::string& from, const std::string& to);
+std::string computer_name();  // UTF-8; empty when unknown
 
 }  // namespace bam::platform

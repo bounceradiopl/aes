@@ -2,7 +2,8 @@
 // bounceaes-test: end-to-end loopback tester for a running BounceAESService.
 //
 //   bounceaes-test --configure-loopback --devices 32 --password HASLO [--port 8067] [--interface 127.0.0.1]
-//       enables devices 1..N and sets each input to the device's own output stream (via the HTTP API)
+//       enables outputs 1..N (net-out:N <- asio-out:N), subscribes subscription N to output N and
+//       routes asio-in:N <- net-in:N (via the HTTP API)
 //   bounceaes-test --loopback --seconds 60 [--devices 32] [--buffer 128]
 //       attaches to the shared timeline like the ASIO driver, plays a sample counter on every output
 //       and verifies, sample by sample, that it comes back on the matching input through the network
@@ -52,27 +53,33 @@ int configure(const Options& o) {
   const std::string cookie = login->get_header_value("Set-Cookie").substr(0, login->get_header_value("Set-Cookie").find(';'));
   httplib::Headers h = {{"Cookie", cookie}};
 
-  json devices = json::array();
-  for (int d = 1; d <= bam::kDeviceCount; ++d) devices.push_back({{"enabled", d <= o.devices}});
-  json patch = {{"devices", devices}};
+  json outputs = json::array();
+  json routes = json::object();
+  for (int d = 1; d <= bam::kDeviceCount; ++d) {
+    outputs.push_back({{"enabled", d <= o.devices}});
+    if (d <= o.devices) routes["net-out:" + std::to_string(d)] = "asio-out:" + std::to_string(d);
+  }
+  json patch = {{"outputs", outputs}, {"routes", routes}};
   if (!o.interface_ip.empty()) patch["interface_ip"] = o.interface_ip;
   auto r = c.Put("/api/config", h, patch.dump(), "application/json");
   if (!r || r->status != 200) {
-    std::fprintf(stderr, "Nie można włączyć urządzeń: %s\n", r ? r->body.c_str() : "brak odpowiedzi");
+    std::fprintf(stderr, "Nie można włączyć wyjść: %s\n", r ? r->body.c_str() : "brak odpowiedzi");
     return 1;
   }
-  devices = json::array();
+  json subs = json::array();
+  routes = json::object();
   for (int d = 1; d <= o.devices; ++d) {
-    auto sdp = c.Get("/api/devices/" + std::to_string(d) + "/sdp", h);
+    auto sdp = c.Get("/api/outputs/" + std::to_string(d) + "/sdp", h);
     if (!sdp || sdp->status != 200) return 1;
-    devices.push_back({{"rx_sdp", sdp->body}});
+    subs.push_back({{"enabled", true}, {"name", ""}, {"sdp", sdp->body}});
+    routes["asio-in:" + std::to_string(d)] = "net-in:" + std::to_string(d);
   }
-  r = c.Put("/api/config", h, json{{"devices", devices}}.dump(), "application/json");
+  r = c.Put("/api/config", h, json{{"subscriptions", subs}, {"routes", routes}}.dump(), "application/json");
   if (!r || r->status != 200) {
-    std::fprintf(stderr, "Nie można ustawić wejść: %s\n", r ? r->body.c_str() : "brak odpowiedzi");
+    std::fprintf(stderr, "Nie można ustawić subskrypcji: %s\n", r ? r->body.c_str() : "brak odpowiedzi");
     return 1;
   }
-  std::printf("Skonfigurowano pętlę na %d urządzeniach (wejście N = wyjście N)\n", o.devices);
+  std::printf("Skonfigurowano pętlę na %d parach (subskrypcja N = wyjście N, asio-in:N <- net-in:N)\n", o.devices);
   return 0;
 }
 
@@ -151,7 +158,7 @@ int loopback(const Options& o) {
 
     if (bp::monotonic_ns() > warmup_end) {
       for (int ch = 0; ch < channels; ++ch) {
-        const uint64_t lat = h.rx_latency_frames[ch / 2].load();
+        const uint64_t lat = view.asio_route(ch / 2).delay;
         const uint64_t from = s - b - lat;
         for (uint32_t i = 0; i < b; ++i) {
           ++checked[ch];

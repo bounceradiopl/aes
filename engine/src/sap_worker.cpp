@@ -16,7 +16,7 @@ constexpr int64_t kExpireCheckNs = 10LL * 1'000'000'000;
 void Engine::Impl::sap_loop() {
   std::vector<uint8_t> buf(4096);
   std::vector<uint8_t> ready;
-  std::map<int, std::string> announced;  // device -> SDP last announced
+  std::map<int, std::string> announced;  // output -> SDP last announced
   std::optional<platform::UdpSocket> sock;
   std::string sock_iface;
   uint64_t seen_dirty = 0;
@@ -70,13 +70,13 @@ void Engine::Impl::sap_loop() {
         std::lock_guard lock(config_mutex);
         cfg = config;
       }
-      for (int dev = 1; dev <= kDeviceCount; ++dev) {
-        auto it = announced.find(dev);
-        if (cfg.devices[dev - 1].enabled) {
-          const std::string sdp = build_output_sdp(cfg, dev);
+      for (int out = 1; out <= kDeviceCount; ++out) {
+        auto it = announced.find(out);
+        if (cfg.outputs[out - 1].enabled) {
+          const std::string sdp = build_output_sdp(cfg, out);
           if (it != announced.end() && it->second != sdp) send(true, it->second);
           send(false, sdp);
-          announced[dev] = sdp;
+          announced[out] = sdp;
         } else if (it != announced.end()) {
           send(true, it->second);
           announced.erase(it);
@@ -84,7 +84,7 @@ void Engine::Impl::sap_loop() {
       }
     }
   }
-  for (const auto& [dev, sdp] : announced) send(true, sdp);
+  for (const auto& [out, sdp] : announced) send(true, sdp);
 }
 
 }  // namespace bam

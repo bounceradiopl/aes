@@ -107,12 +107,13 @@ void poll() {
       const auto j = nlohmann::json::parse(body);
       ptp = j.value("ptp", "freerun");
       const bool asio = j.value("asio_connected", false);
-      const wchar_t* ptp_text = ptp == "locked"     ? L"zsynchronizowany"
+      const wchar_t* ptp_text = ptp == "master"     ? L"master (ten komputer nadaje zegar)"
+                                : ptp == "locked"   ? L"zsynchronizowany"
                                 : ptp == "holdover" ? L"holdover (brak mastera)"
                                 : ptp == "listening" ? L"synchronizacja…"
                                                      : L"brak mastera PTP";
       tip = std::wstring(L"BounceAES Master\nPTP: ") + ptp_text + L"\nASIO: " + (asio ? L"aplikacja połączona" : L"brak aplikacji");
-      health = ptp == "locked" ? Health::Ok : Health::Warning;
+      health = ptp == "locked" || ptp == "master" ? Health::Ok : Health::Warning;
     } catch (...) {
       health = Health::Warning;
     }
@@ -121,6 +122,7 @@ void poll() {
     if (ptp == "down") notify(L"BounceAES Master", L"Usługa przestała odpowiadać", NIIF_ERROR);
     else if (ptp == "holdover") notify(L"BounceAES Master", L"Utracono synchronizację PTP (holdover)", NIIF_WARNING);
     else if (ptp == "locked" && g_ptp != "") notify(L"BounceAES Master", L"PTP zsynchronizowany", NIIF_INFO);
+    else if (ptp == "master") notify(L"BounceAES Master", L"Ten komputer jest masterem PTP sieci", NIIF_INFO);
   }
   g_first_poll = false;
   g_ptp = ptp;

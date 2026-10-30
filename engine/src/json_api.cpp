@@ -9,45 +9,12 @@ namespace bam::api {
 
 namespace {
 double round1(double v) { return std::round(v * 10.0) / 10.0; }
-}  // namespace
 
-json device_json(const DeviceConfig& d, int index) {
-  return {{"index", index},
-          {"enabled", d.enabled},
-          {"name", d.name},
-          {"tx_address", d.tx_address},
-          {"tx_ptime_us", d.tx_ptime_us},
-          {"keep_active", d.keep_active},
-          {"rx_sdp", d.rx_sdp},
-          {"rx_latency_us", d.rx_latency_us}};
-}
+json db_pair(const float (&db)[2]) { return {round1(db[0]), round1(db[1])}; }
 
-json config_json(const Config& c) {
-  json devices = json::array();
-  for (int i = 0; i < kDeviceCount; ++i) devices.push_back(device_json(c.devices[i], i + 1));
-  return {{"interface_ip", c.interface_ip},
-          {"ptp_domain", c.ptp_domain},
-          {"pc_nominal_level_dbfs", c.pc_nominal_level_dbfs},
-          {"http_bind", c.http_bind},
-          {"http_port", c.http_port},
-          {"devices", devices}};
-}
-
-const char* ptp_state_code(const EngineStatus& s) {
-  if (!s.ptp_enabled) return "disabled";
-  switch (s.ptp.state) {
-    case PtpState::Locked:
-      return "locked";
-    case PtpState::Holdover:
-      return "holdover";
-    case PtpState::Listening:
-      return s.ptp.steps > 0 ? "listening" : "freerun";
-  }
-  return "freerun";
-}
-
-static json ptp_json(const EngineStatus& s) {
+json ptp_json(const EngineStatus& s) {
   return {{"state", ptp_state_code(s)},
+          {"role", ptp_role_name(s.ptp_role)},
           {"has_master", s.ptp.has_master},
           {"grandmaster", s.ptp.has_master ? s.ptp.grandmaster.to_string() : ""},
           {"master", s.ptp.has_master ? s.ptp.master.clock.to_string() : ""},
@@ -59,59 +26,114 @@ static json ptp_json(const EngineStatus& s) {
           {"steps", s.ptp.steps}};
 }
 
-static json counters_json(const DeviceStatus& d) {
-  return {{"tx_packets", d.tx.packets},
-          {"tx_bytes", d.tx.bytes},
-          {"tx_errors", d.tx.errors},
-          {"rx_packets", d.rx.packets},
-          {"rx_bytes", d.rx.bytes},
-          {"rx_underruns", d.rx.underruns},
-          {"rx_overruns", d.rx.overruns},
-          {"rx_seq_errors", d.rx.seq_errors},
-          {"rx_jitter_ms", std::round(d.rx.jitter_ms * 1000.0) / 1000.0}};
+json tx_counters(const TxStats& t) { return {{"tx_packets", t.packets}, {"tx_bytes", t.bytes}, {"tx_errors", t.errors}}; }
+
+json rx_counters(const RxStats& r) {
+  return {{"rx_packets", r.packets},
+          {"rx_bytes", r.bytes},
+          {"rx_underruns", r.underruns},
+          {"rx_overruns", r.overruns},
+          {"rx_seq_errors", r.seq_errors},
+          {"rx_jitter_ms", std::round(r.jitter_ms * 1000.0) / 1000.0}};
+}
+
+json asio_json(const EngineStatus& s) { return {{"connected", s.asio_connected}, {"buffer_frames", s.asio_buffer_frames}}; }
+}  // namespace
+
+json config_json(const Config& c) {
+  json j = json::parse(config_to_json(c));
+  j.erase("password_hash");
+  return j;
+}
+
+const char* ptp_state_code(const EngineStatus& s) {
+  if (!s.ptp_enabled) return "disabled";
+  switch (s.ptp.state) {
+    case PtpState::Master:
+      return "master";
+    case PtpState::Locked:
+      return "locked";
+    case PtpState::Holdover:
+      return "holdover";
+    case PtpState::Listening:
+      return s.ptp.steps > 0 ? "listening" : "freerun";
+  }
+  return "freerun";
 }
 
 json status_json(const EngineStatus& s) {
-  json devices = json::array();
-  for (const auto& d : s.devices) {
-    devices.push_back({{"index", d.index},
-                       {"enabled", d.enabled},
-                       {"name", d.name},
-                       {"tx_address", d.tx_address},
-                       {"tx_active", d.tx_active},
-                       {"tx_conflict", d.tx_conflict},
-                       {"rx_configured", d.rx_configured},
-                       {"rx_signal", d.rx_signal},
-                       {"rx_source_name", d.rx_source_name},
-                       {"rx_error", d.rx_error},
-                       {"counters", counters_json(d)},
-                       {"in_db", {round1(d.in_peak_db[0]), round1(d.in_peak_db[1])}},
-                       {"out_db", {round1(d.out_peak_db[0]), round1(d.out_peak_db[1])}}});
+  json outputs = json::array();
+  for (const auto& o : s.outputs) {
+    outputs.push_back({{"index", o.index},
+                       {"enabled", o.enabled},
+                       {"name", o.name},
+                       {"address", o.address},
+                       {"ptime_us", o.ptime_us},
+                       {"source", o.source},
+                       {"active", o.tx_active},
+                       {"conflict", o.conflict},
+                       {"counters", tx_counters(o.tx)},
+                       {"db", db_pair(o.peak_db)}});
+  }
+  json subs = json::array();
+  for (const auto& sub : s.subscriptions) {
+    subs.push_back({{"index", sub.index},
+                    {"enabled", sub.enabled},
+                    {"name", sub.name},
+                    {"address", sub.address},
+                    {"signal", sub.signal},
+                    {"error", sub.error},
+                    {"latency_us", sub.latency_us},
+                    {"counters", rx_counters(sub.rx)},
+                    {"db", db_pair(sub.peak_db)}});
   }
   return {{"product", kProductName},
           {"version", s.version},
+          {"station_name", s.station_name},
           {"uptime_s", s.uptime_s},
           {"interface_ip", s.interface_ip},
           {"ptp", ptp_json(s)},
-          {"asio", {{"connected", s.asio_connected}, {"buffer_frames", s.asio_buffer_frames}}},
-          {"devices", devices}};
+          {"asio", asio_json(s)},
+          {"bridge", {{"connected", s.bridge_connected}}},
+          {"outputs", outputs},
+          {"subscriptions", subs}};
 }
 
 json live_json(const EngineStatus& s) {
-  json devices = json::array();
-  for (const auto& d : s.devices) {
-    if (!d.enabled) continue;
-    devices.push_back({{"i", d.index},
-                       {"in", {round1(d.in_peak_db[0]), round1(d.in_peak_db[1])}},
-                       {"out", {round1(d.out_peak_db[0]), round1(d.out_peak_db[1])}},
-                       {"sig", d.rx_signal},
-                       {"tx", d.tx_active},
-                       {"c", counters_json(d)}});
+  json outputs = json::array();
+  for (const auto& o : s.outputs) {
+    if (!o.enabled) continue;
+    outputs.push_back({{"i", o.index}, {"db", db_pair(o.peak_db)}, {"tx", o.tx_active}, {"c", tx_counters(o.tx)}});
+  }
+  json subs = json::array();
+  for (const auto& sub : s.subscriptions) {
+    if (!sub.enabled) continue;
+    subs.push_back({{"i", sub.index}, {"db", db_pair(sub.peak_db)}, {"sig", sub.signal}, {"c", rx_counters(sub.rx)}});
   }
   return {{"ptp", ptp_json(s)},
-          {"asio", {{"connected", s.asio_connected}, {"buffer_frames", s.asio_buffer_frames}}},
+          {"asio", asio_json(s)},
+          {"bridge", {{"connected", s.bridge_connected}}},
           {"uptime_s", s.uptime_s},
-          {"devices", devices}};
+          {"outputs", outputs},
+          {"subscriptions", subs}};
+}
+
+json routing_json(const RoutingView& v) {
+  auto nodes = [](const std::vector<RouteNode>& list) {
+    json out = json::array();
+    for (const auto& n : list) {
+      out.push_back({{"id", n.id},
+                     {"name", n.name},
+                     {"group", n.group},
+                     {"available", n.available},
+                     {"note", n.note},
+                     {"db", db_pair(n.peak_db)}});
+    }
+    return out;
+  };
+  json routes = json::object();
+  for (const auto& [dst, src] : v.routes) routes[dst] = src;
+  return {{"sources", nodes(v.sources)}, {"dests", nodes(v.dests)}, {"routes", routes}};
 }
 
 json streams_json(const std::vector<DiscoveredStream>& list) {
@@ -143,6 +165,12 @@ json issues_json(const std::vector<ConfigIssue>& issues) {
   json out = json::array();
   for (const auto& i : issues) out.push_back({{"device", i.device}, {"field", i.field}, {"message", i.message}});
   return out;
+}
+
+json result_json(const ApplyResult& r) {
+  json j = {{"ok", r.ok}, {"issues", issues_json(r.issues)}, {"notices", r.notices}};
+  if (r.created) j["created"] = r.created;
+  return j;
 }
 
 }  // namespace bam::api

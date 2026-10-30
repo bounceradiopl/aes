@@ -193,4 +193,15 @@ bool replace_file(const std::string& from, const std::string& to) {
   return MoveFileExW(widen(from).c_str(), widen(to).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
 }
 
+bool copy_file(const std::string& from, const std::string& to) {
+  return CopyFileW(widen(from).c_str(), widen(to).c_str(), FALSE) != 0;
+}
+
+std::string computer_name() {
+  wchar_t buf[MAX_COMPUTERNAME_LENGTH + 1] = {};
+  DWORD n = MAX_COMPUTERNAME_LENGTH + 1;
+  if (!GetComputerNameW(buf, &n)) return {};
+  return narrow(buf);
+}
+
 }  // namespace bam::platform

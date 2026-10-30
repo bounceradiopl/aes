@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <fstream>
+#include <set>
 #include <nlohmann/json.hpp>
 
 #include "bam/engine.hpp"
@@ -87,38 +88,87 @@ TEST_CASE("HTTP API: auth flow, config, SDP, panel, live feed") {
   REQUIRE(cfg);
   REQUIRE(cfg->status == 200);
   auto cj = json::parse(cfg->body);
-  CHECK(cj["devices"].size() == 32);
+  CHECK(cj["version"] == 2);
+  CHECK(cj["outputs"].size() == 32);
+  CHECK(cj["subscriptions"].size() == 32);
+  CHECK(cj["asio_names"].size() == 32);
   CHECK_FALSE(cj.contains("password_hash"));
 
-  auto bad = f.client.Put("/api/devices/2", f.auth(), R"({"tx_ptime_us": 999})", "application/json");
+  auto bad = f.client.Put("/api/config", f.auth(), R"({"outputs": [{}, {"ptime_us": 999}]})", "application/json");
   REQUIRE(bad);
   CHECK(bad->status == 400);
   auto bj = json::parse(bad->body);
   CHECK(bj["ok"] == false);
   CHECK(bj["issues"][0]["device"] == 2);
 
-  auto good = f.client.Put("/api/devices/3", f.auth(), R"({"enabled": true, "name": "Kraków"})", "application/json");
-  REQUIRE(good);
-  CHECK(good->status == 200);
-  CHECK(f.engine->config().devices[2].name == "Kraków");
-  CHECK(f.engine->config().devices[2].enabled);
-  CHECK(f.engine->config().devices[0].enabled);  // untouched by the partial update
-
-  auto partial = f.client.Put("/api/config", f.auth(), R"({"ptp_domain": 4, "devices": [{}, {"name": "Poznań"}]})", "application/json");
+  auto partial = f.client.Put("/api/config", f.auth(),
+                              R"({"ptp_domain": 4, "ptp_role": "preferred", "outputs": [{}, {"name": "Poznań"}, {"enabled": true, "name": "Kraków"}]})",
+                              "application/json");
   REQUIRE(partial);
   CHECK(partial->status == 200);
   CHECK(f.engine->config().ptp_domain == 4);
-  CHECK(f.engine->config().devices[1].name == "Poznań");
-  CHECK(f.engine->config().devices[2].name == "Kraków");
+  CHECK(f.engine->config().ptp_role == bam::PtpRole::Preferred);
+  CHECK(f.engine->config().outputs[1].name == "Poznań");
+  CHECK(f.engine->config().outputs[2].name == "Kraków");
+  CHECK(f.engine->config().outputs[2].enabled);
+  CHECK(f.engine->config().outputs[0].enabled);  // untouched by the partial update
   CHECK_FALSE(f.engine->config().password_hash.empty());
 
-  auto sdp = f.client.Get("/api/devices/1/sdp", f.auth());
+  auto sdp = f.client.Get("/api/outputs/1/sdp", f.auth());
   REQUIRE(sdp);
   CHECK(sdp->body.find("a=rtpmap:98 L24/48000/2") != std::string::npos);
+  CHECK(f.client.Get("/api/outputs/33/sdp", f.auth())->status == 404);
+
+  // ---- subscriptions and routing ----
+  auto add = f.client.Post("/api/subscriptions", f.auth(), json{{"sdp", sdp->body}}.dump(), "application/json");
+  REQUIRE(add);
+  CHECK(add->status == 200);
+  CHECK(json::parse(add->body)["created"] == 1);
+  CHECK(f.engine->config().subscriptions[0].enabled);
+  CHECK(f.client.Post("/api/subscriptions", f.auth(), R"({"sdp": "nonsense"})", "application/json")->status == 400);
+  CHECK(f.client.Post("/api/subscriptions", f.auth(), R"({"sap_id": "1.2.3.4/ffff"})", "application/json")->status == 400);
+
+  auto routing = f.client.Get("/api/routing", f.auth());
+  REQUIRE(routing);
+  REQUIRE(routing->status == 200);
+  auto rj = json::parse(routing->body);
+  auto ids = [](const json& list) {
+    std::set<std::string> out;
+    for (const auto& n : list) out.insert(n["id"].get<std::string>());
+    return out;
+  };
+  CHECK(ids(rj["sources"]).count("net-in:1"));
+  CHECK(ids(rj["sources"]).count("asio-out:1"));
+  CHECK(ids(rj["dests"]).count("net-out:1"));
+  CHECK(ids(rj["dests"]).count("asio-in:1"));
+  CHECK(rj["routes"]["net-out:1"] == "asio-out:1");
+
+  auto put = f.client.Put("/api/routing", f.auth(), R"({"dst": "asio-in:1", "src": "net-in:1"})", "application/json");
+  REQUIRE(put);
+  CHECK(put->status == 200);
+  CHECK(json::parse(put->body)["routing"]["routes"]["asio-in:1"] == "net-in:1");
+  CHECK(f.engine->config().routes.at("asio-in:1") == "net-in:1");
+  CHECK(f.client.Put("/api/routing", f.auth(), R"({"dst": "nope:1", "src": "net-in:1"})", "application/json")->status == 400);
+  CHECK(f.client.Put("/api/routing", f.auth(), R"({"dst": "asio-in:1", "src": "nope"})", "application/json")->status == 400);
+  CHECK(f.client.Put("/api/routing", f.auth(), R"({"src": "net-in:1"})", "application/json")->status == 400);
+  auto unroute = f.client.Put("/api/routing", f.auth(), R"({"dst": "asio-in:1", "src": null})", "application/json");
+  CHECK(unroute->status == 200);
+  CHECK(f.engine->config().routes.count("asio-in:1") == 0);
+
+  f.client.Put("/api/routing", f.auth(), R"({"dst": "asio-in:2", "src": "net-in:1"})", "application/json");
+  auto del = f.client.Delete("/api/subscriptions/1", f.auth());
+  REQUIRE(del);
+  CHECK(del->status == 200);
+  CHECK_FALSE(f.engine->config().subscriptions[0].enabled);
+  CHECK(f.engine->config().routes.count("asio-in:2") == 0);
+  CHECK(f.client.Delete("/api/subscriptions/40", f.auth())->status == 404);
 
   auto status = f.client.Get("/api/status", f.auth());
   REQUIRE(status);
-  CHECK(json::parse(status->body)["devices"].size() == 32);
+  auto sj = json::parse(status->body);
+  CHECK(sj["outputs"].size() == 32);
+  CHECK(sj["subscriptions"].size() == 32);
+  CHECK(sj["ptp"]["role"] == "preferred");
   CHECK(f.client.Get("/api/streams", f.auth())->status == 200);
   CHECK(f.client.Get("/api/logs", f.auth())->status == 200);
   CHECK(f.client.Get("/api/interfaces", f.auth())->status == 200);

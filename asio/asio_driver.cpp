@@ -122,10 +122,12 @@ ASIOError BounceAsio::getChannels(long* inputs, long* outputs) {
 ASIOError BounceAsio::getLatencies(long* input_latency, long* output_latency) {
   if (!view_) return ASE_NotPresent;
   const long b = frames_ ? frames_ : kPreferredBuffer;
+  // Input latency: one buffer plus the smallest D_src among the routed input pairs.
   uint32_t min_rx = 0xFFFFFFFF;
-  const uint32_t mask = header().device_active_mask.load();
-  for (int d = 0; d < kDeviceCount; ++d)
-    if (mask & (1u << d)) min_rx = std::min(min_rx, header().rx_latency_frames[d].load());
+  for (int p = 0; p < kDeviceCount; ++p) {
+    const auto route = view_->asio_route(p);
+    if (route.kind != ShmSource::None) min_rx = std::min(min_rx, route.delay);
+  }
   if (min_rx == 0xFFFFFFFF) min_rx = 240;
   if (input_latency) *input_latency = b + static_cast<long>(min_rx);
   if (output_latency) *output_latency = static_cast<long>(kOutputLeadBuffers) * b + static_cast<long>(header().output_latency_frames.load());
