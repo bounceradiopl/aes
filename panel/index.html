@@ -52,6 +52,7 @@
       <div class="pills">
         <span class="pill" id="pill-ptp" title="Synchronizacja zegara PTP"><i></i><b>PTP</b><span>—</span></span>
         <span class="pill" id="pill-asio" title="Aplikacja ASIO"><i></i><b>ASIO</b><span>—</span></span>
+        <span class="pill" id="pill-win" title="Audio Windows (BounceAES Audio Bridge w sesji użytkownika)"><i></i><b>Windows</b><span>—</span></span>
         <span class="pill plain" id="pill-iface" title="Karta sieciowa AoIP"><b>Sieć</b><span>—</span></span>
         <button type="button" class="ghost" id="change-password">Zmień hasło</button>
         <button class="ghost" id="logout">Wyloguj</button>
@@ -59,22 +60,58 @@
     </header>
 
     <nav class="tabs" role="tablist">
+      <a href="#routing" data-tab="routing">Routing</a>
       <a href="#config" data-tab="config">Konfiguracja</a>
       <a href="#stats" data-tab="stats">Statystyki</a>
       <a href="#logs" data-tab="logs">Logi</a>
     </nav>
 
     <main>
+      <!-- ================= Routing ================= -->
+      <section id="tab-routing" class="tab">
+        <div class="card">
+          <div class="card-head">
+            <h2>Routing</h2>
+            <div class="head-tools">
+              <label class="toggle"><input type="checkbox" id="only-used"> tylko używane</label>
+              <button type="button" class="ghost" id="add-source">Dodaj źródło…</button>
+            </div>
+          </div>
+          <p class="hint matrix-hint">Wiersze to źródła, kolumny to cele. Kliknięcie kratki łączy źródło z celem od razu; drugie kliknięcie rozłącza. Każdy cel ma jedno źródło.</p>
+          <div class="matrix-wrap" id="matrix-wrap">
+            <table class="matrix" id="matrix"></table>
+          </div>
+        </div>
+      </section>
+
       <!-- ================= Konfiguracja ================= -->
-      <section id="tab-config" class="tab">
+      <section id="tab-config" class="tab hidden">
         <div class="card global">
           <h2>Ustawienia globalne</h2>
           <div class="grid">
+            <label>Nazwa stacji
+              <input type="text" id="g-station" maxlength="40" placeholder="nazwa komputera">
+              <small>W nazwach strumieni: „stacja / wyjście”</small>
+            </label>
             <label>Karta sieciowa AoIP
               <select id="g-iface"></select>
             </label>
             <label>Domena PTP
               <input type="number" id="g-domain" min="0" max="127">
+            </label>
+            <label>Rola PTP
+              <select id="g-role">
+                <option value="auto">automatyczna</option>
+                <option value="preferred">preferowany master</option>
+                <option value="slave">tylko slave</option>
+              </select>
+              <small id="g-role-hint"></small>
+            </label>
+            <label>Priorytet PTP 1
+              <input type="number" id="g-prio1" min="0" max="255">
+            </label>
+            <label>Priorytet PTP 2
+              <input type="number" id="g-prio2" min="0" max="255">
             </label>
             <label class="wide">Poziom nominalny PC
               <span class="range-row">
@@ -92,7 +129,7 @@
 
         <div class="card">
           <div class="card-head">
-            <h2>Urządzenia</h2>
+            <h2>Wyjścia AoIP</h2>
             <label class="toggle"><input type="checkbox" id="only-active"> tylko aktywne</label>
           </div>
           <div class="table-wrap">
@@ -102,17 +139,45 @@
                   <th class="c-num">#</th>
                   <th>Aktywne</th>
                   <th>Nazwa</th>
-                  <th>Wyjście (multicast)</th>
+                  <th>Adres multicast</th>
                   <th>ptime</th>
-                  <th title="Wysyłaj ciszę, gdy aplikacja nie gra (Axia: KEEP CHANNEL ACTIVE)">Utrzymuj</th>
-                  <th>Wejście (źródło)</th>
-                  <th title="Opóźnienie odbioru">Opóźn. ms</th>
-                  <th>Poziomy we / wy</th>
+                  <th title="Wysyłaj ciszę, gdy aplikacja ASIO nie gra (Axia: KEEP CHANNEL ACTIVE)">Utrzymuj</th>
+                  <th>Źródło</th>
+                  <th>Poziom</th>
                 </tr>
               </thead>
-              <tbody id="device-rows"></tbody>
+              <tbody id="output-rows"></tbody>
             </table>
           </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>Subskrypcje</h2>
+            <button type="button" class="ghost" id="add-subscription">Dodaj źródło…</button>
+          </div>
+          <div class="table-wrap">
+            <table class="devices">
+              <thead>
+                <tr>
+                  <th class="c-num">#</th>
+                  <th>Aktywna</th>
+                  <th>Nazwa</th>
+                  <th>Źródło</th>
+                  <th title="Opóźnienie odbioru">Opóźn. ms</th>
+                  <th>Poziom</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="subscription-rows"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Nazwy par ASIO</h2>
+          <p class="hint asio-hint">Tak aplikacje ASIO widzą kanały „BounceAES NN” (wejścia i wyjścia).</p>
+          <div class="asio-names" id="asio-names"></div>
         </div>
       </section>
 
@@ -130,19 +195,29 @@
         </div>
         <div class="card">
           <div class="card-head">
-            <h2>Statystyki strumieni</h2>
+            <h2>Wyjścia</h2>
             <button class="ghost" id="reset-stats">Zeruj liczniki</button>
           </div>
           <div class="table-wrap">
             <table class="stats">
               <thead>
+                <tr><th class="c-num">#</th><th>Nazwa</th><th class="src-cell">Źródło</th><th>TxPkts</th><th>TxBytes</th><th>TxErr</th><th>Nadaje</th></tr>
+              </thead>
+              <tbody id="stats-out-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Subskrypcje</h2>
+          <div class="table-wrap">
+            <table class="stats">
+              <thead>
                 <tr>
                   <th class="c-num">#</th><th>Nazwa</th>
-                  <th>TxPkts</th><th>TxErr</th><th>RxPkts</th><th>RxBytes</th>
-                  <th>RxUnderrun</th><th>RxOverrun</th><th>RxSeqErr</th><th>Jitter ms</th><th>Sygnał</th>
+                  <th>RxPkts</th><th>RxBytes</th><th>RxUnderrun</th><th>RxOverrun</th><th>RxSeqErr</th><th>Jitter ms</th><th>Sygnał</th>
                 </tr>
               </thead>
-              <tbody id="stats-rows"></tbody>
+              <tbody id="stats-sub-rows"></tbody>
             </table>
           </div>
         </div>
@@ -173,26 +248,29 @@
   <!-- Dialogs -->
   <dialog id="dlg-browse">
     <form method="dialog">
-      <h3>Wybierz strumień z sieci <small id="browse-target"></small></h3>
-      <p class="hint">Strumienie AES67 ogłaszane w sieci (SAP). Lista odświeża się co kilka sekund.</p>
+      <h3>Dodaj źródło <small>subskrypcja strumienia AES67</small></h3>
+      <p class="hint">Strumienie ogłaszane w sieci (SAP), np. Orban, Omnia, konsola albo inny komputer z BounceAES Master. Lista odświeża się co kilka sekund.</p>
       <div class="table-wrap tall">
         <table class="streams">
           <thead><tr><th>Nazwa</th><th>Źródło</th><th>Adres</th><th>Format</th><th></th></tr></thead>
           <tbody id="browse-rows"></tbody>
         </table>
       </div>
-      <menu><button value="cancel" class="ghost">Zamknij</button></menu>
+      <menu>
+        <button type="button" class="ghost" id="browse-paste">Wklej SDP…</button>
+        <button value="cancel" class="primary">Zamknij</button>
+      </menu>
     </form>
   </dialog>
 
   <dialog id="dlg-paste">
     <form method="dialog">
       <h3>Wklej SDP źródła <small id="paste-target"></small></h3>
-      <p class="hint">Np. plik SDP z Orbana. Zostanie sprawdzony przy zapisie.</p>
+      <p class="hint">Np. plik SDP z Orbana. Zostanie sprawdzony od razu.</p>
       <textarea id="paste-sdp" rows="16" spellcheck="false"></textarea>
       <menu>
         <button value="cancel" class="ghost">Anuluj</button>
-        <button value="ok" class="primary" id="paste-ok">Użyj</button>
+        <button value="ok" class="primary" id="paste-ok">Dodaj</button>
       </menu>
     </form>
   </dialog>

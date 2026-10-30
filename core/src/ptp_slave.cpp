@@ -332,7 +332,8 @@ PtpStatus PtpPort::status() const {
     s.master = *master_;
     s.grandmaster = grandmaster_;
   }
-  if (state_ == PtpState::Master) {
+  if (state_ == PtpState::Master) {  // this port is the network's clock: report itself as master
+    s.has_master = true;
     s.grandmaster = self_.clock;
     s.master = self_;
   }

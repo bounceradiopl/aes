@@ -603,7 +603,10 @@ ApplyResult Engine::set_route(const std::string& dest, const std::optional<std::
     next.routes.erase(dest_id);
   }
   r = m.commit(std::move(next));
-  if (r.ok) log_info("Routing: " + dest_id + " ← " + (source && !source->empty() ? *source : std::string("(brak)")));
+  if (r.ok) {
+    auto it = m.config.routes.find(dest_id);
+    log_info("Routing: " + dest_id + " ← " + (it != m.config.routes.end() ? it->second : std::string("(brak)")));
+  }
   return r;
 }
 
