@@ -22,6 +22,9 @@ constexpr double kKp = 0.2;
 constexpr double kKi = 0.02;
 constexpr double kMaxFreqError = 500e-6;
 constexpr double kHoldoverAlpha = 1.0 / 64;  // ~8 s averaging of the frequency estimate at 8 syncs/s
+constexpr int64_t kMasterQualification = 3 * kSecond;  // own dataset must be the best this long
+constexpr int64_t kAnnounceInterval = kSecond;         // logAnnounceInterval 0
+constexpr int64_t kSyncInterval = 125'000'000;          // logSyncInterval -3
 
 int64_t median(std::deque<int64_t> v) {
   std::sort(v.begin(), v.end());
@@ -35,12 +38,26 @@ std::pair<uint64_t, uint16_t> port_key(const PortIdentity& p) {
 }
 }  // namespace
 
-PtpSlave::PtpSlave(uint8_t domain, ClockIdentity self, MediaClock initial) : domain_(domain), clock_(initial) {
+PtpPort::PtpPort(uint8_t domain, ClockIdentity self, MediaClock initial, PtpLocal local)
+    : domain_(domain), clock_(initial), local_(std::move(local)) {
   self_.clock = self;
   self_.port = 1;
 }
 
-void PtpSlave::on_message(std::span<const uint8_t> bytes, int64_t rx_local) {
+void PtpPort::set_local(const PtpLocal& local) {
+  local_ = local;
+  if (local_.role == PtpRole::Slave && state_ == PtpState::Master) leave_master();
+  self_best_since_ = 0;
+}
+
+AnnounceBody PtpPort::own_announce() const {
+  AnnounceBody a = local_.announce;
+  a.gm_identity = self_.clock;
+  a.steps_removed = 0;
+  return a;
+}
+
+void PtpPort::on_message(std::span<const uint8_t> bytes, int64_t rx_local) {
   auto m = parse_ptp(bytes);
   if (!m || m->header.domain != domain_) return;
   if (m->header.source.clock == self_.clock) return;
@@ -48,6 +65,9 @@ void PtpSlave::on_message(std::span<const uint8_t> bytes, int64_t rx_local) {
   switch (m->header.type) {
     case PtpMsgType::Announce:
       on_announce(*m, rx_local);
+      return;
+    case PtpMsgType::DelayReq:
+      if (state_ == PtpState::Master) delay_resps_.emplace_back(m->header.sequence, rx_local, m->header.source);
       return;
     case PtpMsgType::Sync:
       if (!master_ || !(m->header.source == *master_)) return;
@@ -87,7 +107,7 @@ void PtpSlave::on_message(std::span<const uint8_t> bytes, int64_t rx_local) {
   }
 }
 
-void PtpSlave::on_announce(const PtpMessage& m, int64_t now) {
+void PtpPort::on_announce(const PtpMessage& m, int64_t now) {
   auto& entry = foreign_[port_key(m.header.source)];
   entry.first = m.header.source;
   entry.second.announce = m.announce;
@@ -97,11 +117,23 @@ void PtpSlave::on_announce(const PtpMessage& m, int64_t now) {
   select_master(now);
 }
 
-void PtpSlave::select_master(int64_t now) {
+void PtpPort::select_master(int64_t now) {
   const std::pair<PortIdentity, Foreign>* best = nullptr;
   for (const auto& [key, value] : foreign_) {
     if (!best || compare_announce(value.second.announce, best->second.announce) < 0) best = &value;
   }
+
+  // Own dataset competes unless the role is slave-only.
+  const bool own_best = local_.role != PtpRole::Slave && (!best || compare_announce(own_announce(), best->second.announce) < 0);
+  if (own_best) {
+    if (state_ == PtpState::Master) return;
+    if (self_best_since_ == 0) self_best_since_ = now;
+    if (now - self_best_since_ >= kMasterQualification) become_master(now);
+    return;  // until qualified, keep following the current master (if any)
+  }
+  self_best_since_ = 0;
+  if (state_ == PtpState::Master) leave_master();
+
   if (!best) {
     if (master_) {
       master_.reset();
@@ -117,7 +149,51 @@ void PtpSlave::select_master(int64_t now) {
   grandmaster_ = best->second.announce.gm_identity;
 }
 
-void PtpSlave::reset_servo_windows() {
+void PtpPort::become_master(int64_t now) {
+  // Time continues from the current mapping: no step for anyone already following us.
+  clock_.set_mapping(now, clock_.to_ptp(now), stepped_once_ ? holdover_freq_ : clock_.rate());
+  master_.reset();
+  state_ = PtpState::Master;
+  next_announce_ = now;
+  next_sync_ = now;
+  followups_.clear();
+  delay_resps_.clear();
+  reset_servo_windows();
+}
+
+void PtpPort::leave_master() {
+  state_ = PtpState::Listening;
+  followups_.clear();
+  delay_resps_.clear();
+}
+
+std::vector<PtpOut> PtpPort::poll_master(int64_t now) {
+  std::vector<PtpOut> out;
+  if (state_ != PtpState::Master) return out;
+  if (now >= next_announce_) {
+    out.push_back({build_announce(domain_, self_, ++announce_seq_, own_announce()), false, false, 0});
+    out.back().bytes[33] = 0;  // logMessageInterval 0 (1 s)
+    next_announce_ = now + kAnnounceInterval;
+  }
+  if (now >= next_sync_) {
+    const uint16_t seq = ++sync_seq_;
+    out.push_back({build_sync(domain_, self_, seq, true, PtpTimestamp{}), true, true, seq});
+    next_sync_ = now + kSyncInterval;
+  }
+  for (const auto& [seq, tx] : followups_)
+    out.push_back({build_follow_up(domain_, self_, seq, PtpTimestamp::from_ns(clock_.to_ptp(tx))), false, false, 0});
+  followups_.clear();
+  for (const auto& [seq, rx, requester] : delay_resps_)
+    out.push_back({build_delay_resp(domain_, self_, seq, PtpTimestamp::from_ns(clock_.to_ptp(rx)), requester), false, false, 0});
+  delay_resps_.clear();
+  return out;
+}
+
+void PtpPort::on_sync_sent(uint16_t seq, int64_t tx_local) {
+  if (state_ == PtpState::Master) followups_.emplace_back(seq, tx_local);
+}
+
+void PtpPort::reset_servo_windows() {
   pending_sync_seq_.reset();
   pending_delay_seq_.reset();
   delay_window_.clear();
@@ -130,7 +206,7 @@ void PtpSlave::reset_servo_windows() {
   delay_req_due_ = true;
 }
 
-void PtpSlave::step_to(int64_t t2_local, int64_t master_time) {
+void PtpPort::step_to(int64_t t2_local, int64_t master_time) {
   clock_.set_mapping(t2_local, master_time, freq_);
   stepped_once_ = true;
   step_pending_ = true;
@@ -142,7 +218,7 @@ void PtpSlave::step_to(int64_t t2_local, int64_t master_time) {
   offset_ = 0;
 }
 
-void PtpSlave::measure(int64_t t1, int64_t t2_local) {
+void PtpPort::measure(int64_t t1, int64_t t2_local) {
   last_sync_local_ = t2_local;
   const int64_t mpd = mean_path_delay_.value_or(0);
   if (!stepped_once_) {
@@ -200,8 +276,8 @@ void PtpSlave::measure(int64_t t1, int64_t t2_local) {
   }
 }
 
-std::optional<std::vector<uint8_t>> PtpSlave::poll_delay_req(int64_t now) {
-  if (!master_ || !stepped_once_) return std::nullopt;
+std::optional<std::vector<uint8_t>> PtpPort::poll_delay_req(int64_t now) {
+  if (state_ == PtpState::Master || !master_ || !stepped_once_) return std::nullopt;
   if (!delay_req_due_ && now - last_delay_req_ < kDelayReqInterval) return std::nullopt;
   delay_req_due_ = false;
   last_delay_req_ = now;
@@ -211,9 +287,9 @@ std::optional<std::vector<uint8_t>> PtpSlave::poll_delay_req(int64_t now) {
   return build_delay_req(domain_, self_, delay_seq_);
 }
 
-void PtpSlave::on_delay_req_sent(int64_t tx_local) { pending_delay_t3_ = tx_local; }
+void PtpPort::on_delay_req_sent(int64_t tx_local) { pending_delay_t3_ = tx_local; }
 
-void PtpSlave::enter_holdover(int64_t now) {
+void PtpPort::enter_holdover(int64_t now) {
   // Free-run on the frequency estimate alone: the proportional correction only made sense
   // while measurements were arriving.
   if (stepped_once_) clock_.set_mapping(now, clock_.to_ptp(now), holdover_freq_);
@@ -224,7 +300,7 @@ void PtpSlave::enter_holdover(int64_t now) {
   good_count_ = 0;
 }
 
-void PtpSlave::tick(int64_t now) {
+void PtpPort::tick(int64_t now) {
   for (auto it = foreign_.begin(); it != foreign_.end();) {
     if (now - it->second.second.last_seen > it->second.second.timeout) {
       it = foreign_.erase(it);
@@ -234,6 +310,7 @@ void PtpSlave::tick(int64_t now) {
   }
   select_master(now);
   // A missed sync must not leave the proportional correction applied indefinitely.
+  if (state_ == PtpState::Master) return;
   if (stepped_once_ && !coasting_ && now - last_sync_local_ > std::max<int64_t>(2 * sync_interval_, 250'000'000)) {
     clock_.set_mapping(now, clock_.to_ptp(now), freq_);
     coasting_ = true;
@@ -241,13 +318,13 @@ void PtpSlave::tick(int64_t now) {
   if (master_ && state_ != PtpState::Holdover && now - last_sync_local_ > kSyncTimeout) enter_holdover(now);
 }
 
-bool PtpSlave::consume_step() {
+bool PtpPort::consume_step() {
   const bool s = step_pending_;
   step_pending_ = false;
   return s;
 }
 
-PtpStatus PtpSlave::status() const {
+PtpStatus PtpPort::status() const {
   PtpStatus s;
   s.state = state_;
   s.has_master = master_.has_value();
@@ -255,7 +332,11 @@ PtpStatus PtpSlave::status() const {
     s.master = *master_;
     s.grandmaster = grandmaster_;
   }
-  s.offset_ns = offset_;
+  if (state_ == PtpState::Master) {
+    s.grandmaster = self_.clock;
+    s.master = self_;
+  }
+  s.offset_ns = state_ == PtpState::Master ? 0 : offset_;
   s.path_delay_ns = mean_path_delay_.value_or(0);
   s.sync_lost = sync_lost_;
   s.steps = steps_;

@@ -4,15 +4,17 @@
 #include <deque>
 #include <map>
 #include <optional>
+#include <tuple>
 #include <span>
 #include <vector>
 
 #include "bam/clock.hpp"
+#include "bam/config.hpp"
 #include "bam/ptp_messages.hpp"
 
 namespace bam {
 
-enum class PtpState { Listening, Locked, Holdover };
+enum class PtpState { Listening, Locked, Holdover, Master };
 
 struct PtpStatus {
   PtpState state = PtpState::Listening;
@@ -27,15 +29,34 @@ struct PtpStatus {
   double rate_ppm = 0;
 };
 
-// PTPv2 ordinary clock in slave-only mode, end-to-end delay mechanism, software timestamps.
-// Not thread-safe: one thread feeds messages and calls tick(); the result is clock().
-class PtpSlave {
- public:
-  PtpSlave(uint8_t domain, ClockIdentity self, MediaClock initial);
+// Own clock dataset and role. Default role Slave: the port never transmits as a master.
+struct PtpLocal {
+  PtpRole role = PtpRole::Slave;
+  AnnounceBody announce;  // gm_identity is overwritten with the port's own identity
+};
 
+// A message the port wants transmitted while it is the master.
+struct PtpOut {
+  std::vector<uint8_t> bytes;
+  bool event_port = false;     // Sync goes to 319, everything else to 320
+  bool needs_tx_time = false;  // caller reports the send time via on_sync_sent()
+  uint16_t sync_seq = 0;
+};
+
+// PTPv2 ordinary clock, end-to-end delay mechanism, software timestamps. Runs the best master
+// clock algorithm over its own dataset and every foreign master: follows the best foreign master
+// as a slave, or becomes the master itself when its own dataset has been the best for 3 s.
+// Not thread-safe: one thread feeds messages, polls and calls tick(); the result is clock().
+class PtpPort {
+ public:
+  PtpPort(uint8_t domain, ClockIdentity self, MediaClock initial, PtpLocal local = {});
+
+  void set_local(const PtpLocal& local);
   void on_message(std::span<const uint8_t> bytes, int64_t rx_local_ns);
-  std::optional<std::vector<uint8_t>> poll_delay_req(int64_t now_local_ns);
+  std::optional<std::vector<uint8_t>> poll_delay_req(int64_t now_local_ns);  // slave only
   void on_delay_req_sent(int64_t tx_local_ns);
+  std::vector<PtpOut> poll_master(int64_t now_local_ns);  // Announce / Sync / Follow_Up / Delay_Resp due now
+  void on_sync_sent(uint16_t seq, int64_t tx_local_ns);   // queues the Follow_Up with the precise origin
   void tick(int64_t now_local_ns);
 
   const MediaClock& clock() const { return clock_; }
@@ -55,6 +76,9 @@ class PtpSlave {
   void measure(int64_t t1, int64_t t2_local);
   void step_to(int64_t t2_local, int64_t master_time);
   void enter_holdover(int64_t now);
+  void become_master(int64_t now);
+  void leave_master();
+  AnnounceBody own_announce() const;
 
   uint8_t domain_;
   PortIdentity self_;
@@ -97,6 +121,16 @@ class PtpSlave {
   int big_count_ = 0;
   uint64_t sync_lost_ = 0;
   uint64_t steps_ = 0;
+
+  // master
+  PtpLocal local_;
+  int64_t self_best_since_ = 0;  // 0 = own dataset is not the best right now
+  int64_t next_announce_ = 0, next_sync_ = 0;
+  uint16_t announce_seq_ = 0, sync_seq_ = 0;
+  std::deque<std::pair<uint16_t, int64_t>> followups_;           // sync seq, tx local time
+  std::deque<std::tuple<uint16_t, int64_t, PortIdentity>> delay_resps_;  // seq, rx local time, requester
 };
+
+using PtpSlave = PtpPort;  // 1.0 name
 
 }  // namespace bam
