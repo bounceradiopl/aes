@@ -58,7 +58,7 @@ endif()
 # ---- engine ----
 file(GLOB BAM_ENGINE_SOURCES CONFIGURE_DEPENDS engine/src/*.cpp)
 if(BAM_ENGINE_SOURCES)
-  include(cmake/embed_files.cmake OPTIONAL RESULT_VARIABLE BAM_EMBED)
+  include(cmake/embed_files.cmake)
   add_library(bam_engine STATIC ${BAM_ENGINE_SOURCES} ${BAM_PANEL_ASSETS_CPP})
   target_include_directories(bam_engine PUBLIC engine/include)
   target_link_libraries(bam_engine PUBLIC bam_platform)
