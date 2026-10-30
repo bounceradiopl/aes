@@ -18,7 +18,7 @@ Projekt nie korzysta z kodu ani binariów Telos. Zgodność opiera się wyłącz
 - **32 wyjścia stereo**: nadawanie strumieni AES67 (multicast RTP).
 - **PTPv2 slave** (IEEE 1588-2008, profil AES67/default, mechanizm E2E, domena konfigurowalna, domyślnie 0).
 - **SAP**: ogłaszanie własnych wyjść i wykrywanie strumieni w sieci.
-- **Panel WWW** wzorowany na oknie konfiguracji Axii oraz **aplikacja w zasobniku**, która pokazuje ten sam panel w oknie WebView2.
+- **Panel WWW** wzorowany na oknie konfiguracji Axii oraz **aplikacja w zasobniku**, która pokazuje ten sam panel w osobnym oknie aplikacji (Microsoft Edge w trybie `--app`, wbudowany w Windows 10/11).
 - Instalator **MSI**.
 
 ### Poza zakresem (świadomie)
@@ -81,19 +81,21 @@ Atrybuty kierunku (`recvonly`, `sendonly`) oraz `sync-time`, `framecount` i `pal
 │   ├─ tx[32]   oś czasu → pakiety RTP                             │
 │   ├─ sap      ogłaszanie wyjść + katalog strumieni w sieci       │
 │   ├─ config   %ProgramData%\BounceAES Master\config.json         │
-│   └─ http     REST API + WebSocket (mierniki) + pliki panelu     │
+│   └─ http     REST API + SSE (mierniki) + pliki panelu           │
 └───────────────┬────────────────────────────────┬─────────────────┘
        pamięć współdzielona + zdarzenie          HTTP :8067
 ┌───────────────┴──────────────┐   ┌──────────────┴───────────────┐
 │ BounceAESAsio.dll (ASIO,     │   │ przeglądarka    lub          │
-│ ładowany przez aplikację)    │   │ BounceAESTray.exe (WebView2) │
+│ ładowany przez aplikację)    │   │ BounceAESTray.exe (okno Edge)│
 └──────────────────────────────┘   └──────────────────────────────┘
 ```
 
 ### 4.1 Komponenty
 
 **`core` (biblioteka statyczna, niezależna od systemu operacyjnego).**
-Zawiera parser i generator SDP, pakietowanie i odczyt RTP (L16/L24), automat stanów i regulator PTP, matematykę osi czasu (zegar medialny, bufory kołowe) oraz model i walidację konfiguracji. Nie korzysta z żadnego API Windows i jest w całości testowalna jednostkowo na każdej platformie.
+Zawiera parser i generator SDP, pakietowanie i odczyt RTP (L16/L24), automat stanów i regulator PTP, matematykę osi czasu (zegar medialny, bufory kołowe), logikę strumieni rx/tx, logikę wymiany buforów ASIO, SAP oraz model i walidację konfiguracji. Nie korzysta z żadnego API Windows i jest w całości testowalna jednostkowo na każdej platformie.
+
+**`platform` i `engine` (biblioteki wieloplatformowe).** `platform` to cienka warstwa systemowa: gniazda UDP, pamięć współdzielona, zdarzenia, zegar monotoniczny, timery. Ma implementacje dla Windows i POSIX. `engine` składa całą usługę (wątki PTP, rx, tx, rytm okresów, SAP, serwer HTTP). Dzięki temu całą usługę można uruchomić i przetestować end-to-end także na macOS i Linuksie (`--console`). Na Windows działa jako usługa systemowa.
 
 **`BounceAESService.exe` (usługa Windows, konto LocalSystem, start automatyczny).**
 To jedyny proces, który komunikuje się z siecią. Działa niezależnie od tego, czy jakakolwiek aplikacja audio jest uruchomiona.
@@ -106,18 +108,18 @@ To jedyny proces, który komunikuje się z siecią. Działa niezależnie od tego
 | `tx` | Jeden wątek nadawczy dla wszystkich wyjść. Na każdym takcie wysyła pakiety, których czas już nadszedł |
 | `sap` | Ogłaszanie SDP własnych aktywnych wyjść co 30 s (239.255.255.255:9875), wysyłka pakietu usunięcia przy wyłączeniu wyjścia, katalog strumieni wykrytych w sieci |
 | `config` | Odczyt i zapis `config.json` (zapis atomowy), walidacja, rozsyłanie zmian do modułów bez restartu usługi |
-| `http` | Serwer HTTP (cpp-httplib), REST API, WebSocket z miernikami i statystykami, statyczne pliki panelu wbudowane w exe |
+| `http` | Serwer HTTP (cpp-httplib), REST API, strumień SSE (Server-Sent Events) z miernikami i statystykami, statyczne pliki panelu wbudowane w exe |
 | `shm` | Utworzenie pamięci współdzielonej i zdarzeń w przestrzeni `Global\` z deskryptorem bezpieczeństwa, który pozwala procesom użytkownika na odczyt i zapis |
 
 **`BounceAESAsio.dll` (sterownik ASIO, serwer COM in-process).**
 Nie zawiera kodu sieciowego. Otwiera pamięć współdzieloną usługi i w rytmie zdarzeń okresu kopiuje bufory audio. Rejestruje się w `HKLM\SOFTWARE\ASIO\BounceAES Master`.
 
 **`BounceAESTray.exe` (aplikacja w zasobniku).**
-Ikona w kolorze stanu: zielony oznacza PTP zsynchronizowany i usługę działającą, żółty holdover PTP lub ostrzeżenia, czerwony brak usługi. Okno WebView2 ładuje `http://127.0.0.1:8067`. Aplikacja startuje przy logowaniu użytkownika.
+Ikona w kolorze stanu: zielony oznacza PTP zsynchronizowany i usługę działającą, żółty holdover PTP lub ostrzeżenia, czerwony brak usługi. Stan pochodzi z publicznego endpointu `/api/health`. Menu i dwuklik otwierają panel jako okno aplikacji (`msedge --app=http://127.0.0.1:8067`, bez pasków przeglądarki), a gdy Edge jest niedostępny, w domyślnej przeglądarce. Aplikacja startuje przy logowaniu użytkownika.
 
-**Panel WWW.** Statyczny HTML, CSS i JavaScript bez frameworka, komunikujący się z REST API i WebSocketem.
+**Panel WWW.** Statyczny HTML, CSS i JavaScript bez frameworka, komunikujący się z REST API i strumieniem SSE.
 
-**Instalator MSI (WiX).** Instaluje pliki, rejestruje usługę (z restartem po awarii: po 5 s, trzykrotnie), rejestruje sterownik ASIO, dodaje reguły zapory (UDP 5004, 319, 320, 9875, TCP 8067), dodaje skrót autostartu dla aplikacji w zasobniku i przy pierwszej instalacji pyta o hasło do panelu.
+**Instalator MSI (WiX).** Instaluje pliki, rejestruje usługę (z restartem po awarii: po 5 s, trzykrotnie), rejestruje sterownik ASIO, dodaje reguły zapory (UDP 5004, 319, 320, 9875, TCP 8067), dodaje autostart aplikacji w zasobniku. Hasło do panelu ustawia się przy pierwszym otwarciu panelu, wyłącznie z tego samego komputera (`127.0.0.1`).
 
 ### 4.2 Technologia
 
@@ -129,23 +131,25 @@ Ikona w kolorze stanu: zielony oznacza PTP zsynchronizowany i usługę działaj�
 | Steinberg ASIO SDK | GPLv3 | sterownik ASIO |
 | cpp-httplib | MIT | serwer HTTP |
 | nlohmann/json | MIT | konfiguracja i API |
-| Microsoft WebView2 SDK | licencja Microsoft (redystrybuowalna) | aplikacja w zasobniku |
-| Catch2 | BSL-1.0 | testy |
+| doctest | MIT | testy |
 
-- **CI:** GitHub Actions. `windows-latest` buduje wszystko i tworzy MSI, `ubuntu-latest` uruchamia testy rdzenia.
+- **CI:** GitHub Actions. `windows-latest` buduje wszystko (MSVC) i tworzy MSI, `ubuntu-latest` uruchamia testy i test pętli.
+- **Budowanie lokalne na macOS/Linux:** testy, usługa w trybie `--console` i narzędzia testowe. Części Windows (usługa, ASIO, zasobnik) można skompilować skrośnie przez MinGW-w64 w celu weryfikacji.
 
 ### 4.3 Układ repozytorium
 
 ```
 BounceAES-Master/
   CMakeLists.txt
-  core/        biblioteka niezależna od platformy (sdp, rtp, ptp, timeline, config)
-  service/     usługa Windows (net, ptp-io, rx, tx, sap, http, shm, main)
+  core/        biblioteka niezależna od platformy (sdp, rtp, ptp, timeline, rx/tx, sap, config, auth)
+  platform/    warstwa systemowa (Windows + POSIX)
+  engine/      usługa: wątki, HTTP, panel wbudowany
+  service/     punkt wejścia (usługa Windows / --console)
   asio/        sterownik ASIO
   tray/        aplikacja w zasobniku
   panel/       pliki panelu WWW
   installer/   WiX
-  tools/       bounceaes-test (generator i analizator do testów w pętli)
+  tools/       bounceaes-test (test pętli), ptp-sim (prosty master PTP do testów)
   tests/       testy jednostkowe i dane testowe (m.in. SDP Orbana)
   docs/
 ```
@@ -206,7 +210,7 @@ Używamy programowych znaczników czasu. Oczekiwana dokładność to dziesiątki
 
 ### 5.6 Poziom nominalny
 
-Jeden globalny parametr wzmocnienia (odpowiednik "PC Audio Nominal Level" z Axii). **Domyślnie 0 dB**, czyli tor bit w bit. Przy 0 dB próbki nie są w ogóle przeliczane. Przy innej wartości stosowane jest skalowanie z nasyceniem.
+Jeden globalny parametr „Poziom nominalny PC” w dBFS, z tą samą semantyką co w Axii: wzmocnienie w stronę aplikacji wynosi `poziom + 20 dB`, a w stronę sieci `−(poziom + 20 dB)`. Zakres −30…0 dBFS. **Domyślnie −20 dBFS, czyli 0 dB i tor bit w bit.** Przy 0 dB próbki nie są w ogóle przeliczane. Przy innej wartości stosowane jest skalowanie z nasyceniem.
 
 ## 6. Panel i konfiguracja
 
@@ -267,7 +271,11 @@ Liczniki można wyzerować przyciskiem.
 | GET | `/api/stats` | liczniki |
 | POST | `/api/stats/reset` | zerowanie liczników |
 | GET | `/api/logs` | ostatnie wpisy logu |
-| WS | `/api/live` | mierniki i statystyki 10×/s |
+| GET (SSE) | `/api/live` | mierniki i statystyki 10×/s |
+| GET | `/api/health` | publiczny: stan usługi i PTP (dla aplikacji w zasobniku) |
+| GET | `/api/interfaces` | lista kart sieciowych |
+| POST | `/api/login`, `/api/logout` | sesja |
+| POST | `/api/setup` | ustawienie pierwszego hasła (tylko z 127.0.0.1, tylko gdy brak hasła) |
 
 ## 7. Obsługa błędów
 
@@ -288,14 +296,14 @@ Liczniki można wyzerować przyciskiem.
 
 ## 8. Testy
 
-1. **Testy jednostkowe rdzenia** (Catch2, każda platforma, CI):
+1. **Testy jednostkowe rdzenia** (doctest, każda platforma, CI):
    - parser i generator SDP, z SDP Orbana jako przypadkiem testowym;
    - RTP L16/L24: pakowanie i odczyt, rozwinięcie 32-bitowego znacznika;
    - oś czasu: zawijanie bufora, znaczniki ważności, okno odbioru;
    - regulator PTP: symulacja z jitterem, dryfem ±100 ppm, utratą i powrotem mastera;
    - walidacja konfiguracji.
 2. **Budowanie Windows w CI.** Każda zmiana daje gotowy MSI.
-3. **Test w pętli na jednym komputerze** (`tools/bounceaes-test`). Narzędzie podłącza się jako klient ASIO, nadaje sinus z licznikiem próbek na 32 wyjścia, odbiera je na 32 wejściach i weryfikuje ciągłość próbka po próbce.
+3. **Test w pętli na jednym komputerze** (`tools/bounceaes-test`). Narzędzie podłącza się do pamięci współdzielonej jak klient ASIO, nadaje na 32 wyjścia sygnał z licznikiem próbek, odbiera go na 32 wejściach (przez sieć, multicast loopback) i weryfikuje ciągłość próbka po próbce. Działa na Windows, macOS i Linuksie.
 4. **Zgodność w sieci docelowej:**
    - odbiór strumienia z Orbana;
    - nadawanie do odbiornika AES67 (Orban albo GStreamer lub PipeWire na Linuksie);
@@ -323,7 +331,9 @@ Liczniki można wyzerować przyciskiem.
 | Tylko ASIO, bez WDM | Bez podpisu Microsoftu, bez kodu w jądrze, mAirList obsługuje ASIO |
 | Tylko AES67 | W sieci są wyłącznie urządzenia AES67 |
 | Sieć w usłudze, a nie w DLL ASIO | Strumienie i PTP działają niezależnie od aplikacji, a awaria aplikacji nie przerywa sieci |
-| Jeden panel WWW, aplikacja w zasobniku jako okno WebView2 | Jeden interfejs zamiast dwóch |
-| Poziom nominalny domyślnie 0 dB | Bez ingerencji w sygnał z Orbana |
+| Jeden panel WWW, aplikacja w zasobniku otwiera go jako okno Edge `--app` | Jeden interfejs zamiast dwóch, bez dodatkowego SDK |
+| SSE zamiast WebSocket | Jednokierunkowy strumień mierników wystarcza; obsługiwany natywnie przez cpp-httplib i przeglądarki |
+| Usługa wieloplatformowa w trybie `--console` | Pełny test end-to-end (sieć, PTP, pamięć współdzielona) bez Windows |
+| Poziom nominalny domyślnie −20 dBFS (0 dB) | Bez ingerencji w sygnał z Orbana, semantyka jak w Axii |
 | Bez GPIO | Funkcja konsol Livewire, nieobecnych w sieci |
 | Nazwa: BounceAES Master | Decyzja zamawiającego |
