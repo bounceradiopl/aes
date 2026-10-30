@@ -2,6 +2,7 @@
 #include <doctest/doctest.h>
 
 #include <cstdio>
+#include <fstream>
 #include <vector>
 
 #include "bam/asio_bridge.hpp"
@@ -29,6 +30,9 @@ struct TestEngine {
     opts.event_name = "bamtest.p." + suffix;
     opts.enable_ptp = false;
     opts.enable_sap = false;
+    auto cfg = bam::default_config();
+    cfg.interface_ip = "127.0.0.1";  // tests never send multicast onto a real network
+    std::ofstream(config_path) << bam::config_to_json(cfg);
     engine = std::make_unique<bam::Engine>(opts);
   }
   ~TestEngine() {
@@ -41,10 +45,6 @@ struct TestEngine {
 }  // namespace
 
 TEST_CASE("engine loopback: output stream comes back sample-exact on the input") {
-  if (bp::default_interface_ip().empty()) {
-    MESSAGE("no network interface, skipping");
-    return;
-  }
   TestEngine t;
   std::string err;
   REQUIRE_MESSAGE(t.engine->start(&err), err);

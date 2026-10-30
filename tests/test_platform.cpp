@@ -71,11 +71,7 @@ TEST_CASE("process helpers") {
 }
 
 TEST_CASE("multicast sockets only receive their own groups") {
-  const std::string iface = bp::default_interface_ip();
-  if (iface.empty()) {
-    MESSAGE("no network interface, skipping");
-    return;
-  }
+  const std::string iface = "127.0.0.1";  // tests never send multicast onto a real network
   std::string err;
   auto a = bp::UdpSocket::open(15004, &err);
   REQUIRE_MESSAGE(a, err);

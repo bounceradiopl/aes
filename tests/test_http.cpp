@@ -3,6 +3,7 @@
 #include <httplib.h>
 
 #include <cstdio>
+#include <fstream>
 #include <nlohmann/json.hpp>
 
 #include "bam/engine.hpp"
@@ -31,6 +32,9 @@ struct Fixture {
     opts.event_name = "bamtest.hp." + suffix;
     opts.enable_ptp = false;
     opts.enable_sap = false;
+    auto cfg = bam::default_config();
+    cfg.interface_ip = "127.0.0.1";  // tests never send multicast onto a real network
+    std::ofstream(opts.config_path) << bam::config_to_json(cfg);
     engine = std::make_unique<bam::Engine>(opts);
     std::string err;
     REQUIRE_MESSAGE(engine->start(&err), err);
