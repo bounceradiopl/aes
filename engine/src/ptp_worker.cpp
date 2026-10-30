@@ -38,7 +38,7 @@ void Engine::Impl::ptp_loop() {
       if (!ev->join(kPtpGroup, iface, "", &err) || !gen->join(kPtpGroup, iface, "", &err)) {
         ev.reset();
       } else {
-        ev->set_multicast_out(iface, 1, false);
+        ev->set_multicast_out(iface, 1, true);  // loopback: a master on the same host must see our Delay_Req
       }
     }
     if (!ev || !gen) {

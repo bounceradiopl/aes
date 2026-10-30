@@ -20,7 +20,7 @@ else()
   endif()
 endif()
 if(MINGW)
-  add_link_options(-static -static-libgcc -static-libstdc++)
+  add_link_options(-static -static-libgcc -static-libstdc++ $<$<CONFIG:Release>:-s>)
 endif()
 
 find_package(Threads REQUIRED)
