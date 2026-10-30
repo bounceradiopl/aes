@@ -5,7 +5,10 @@
 2 ICON "status-ok.ico"
 3 ICON "status-warn.ico"
 4 ICON "status-down.ico"
+#ifdef __GNUC__
+// MinGW: embed the manifest here. MSVC gets it through the linker (tray.manifest listed as a source).
 1 24 "tray.manifest"
+#endif
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION 1,0,0,0
