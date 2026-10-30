@@ -216,6 +216,9 @@ h4.virtual-head { margin: 8px 0 -8px; font-size: 13px; font-weight: 600; letter-
 #virtual-body { display: grid; gap: 16px; }
 #virtual-body select { width: 100%; min-width: 180px; }
 #virtual-body td .hint { font-size: 12px; }
+#virtual-body td.actions { white-space: nowrap; }
+#virtual-body td.actions button + button { margin-left: 4px; }
+#virtual-body button[hidden] { display: none; }
 th.dst.unavailable span, tr.unavailable th.src .src-name { color: var(--muted); }
 table.matrix .first { border-left: 1px solid var(--line-strong); }
 table.matrix tbody tr.group-row th { position: sticky; left: 0; background: var(--canvas); z-index: 1; height: 32px; border-top: 1px solid var(--line-strong); }

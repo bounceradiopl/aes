@@ -352,14 +352,20 @@ function renderVirtual() {
   const sendRows = vSources.map((n) => {
     const sel = el("select", { "aria-label": `Wyjście AoIP dla ${n.name}` },
       ...outputs.map((o) => option(o.id, v.routes[o.id] && v.routes[o.id] !== n.id ? `${o.name} — teraz gra ${sourceLabel(v.routes[o.id])}` : o.name)));
-    const free = outputs.find((o) => !v.routes[o.id]);
-    if (free) sel.value = free.id;
+    // preselect an output this card already feeds, else a free one
+    const pick = outputs.find((o) => v.routes[o.id] === n.id) || outputs.find((o) => !v.routes[o.id]);
+    if (pick) sel.value = pick.id;
     const now = feeding(n.id);
+    const send = el("button", { type: "button", class: "mini primary", onclick: () => setRoute(sel.value, n.id) }, "Wysyłaj");
+    const stop = el("button", { type: "button", class: "mini", onclick: () => setRoute(sel.value, null) }, "Rozłącz");
+    const sync = () => { const fed = v.routes[sel.value] === n.id; send.hidden = fed; stop.hidden = !fed; };
+    sel.addEventListener("change", sync);
+    sync();
     return el("tr", {},
       el("td", {}, n.name, el("div", { class: "hint" }, n.virtual)),
       el("td", {}, now.length ? now.join(", ") : el("span", { class: "hint" }, "—")),
       el("td", {}, outputs.length ? sel : el("span", { class: "hint" }, "brak włączonych wyjść")),
-      el("td", {}, outputs.length ? el("button", { type: "button", class: "mini primary", onclick: () => setRoute(sel.value, n.id) }, "Wysyłaj") : null));
+      el("td", { class: "actions" }, outputs.length ? send : null, outputs.length ? stop : null));
   });
   const recvRows = vDests.map((d) => {
     const cur = v.routes[d.id];
@@ -369,7 +375,7 @@ function renderVirtual() {
       el("td", {}, d.name, el("div", { class: "hint" }, d.virtual)),
       el("td", {}, cur ? sourceLabel(cur) : el("span", { class: "hint" }, "—")),
       el("td", {}, netSources.length ? sel : el("span", { class: "hint" }, "brak subskrypcji")),
-      el("td", {},
+      el("td", { class: "actions" },
         netSources.length ? el("button", { type: "button", class: "mini primary", onclick: () => setRoute(d.id, sel.value) }, "Odbieraj") : null,
         cur ? el("button", { type: "button", class: "mini", onclick: () => setRoute(d.id, null) }, "Rozłącz") : null));
   });
