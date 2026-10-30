@@ -81,6 +81,7 @@ TEST_CASE("engine loopback: output stream comes back sample-exact on the input")
   uint64_t last_counter = h.period_counter.load();
   uint64_t last_start = 0;
   int periods = 0;
+  int skipped = 0;
   const int64_t end = bp::monotonic_ns() + 1'500'000'000;
   while (bp::monotonic_ns() < end) {
     if (!ev->wait(50)) continue;
@@ -88,16 +89,26 @@ TEST_CASE("engine loopback: output stream comes back sample-exact on the input")
     if (c == last_counter) continue;
     last_counter = c;
     const uint64_t s = h.period_start_sample.load();
-    if (last_start) CHECK(s == last_start + 128);
+    // The service must advance exactly one buffer per period; this non-realtime test client may
+    // occasionally miss an event, in which case it writes the skipped buffers as well.
+    uint64_t first = s;
+    if (last_start) {
+      CHECK((s - last_start) % 128 == 0);
+      if (s - last_start > 128) ++skipped;
+      first = last_start + 128;
+    }
+    for (uint64_t p = first; p <= s; p += 128) {
+      for (int ch = 0; ch < 2; ++ch)
+        for (uint32_t i = 0; i < 128; ++i) out[ch][i] = ramp_value(p + 128 + i, ch);
+      bridge.write_outputs(p, 128, out_ptrs.data());
+    }
     last_start = s;
-    for (int ch = 0; ch < 2; ++ch)
-      for (uint32_t i = 0; i < 128; ++i) out[ch][i] = ramp_value(s + 128 + i, ch);
-    bridge.write_outputs(s, 128, out_ptrs.data());
     h.client_heartbeat.fetch_add(1);
     ++periods;
   }
-  MESSAGE("periods: " << periods);
+  MESSAGE("periods: " << periods << ", missed by the test client: " << skipped);
   CHECK(periods > 450);  // 1.5 s / 2.67 ms ≈ 562
+  CHECK(skipped < periods / 20);
 
   // 10 000 consecutive samples, well inside the written region and past the rx latency
   const uint64_t from = last_start - 30000;
