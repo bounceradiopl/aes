@@ -15,6 +15,7 @@ struct TxConfig {
   uint8_t payload_type = 98;
   uint32_t ssrc = 0;
   double gain = 1.0;
+  uint32_t source_delay = 0;  // D_src: packet T carries source samples [T - source_delay, ...)
 };
 
 struct TxStats {

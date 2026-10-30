@@ -16,13 +16,13 @@ struct Shm {
 };
 }  // namespace
 
-TEST_CASE("inputs are read latency + one buffer behind the period start") {
+TEST_CASE("ASIO input pair routed to a network subscription reads it D_src + one buffer behind") {
   Shm shm;
   auto view = shm.view();
-  view.header().rx_latency_frames[0] = 240;
   std::vector<int32_t> ramp(8000);
   for (size_t i = 0; i < ramp.size(); ++i) ramp[i] = static_cast<int32_t>(i);
-  view.input(0).write(0, ramp.data(), ramp.size());
+  view.net_in(6).write(0, ramp.data(), ramp.size());  // subscription pair 3, left
+  view.set_asio_route(0, bam::ShmSource::Net, 3, 240);
 
   bam::AsioBridge bridge(view);
   std::vector<int32_t> buf(128, -1);
@@ -32,9 +32,35 @@ TEST_CASE("inputs are read latency + one buffer behind the period start") {
   CHECK(buf[0] == 4800 - 128 - 240);
   CHECK(buf[127] == 4800 - 240 - 1);
 
-  // Too close to the timeline origin: silence instead of underflow.
-  bridge.read_inputs(100, 128, ins.data());
+  bridge.read_inputs(100, 128, ins.data());  // too close to the origin: silence
   CHECK(buf[0] == 0);
+}
+
+TEST_CASE("ASIO input pair routed to an ASIO output pair (local loopback) reads with no delay") {
+  Shm shm;
+  auto view = shm.view();
+  std::vector<int32_t> ramp(8000);
+  for (size_t i = 0; i < ramp.size(); ++i) ramp[i] = static_cast<int32_t>(i) + 5;
+  view.asio_out(2).write(0, ramp.data(), ramp.size());  // ASIO output pair 1, left
+  view.set_asio_route(4, bam::ShmSource::Asio, 1, 0);
+
+  bam::AsioBridge bridge(view);
+  std::vector<int32_t> buf(128, -1);
+  std::vector<int32_t*> ins(bam::kChannelCount, nullptr);
+  ins[8] = buf.data();  // ASIO input pair 4, left
+  bridge.read_inputs(4800, 128, ins.data());
+  CHECK(buf[0] == (4800 - 128) + 5);
+}
+
+TEST_CASE("unrouted ASIO input pair delivers silence") {
+  Shm shm;
+  auto view = shm.view();
+  bam::AsioBridge bridge(view);
+  std::vector<int32_t> buf(128, -1);
+  std::vector<int32_t*> ins(bam::kChannelCount, nullptr);
+  ins[0] = buf.data();
+  bridge.read_inputs(4800, 128, ins.data());
+  for (auto v : buf) CHECK(v == 0);
 }
 
 TEST_CASE("outputs are written kOutputLeadBuffers ahead") {
@@ -48,11 +74,11 @@ TEST_CASE("outputs are written kOutputLeadBuffers ahead") {
   bridge.write_outputs(4800, 128, outs.data());
   std::vector<int32_t> back(128);
   CHECK(bam::AsioBridge::output_start(4800, 128) == 4800 + 256);
-  view.output(1).read(4800 + 256, back.data(), 128);
+  view.asio_out(1).read(4800 + 256, back.data(), 128);
   CHECK(back == data);
   // channel without a buffer gets valid silence
   std::vector<int32_t> silent(128, 7);
-  view.output(0).read(4800 + 256, silent.data(), 128);
+  view.asio_out(0).read(4800 + 256, silent.data(), 128);
   for (auto v : silent) CHECK(v == 0);
 }
 

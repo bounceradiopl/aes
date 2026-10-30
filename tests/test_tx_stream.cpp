@@ -126,3 +126,21 @@ TEST_CASE("64-frame packets are aligned and gain applies to a copy") {
   l.ring().read(576, original.data(), 1);
   CHECK(original[0] == (576 << 8));
 }
+
+TEST_CASE("source_delay shifts the payload, not the timestamp") {
+  RingStorage l, r;
+  fill_ramp(l.ring(), 10000, 2000, 0);
+  bam::TxConfig cfg;
+  cfg.frames_per_packet = 48;
+  cfg.source_delay = 480;  // e.g. forwarding a subscription with 10 ms receive latency
+  bam::TxStream tx(cfg, l.ring(), r.ring());
+  Captured cap;
+  tx.pump(10960, cap.sink());  // newest complete packet: T = floor(10960/48)*48 - 48 = 10896
+  auto v = bam::parse_rtp(cap.packets.at(0));
+  REQUIRE(v);
+  CHECK(v->header.timestamp == 10896);
+  int32_t dl[48], dr[48];
+  int32_t* out[] = {dl, dr};
+  bam::decode_pcm(bam::Encoding::L24, v->payload.data(), 48, 2, out);
+  CHECK(dl[0] == static_cast<int32_t>((10896 - 480) << 8));
+}

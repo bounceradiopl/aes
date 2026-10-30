@@ -7,22 +7,25 @@
 namespace bam {
 
 void AsioBridge::read_inputs(uint64_t period_start, uint32_t frames, int32_t* const* in_bufs) const {
-  auto& h = view_.header();
-  for (int ch = 0; ch < kChannelCount; ++ch) {
-    int32_t* dst = in_bufs[ch];
-    if (!dst) continue;
-    const uint64_t lag = uint64_t(frames) + h.rx_latency_frames[ch / 2].load(std::memory_order_relaxed);
-    if (period_start < lag) {
-      std::memset(dst, 0, frames * sizeof(int32_t));
-      continue;
+  // Each ASIO input pair reads the pair it is routed to, delayed by that source's readiness (D_src).
+  for (int pair = 0; pair < kDeviceCount; ++pair) {
+    const auto route = view_.asio_route(pair);
+    for (int side = 0; side < 2; ++side) {
+      int32_t* dst = in_bufs[pair * 2 + side];
+      if (!dst) continue;
+      const uint64_t lag = uint64_t(frames) + route.delay;
+      if (route.kind == ShmSource::None || period_start < lag) {
+        std::memset(dst, 0, frames * sizeof(int32_t));
+        continue;
+      }
+      view_.source_ring(route.kind, route.pair * 2 + side).read(period_start - lag, dst, frames);
     }
-    view_.input(ch).read(period_start - lag, dst, frames);
   }
 }
 
 void AsioBridge::write_outputs(uint64_t period_start, uint32_t frames, const int32_t* const* out_bufs) {
   for (int ch = 0; ch < kChannelCount; ++ch) {
-    view_.output(ch).write(output_start(period_start, frames), out_bufs[ch], frames);
+    view_.asio_out(ch).write(output_start(period_start, frames), out_bufs[ch], frames);
   }
 }
 

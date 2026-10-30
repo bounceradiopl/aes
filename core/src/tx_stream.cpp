@@ -37,8 +37,9 @@ size_t TxStream::pump(uint64_t now, const PacketSink& send) {
   }
   size_t sent = 0;
   while (next_ + p <= now) {
-    left_.read(next_, l_.data(), p);
-    right_.read(next_, r_.data(), p);
+    const uint64_t read_pos = next_ - cfg_.source_delay;  // network timestamp next_, source samples D_src earlier
+    left_.read(read_pos, l_.data(), p);
+    right_.read(read_pos, r_.data(), p);
     apply_gain(l_.data(), p, cfg_.gain);
     apply_gain(r_.data(), p, cfg_.gain);
     RtpHeader h;
