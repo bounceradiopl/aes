@@ -4,8 +4,10 @@
 #include <windows.h>
 // windows.h first
 #include <audiopolicy.h>
-#include <functiondiscoverykeys_devpkey.h>
 #include <mmdeviceapi.h>
+#include <propkeydef.h>
+// DEFINE_PROPERTYKEY must be declared before the key header
+#include <functiondiscoverykeys_devpkey.h>
 #include <tlhelp32.h>
 
 #include <algorithm>
