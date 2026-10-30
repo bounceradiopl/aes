@@ -128,6 +128,17 @@ TEST_CASE("sequence gaps") {
   CHECK(rx.stats().seq_errors == 1);
 }
 
+TEST_CASE("duplicate packets are ignored") {
+  RingStorage l, r;
+  bam::RxStream rx(make_sdp(2), l.ring(), r.ring(), 240, 1.0);
+  auto p0 = make_packet(0, 10, 2, 48);
+  rx.on_packet(p0, 48, 1);
+  rx.on_packet(p0, 49, 2);
+  rx.on_packet(make_packet(48, 11, 2, 48), 96, 3);
+  CHECK(rx.stats().seq_errors == 0);
+  CHECK(rx.stats().packets == 2);
+}
+
 TEST_CASE("underruns counted at deadline") {
   RingStorage l, r;
   bam::RxStream rx(make_sdp(2), l.ring(), r.ring(), 240, 1.0);

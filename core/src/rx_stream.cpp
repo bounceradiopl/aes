@@ -37,6 +37,7 @@ void RxStream::on_packet(std::span<const uint8_t> bytes, uint64_t now_sample, in
   }
   const size_t frames = pkt->payload.size() / bytes_per_frame_;
 
+  if (started_ && pkt->header.sequence == last_seq_) return;  // duplicate (network or loopback)
   if (started_ && pkt->header.sequence != static_cast<uint16_t>(last_seq_ + 1)) {
     seq_errors_.fetch_add(1, std::memory_order_relaxed);
   }
