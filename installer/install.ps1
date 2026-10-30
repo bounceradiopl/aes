@@ -49,6 +49,7 @@ netsh advfirewall firewall add rule name="BounceAES Master" dir=in action=allow 
 $lnk = Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'BounceAES Master.lnk'
 $sh = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
 $sh.TargetPath = Join-Path $Dest 'BounceAESTray.exe'
+$sh.Arguments = '--panel'
 $sh.Description = 'Panel i stan BounceAES Master'
 $sh.Save()
 

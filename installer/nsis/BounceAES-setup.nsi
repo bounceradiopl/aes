@@ -2,7 +2,8 @@
 ; NSIS: instalator "BounceAES Master" z kreatorem Modern UI 2 (ten sam układ i branding co
 ; instalator aplikacji bounce). makensis działa natywnie na macOS/Linux/Windows.
 ;
-; Build:  makensis [-DPAYLOAD=<katalog z plikami>] BounceAES-setup.nsi   ->  BounceAES-Master-setup.exe
+; Build (z katalogu installer/nsis):  makensis [-DPAYLOAD=<bezwzględna ścieżka do plików>] BounceAES-setup.nsi
+;         ->  BounceAES-Master-setup.exe obok skryptu
 ;         PAYLOAD = katalog z BounceAESService.exe, BounceAESAsio.dll, BounceAESTray.exe,
 ;                   bounceaes-test.exe, ptp-sim.exe (build MinGW albo MSVC).
 ;
@@ -177,11 +178,11 @@ Section "BounceAES Master" SecMain
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "BounceAES Master" '"$INSTDIR\BounceAESTray.exe"'
 
   ; --- skrót na pulpicie (wszyscy użytkownicy): ikona w zasobniku + panel ---
-  CreateShortcut "$DESKTOP\BounceAES Master.lnk" "$INSTDIR\BounceAESTray.exe" "" "$INSTDIR\bounce.ico" 0 SW_SHOWNORMAL "" "Panel i stan BounceAES Master"
+  CreateShortcut "$DESKTOP\BounceAES Master.lnk" "$INSTDIR\BounceAESTray.exe" "--panel" "$INSTDIR\bounce.ico" 0 SW_SHOWNORMAL "" "Panel i stan BounceAES Master"
 
   ; --- menu Start ---
   CreateDirectory "$SMPROGRAMS\BounceAES Master"
-  CreateShortcut "$SMPROGRAMS\BounceAES Master\BounceAES Master.lnk" "$INSTDIR\BounceAESTray.exe" "" "$INSTDIR\bounce.ico"
+  CreateShortcut "$SMPROGRAMS\BounceAES Master\BounceAES Master.lnk" "$INSTDIR\BounceAESTray.exe" "--panel" "$INSTDIR\bounce.ico"
   WriteINIStr "$SMPROGRAMS\BounceAES Master\Panel BounceAES Master.url" "InternetShortcut" "URL" "${PANEL_URL}"
   CreateShortcut "$SMPROGRAMS\BounceAES Master\Instrukcja.lnk" "$INSTDIR\INSTRUKCJA.md"
   CreateShortcut "$SMPROGRAMS\BounceAES Master\Odinstaluj BounceAES Master.lnk" "$INSTDIR\uninstall.exe"

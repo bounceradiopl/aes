@@ -53,7 +53,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-- **Windows (MSVC):** `cmake -S . -B build -A x64 && cmake --build build --config Release` (Visual Studio 2022 lub nowsze). Instalator buduje NSIS: `makensis -DPAYLOAD=<katalog z plikami .exe/.dll> installer/nsis/BounceAES-setup.nsi` (działa też na macOS/Linuksie, `brew install makensis`).
+- **Windows (MSVC):** `cmake -S . -B build -A x64 && cmake --build build --config Release` (Visual Studio 2022 lub nowsze). Instalator buduje NSIS, z katalogu `installer/nsis`: `makensis -DPAYLOAD=<bezwzględna ścieżka do plików .exe/.dll> BounceAES-setup.nsi` (działa też na macOS/Linuksie, `brew install makensis`; bez `-DPAYLOAD` bierze `build-win`).
 - **Kompilacja skrośna z macOS/Linuksa:** `cmake -S . -B build-win -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake -DCMAKE_BUILD_TYPE=Release`.
 - **macOS/Linux:** usługę można uruchomić do testów: `build/BounceAESService --console --config moja.json`. Sterownik ASIO i aplikacja w zasobniku powstają tylko na Windows.
 

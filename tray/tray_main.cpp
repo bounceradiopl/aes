@@ -254,14 +254,17 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 }  // namespace
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdline, int) {
   g_instance = instance;
+  // Shortcuts pass --panel; the logon autostart entry does not, so logging in opens no window.
+  const bool want_panel = cmdline && wcsstr(cmdline, L"--panel") != nullptr;
   HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\BounceAESMasterTray");
   if (GetLastError() == ERROR_ALREADY_EXISTS) {
-    // Already running (e.g. started again from the desktop shortcut): just open the panel.
+    // Already running (e.g. started again from a shortcut): just open the panel.
     open_panel(L"");
     return 0;
   }
+  if (want_panel) open_panel(L"");
   g_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
   g_icons[static_cast<int>(Health::Ok)] = load_status_icon(2);
   g_icons[static_cast<int>(Health::Warning)] = load_status_icon(3);
