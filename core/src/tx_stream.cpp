@@ -1,10 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "bam/tx_stream.hpp"
 
+#include <algorithm>
+
+#include "bam/constants.hpp"
 #include "bam/gain.hpp"
 #include "bam/rtp.hpp"
 
 namespace bam {
+
+namespace {
+// A sender that fell behind by up to this much (OS scheduling hiccup) catches up with a burst;
+// receivers absorb it within their rx latency. Beyond it the backlog is skipped and counted.
+constexpr uint64_t kMaxCatchUpFrames = kSampleRate / 100;  // 10 ms
+}  // namespace
 
 TxStream::TxStream(TxConfig cfg, ChannelRing left, ChannelRing right)
     : cfg_(cfg),
@@ -22,7 +31,7 @@ size_t TxStream::pump(uint64_t now, const PacketSink& send) {
     next_ = latest;
     aligned_ = true;
   }
-  if (now >= next_ + p && now - (next_ + p) > 2 * p) {
+  if (now >= next_ + p && now - (next_ + p) > std::max<uint64_t>(2 * p, kMaxCatchUpFrames)) {
     errors_.fetch_add((latest - next_) / p, std::memory_order_relaxed);
     next_ = latest;
   }

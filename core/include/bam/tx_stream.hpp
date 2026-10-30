@@ -20,7 +20,7 @@ struct TxConfig {
 struct TxStats {
   uint64_t packets = 0;
   uint64_t bytes = 0;
-  uint64_t errors = 0;  // packets skipped because the sender fell behind, or failed sends
+  uint64_t errors = 0;  // packets skipped because the sender fell behind by more than 10 ms, or failed sends
 };
 
 using PacketSink = std::function<void(std::span<const uint8_t>)>;

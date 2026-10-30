@@ -100,7 +100,13 @@ void Engine::Impl::tx_loop() {
       if (e->keep_active || client_recent) {
         TxEntry* entry = e.get();
         entry->stream->pump(now_s, [&](std::span<const uint8_t> p) {
-          if (!tx_socket->send_to(p, entry->address, kRtpPort)) entry->stream->count_send_error();
+          // A full socket buffer (non-blocking send) clears within microseconds: retry briefly.
+          for (int attempt = 0;; ++attempt) {
+            if (tx_socket->send_to(p, entry->address, kRtpPort)) return;
+            if (attempt == 3) break;
+            platform::sleep_ns(20'000);
+          }
+          entry->stream->count_send_error();
         });
       } else {
         e->stream->reset();

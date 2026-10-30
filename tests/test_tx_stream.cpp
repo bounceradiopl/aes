@@ -67,20 +67,20 @@ TEST_CASE("first pump sends the packet that just completed") {
   CHECK(tx.stats().errors == 0);
 }
 
-TEST_CASE("large stall skips packets and counts errors") {
+TEST_CASE("long stall skips packets and counts errors") {
   RingStorage l, r;
   bam::TxConfig cfg;
   bam::TxStream tx(cfg, l.ring(), r.ring());
   Captured cap;
   tx.pump(576, cap.sink());  // next = 576
   cap.packets.clear();
-  CHECK(tx.pump(576 + 480, cap.sink()) == 1);  // 10 packets late → skip 9, send the latest
-  CHECK(tx.stats().errors == 9);
+  CHECK(tx.pump(576 + 1440, cap.sink()) == 1);  // 30 ms late → skip 29 packets, send the latest
+  CHECK(tx.stats().errors == 29);
   auto v = bam::parse_rtp(cap.packets[0]);
-  CHECK(v->header.timestamp == 1008);
+  CHECK(v->header.timestamp == 576 + 1440 - 48);
 }
 
-TEST_CASE("small delay is caught up without errors") {
+TEST_CASE("a hiccup of up to 10 ms is caught up with a burst, without errors") {
   RingStorage l, r;
   bam::TxConfig cfg;
   bam::TxStream tx(cfg, l.ring(), r.ring());
@@ -88,7 +88,10 @@ TEST_CASE("small delay is caught up without errors") {
   tx.pump(480, cap.sink());
   cap.packets.clear();
   CHECK(tx.pump(480 + 96, cap.sink()) == 2);
+  CHECK(tx.pump(576 + 480, cap.sink()) == 10);  // 9 ms late: all ten packets, in order
   CHECK(tx.stats().errors == 0);
+  CHECK(bam::parse_rtp(cap.packets[2])->header.timestamp == 576);
+  CHECK(bam::parse_rtp(cap.packets.back())->header.timestamp == 576 + 9 * 48);
 }
 
 TEST_CASE("reset re-aligns without errors") {
