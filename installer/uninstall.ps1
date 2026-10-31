@@ -11,7 +11,9 @@ if (Get-Service $Service -ErrorAction SilentlyContinue) {
     sc.exe delete $Service | Out-Null
 }
 $dll = Join-Path $Dest 'BounceAESAsio.dll'
-if (Test-Path $dll) { & regsvr32.exe /s /u $dll }
+if (Test-Path $dll) { Start-Process -Wait "$env:WINDIR\System32\regsvr32.exe" -ArgumentList '/s', '/u', "`"$dll`"" }
+$dll32 = Join-Path $Dest 'BounceAESAsio32.dll'
+if (Test-Path $dll32) { Start-Process -Wait "$env:WINDIR\SysWOW64\regsvr32.exe" -ArgumentList '/s', '/u', "`"$dll32`"" }
 netsh advfirewall firewall delete rule name="BounceAES Master" | Out-Null
 Remove-Item (Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) 'BounceAES Master.lnk') -ErrorAction SilentlyContinue
 Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name 'BounceAES Master' -ErrorAction SilentlyContinue

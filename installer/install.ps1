@@ -21,6 +21,9 @@ New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 foreach ($f in 'BounceAESService.exe', 'BounceAESAsio.dll', 'BounceAESTray.exe', 'BounceAESAudioBridge.exe') {
     Copy-Item (Join-Path $Source $f) $Dest -Force
 }
+# 32-bit ASIO driver for 32-bit hosts (e.g. 32-bit mAirList), when present next to the binaries
+$asio32 = Join-Path $Source 'BounceAESAsio32.dll'
+if (Test-Path $asio32) { Copy-Item $asio32 $Dest -Force }
 
 # Service with automatic restart after a failure (5 s, three times)
 $exe = Join-Path $Dest 'BounceAESService.exe'
@@ -30,9 +33,14 @@ if (-not (Get-Service $Service -ErrorAction SilentlyContinue)) {
 sc.exe description $Service "Strumienie audio AES67, zegar PTP i panel WWW dla sterownika ASIO BounceAES Master." | Out-Null
 sc.exe failure $Service reset= 86400 actions= restart/5000/restart/5000/restart/5000 | Out-Null
 
-# ASIO driver registration (COM + ASIO driver list)
-& regsvr32.exe /s (Join-Path $Dest 'BounceAESAsio.dll')
-if (-not (Test-Path "HKLM:\SOFTWARE\ASIO\BounceAES Master")) { throw "Rejestracja sterownika ASIO nie powiodła się" }
+# ASIO driver registration (COM + ASIO driver list). regsvr32 is a GUI program, so wait for it.
+# 64-bit hosts read the 64-bit registry, 32-bit hosts the WOW6432Node part.
+Start-Process -Wait "$env:WINDIR\System32\regsvr32.exe" -ArgumentList '/s', "`"$(Join-Path $Dest 'BounceAESAsio.dll')`""
+if (-not (Test-Path "HKLM:\SOFTWARE\ASIO\BounceAES Master")) { throw "Rejestracja sterownika ASIO (64-bit) nie powiodła się" }
+if (Test-Path (Join-Path $Dest 'BounceAESAsio32.dll')) {
+    Start-Process -Wait "$env:WINDIR\SysWOW64\regsvr32.exe" -ArgumentList '/s', "`"$(Join-Path $Dest 'BounceAESAsio32.dll')`""
+    if (-not (Test-Path "HKLM:\SOFTWARE\WOW6432Node\ASIO\BounceAES Master")) { throw "Rejestracja sterownika ASIO (32-bit) nie powiodła się" }
+}
 
 # Event Log source
 $evt = 'HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\BounceAES Master'

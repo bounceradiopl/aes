@@ -6,6 +6,8 @@
 ;         ->  BounceAES-Master-setup.exe obok skryptu
 ;         PAYLOAD = katalog z BounceAESService.exe, BounceAESAsio.dll, BounceAESTray.exe, BounceAESAudioBridge.exe,
 ;                   bounceaes-test.exe, ptp-sim.exe (build MinGW albo MSVC).
+;         PAYLOAD32 = katalog z 32-bitowym BounceAESAsio.dll (sterownik ASIO dla programów 32-bitowych,
+;                   np. 32-bitowego mAirList); instalowany jako BounceAESAsio32.dll.
 ;
 ; Kreator: Welcome -> Licencja (GPLv3) -> folder -> Instalacja -> Finish.
 ; Instalacja: pliki, usługa Windows (auto, restart po awarii), rejestracja sterownika ASIO,
@@ -24,11 +26,14 @@ Unicode true
 !ifndef PAYLOAD
   !define PAYLOAD "${__FILEDIR__}\..\..\build-win"
 !endif
+!ifndef PAYLOAD32
+  !define PAYLOAD32 "${__FILEDIR__}\..\..\build-win32"
+!endif
 !define ROOT "${__FILEDIR__}\..\.."  ; paths are relative to this script, not to the working directory
 
 !define APP "BounceAES Master"
 !define PUBLISHER "BOUNCE SP. Z O.O."
-!define VER "1.1.1"
+!define VER "1.1.2"
 !define SERVICE "BounceAESMaster"
 !define CLSID "{6B1F3C2A-8E4D-4B7A-9C51-2A7E0D4B3F10}"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\BounceAESMaster"
@@ -43,7 +48,7 @@ RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 InstallColors F72868 050505
 
-VIProductVersion "1.1.1.0"
+VIProductVersion "1.1.2.0"
 VIAddVersionKey "ProductName" "${APP}"
 VIAddVersionKey "CompanyName" "${PUBLISHER}"
 VIAddVersionKey "FileDescription" "${APP} - instalator"
@@ -138,10 +143,13 @@ Section "BounceAES Master" SecMain
 
   File "${PAYLOAD}\BounceAESService.exe"
   File "${PAYLOAD}\BounceAESAsio.dll"
+  File "/oname=BounceAESAsio32.dll" "${PAYLOAD32}\BounceAESAsio.dll"
   File "${PAYLOAD}\BounceAESTray.exe"
   File "${PAYLOAD}\BounceAESAudioBridge.exe"
   File "${PAYLOAD}\bounceaes-test.exe"
   File "${PAYLOAD}\ptp-sim.exe"
+  File "${PAYLOAD}\asio-probe.exe"
+  File "/oname=asio-probe32.exe" "${PAYLOAD32}\asio-probe.exe"
   File "/oname=LICENSE.txt" "${ROOT}\LICENSE"
   File "/oname=INSTRUKCJA.md" "${ROOT}\docs\INSTALL.md"
   File "/oname=TESTY.md" "${ROOT}\docs\TESTING.md"
@@ -158,8 +166,11 @@ Section "BounceAES Master" SecMain
   nsExec::ExecToLog 'sc.exe failure ${SERVICE} reset= 86400 actions= restart/5000/restart/5000/restart/5000'
   Pop $0
 
-  ; --- sterownik ASIO (COM + lista sterowników ASIO) ---
-  nsExec::ExecToLog 'regsvr32.exe /s "$INSTDIR\BounceAESAsio.dll"'
+  ; --- sterownik ASIO (COM + lista sterowników ASIO), 64- i 32-bitowy jak w Axii ---
+  ; Program 64-bitowy (np. mAirList x64) widzi tylko sterowniki z 64-bitowej części rejestru,
+  ; program 32-bitowy tylko z 32-bitowej (WOW6432Node). Instalator jest procesem 32-bitowym,
+  ; więc regsvr32 wskazujemy jawnie: Sysnative = 64-bitowy, SysWOW64 = 32-bitowy.
+  nsExec::ExecToLog '"$WINDIR\Sysnative\regsvr32.exe" /s "$INSTDIR\BounceAESAsio.dll"'
   Pop $0
   ${If} $0 != 0
     ; regsvr32 nie powiódł się: wpisz klucze bezpośrednio
@@ -168,6 +179,17 @@ Section "BounceAES Master" SecMain
     WriteRegStr HKCR "CLSID\${CLSID}\InprocServer32" "ThreadingModel" "Apartment"
     WriteRegStr HKLM "SOFTWARE\ASIO\BounceAES Master" "CLSID" "${CLSID}"
     WriteRegStr HKLM "SOFTWARE\ASIO\BounceAES Master" "Description" "BounceAES Master"
+  ${EndIf}
+  nsExec::ExecToLog '"$WINDIR\SysWOW64\regsvr32.exe" /s "$INSTDIR\BounceAESAsio32.dll"'
+  Pop $0
+  ${If} $0 != 0
+    SetRegView 32
+    WriteRegStr HKCR "CLSID\${CLSID}" "" "BounceAES Master ASIO Driver"
+    WriteRegStr HKCR "CLSID\${CLSID}\InprocServer32" "" "$INSTDIR\BounceAESAsio32.dll"
+    WriteRegStr HKCR "CLSID\${CLSID}\InprocServer32" "ThreadingModel" "Apartment"
+    WriteRegStr HKLM "SOFTWARE\ASIO\BounceAES Master" "CLSID" "${CLSID}"
+    WriteRegStr HKLM "SOFTWARE\ASIO\BounceAES Master" "Description" "BounceAES Master"
+    SetRegView 64
   ${EndIf}
 
   ; --- Dziennik zdarzeń ---
@@ -222,10 +244,16 @@ Section "Uninstall"
   SetShellVarContext all
   nsExec::ExecToLog 'sc.exe delete ${SERVICE}'
   Pop $0
-  nsExec::ExecToLog 'regsvr32.exe /s /u "$INSTDIR\BounceAESAsio.dll"'
+  nsExec::ExecToLog '"$WINDIR\Sysnative\regsvr32.exe" /s /u "$INSTDIR\BounceAESAsio.dll"'
+  Pop $0
+  nsExec::ExecToLog '"$WINDIR\SysWOW64\regsvr32.exe" /s /u "$INSTDIR\BounceAESAsio32.dll"'
   Pop $0
   DeleteRegKey HKCR "CLSID\${CLSID}"
   DeleteRegKey HKLM "SOFTWARE\ASIO\BounceAES Master"
+  SetRegView 32
+  DeleteRegKey HKCR "CLSID\${CLSID}"
+  DeleteRegKey HKLM "SOFTWARE\ASIO\BounceAES Master"
+  SetRegView 64
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="BounceAES Master"'
   Pop $0
   DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "BounceAES Master"
@@ -236,10 +264,13 @@ Section "Uninstall"
   ; tylko własne pliki, nigdy RMDir /r na $INSTDIR (użytkownik mógł wskazać istniejący folder)
   Delete "$INSTDIR\BounceAESService.exe"
   Delete "$INSTDIR\BounceAESAsio.dll"
+  Delete "$INSTDIR\BounceAESAsio32.dll"
   Delete "$INSTDIR\BounceAESTray.exe"
   Delete "$INSTDIR\BounceAESAudioBridge.exe"
   Delete "$INSTDIR\bounceaes-test.exe"
   Delete "$INSTDIR\ptp-sim.exe"
+  Delete "$INSTDIR\asio-probe.exe"
+  Delete "$INSTDIR\asio-probe32.exe"
   Delete "$INSTDIR\LICENSE.txt"
   Delete "$INSTDIR\INSTRUKCJA.md"
   Delete "$INSTDIR\TESTY.md"

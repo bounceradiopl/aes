@@ -2,10 +2,28 @@
 #include "bam/shm_layout.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <new>
 
 namespace bam {
+
+// The service is 64-bit; the ASIO driver also runs inside 32-bit hosts. Both must see the same
+// header, so its layout is pinned here: a change that moves a field fails to build anywhere.
+static_assert(std::atomic<uint64_t>::is_always_lock_free && std::atomic<int64_t>::is_always_lock_free);
+static_assert(alignof(ShmHeader) == 8);
+static_assert(sizeof(ShmAsioRoute) == 12);
+static_assert(offsetof(ShmHeader, service_generation) == 40);
+static_assert(offsetof(ShmHeader, period_start_sample) == 64);
+static_assert(offsetof(ShmHeader, clock_base_local) == 88);
+static_assert(offsetof(ShmHeader, clock_step_generation) == 112);
+static_assert(offsetof(ShmHeader, asio_routes) == 120);
+static_assert(offsetof(ShmHeader, device_names) == 512);
+static_assert(offsetof(ShmHeader, client_heartbeat) == 2064);
+static_assert(offsetof(ShmHeader, bridge_heartbeat) == 2080);
+static_assert(offsetof(ShmHeader, request) == 2108);
+static_assert(offsetof(ShmHeader, report) == 67644);
+static_assert(sizeof(ShmHeader) == 133184);
 
 namespace {
 constexpr size_t kPage = 4096;

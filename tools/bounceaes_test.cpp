@@ -34,7 +34,8 @@ struct Options {
   int devices = 32;
   int seconds = 30;
   uint32_t buffer = 128;
-  int stall_every = 0;  // test of the tool itself: stall the client for 3 periods every N periods
+  int stall_every = 0;
+  bool asio_only = false;  // configure asio-in:N <- asio-out:N inside the service, no network  // test of the tool itself: stall the client for 3 periods every N periods
   std::string password;
   std::string interface_ip;
   uint16_t port = bam::kDefaultHttpPort;
@@ -54,6 +55,23 @@ int configure(const Options& o) {
   }
   const std::string cookie = login->get_header_value("Set-Cookie").substr(0, login->get_header_value("Set-Cookie").find(';'));
   httplib::Headers h = {{"Cookie", cookie}};
+
+  if (o.asio_only) {
+    json outputs = json::array(), routes = json::object();
+    for (int d = 1; d <= bam::kDeviceCount; ++d) {
+      outputs.push_back({{"enabled", false}});
+      routes["asio-in:" + std::to_string(d)] = d <= o.devices ? json("asio-out:" + std::to_string(d)) : json(nullptr);
+    }
+    json patch = {{"outputs", outputs}, {"routes", routes}};
+    if (!o.interface_ip.empty()) patch["interface_ip"] = o.interface_ip;
+    auto r = c.Put("/api/config", h, patch.dump(), "application/json");
+    if (!r || r->status != 200) {
+      std::fprintf(stderr, "Nie można ustawić tras: %s\n", r ? r->body.c_str() : "brak odpowiedzi");
+      return 1;
+    }
+    std::printf("Skonfigurowano pętlę ASIO na %d parach (asio-in:N <- asio-out:N, bez sieci)\n", o.devices);
+    return 0;
+  }
 
   json outputs = json::array();
   json routes = json::object();
@@ -228,8 +246,9 @@ int loopback(const Options& o) {
 
 void usage() {
   std::printf(
-      "bounceaes-test --configure-loopback --password HASLO [--devices 32] [--port 8067] [--interface 127.0.0.1]\n"
+      "bounceaes-test --configure-loopback --password HASLO [--devices 32] [--port 8067] [--interface 127.0.0.1] [--asio-only]\n"
       "bounceaes-test --loopback [--seconds 30] [--devices 32] [--buffer 128] [--stall-every N]\n"
+      "  --asio-only      pętla wewnątrz usługi (wejście ASIO N <- wyjście ASIO N), bez sieci\n"
       "  --stall-every N  sprawdzenie samego testu: klient zacina się na 3 okresy co N okresów\n");
 }
 
@@ -246,6 +265,7 @@ int main(int argc, char** argv) {
     else if (a == "--seconds") o.seconds = std::atoi(next().c_str());
     else if (a == "--buffer") o.buffer = static_cast<uint32_t>(std::atoi(next().c_str()));
     else if (a == "--stall-every") o.stall_every = std::atoi(next().c_str());
+    else if (a == "--asio-only") o.asio_only = true;
     else if (a == "--password") o.password = next();
     else if (a == "--port") o.port = static_cast<uint16_t>(std::atoi(next().c_str()));
     else if (a == "--interface") o.interface_ip = next();

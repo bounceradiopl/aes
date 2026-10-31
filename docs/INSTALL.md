@@ -14,7 +14,7 @@
 2. Instalator:
    - kopiuje pliki do `C:\Program Files\BounceAES Master`,
    - instaluje usługę **BounceAES Master** (`BounceAESMaster`, start automatyczny razem z Windows, restart po awarii po 5 s),
-   - rejestruje sterownik ASIO **BounceAES Master**,
+   - rejestruje sterownik ASIO **BounceAES Master** w dwóch wersjach, jak Axia: 64-bitowej (`BounceAESAsio.dll`) dla programów 64-bitowych i 32-bitowej (`BounceAESAsio32.dll`) dla programów 32-bitowych (np. 32-bitowego mAirList),
    - dodaje regułę zapory dla usługi (RTP 5004, PTP 319/320, SAP 9875, panel 8067),
    - dodaje ikonę w zasobniku do autostartu (przy każdym logowaniu); ikona uruchamia też BounceAES Audio Bridge (audio Windows),
    - tworzy skrót **BounceAES Master** na pulpicie i w menu Start.
@@ -145,6 +145,8 @@ Rozpoznawane wirtualne karty (po nazwie sterownika, także po zmianie nazwy urz�
 
 ## 7. mAirList (i inne aplikacje ASIO)
 
+**Gdzie jest sterownik ASIO.** ASIO nie jest kartą dźwiękową Windows: *nie* pojawia się w Ustawieniach → Dźwięk ani w Panelu dźwięku. Widać go wyłącznie w programie, który obsługuje ASIO (mAirList, Reaper, Audition itp.), na liście sterowników ASIO, pod nazwą **BounceAES Master**. Zwykłe programy Windows łączy się przez zakładkę Routing (rozdział 5) albo VB-CABLE.
+
 1. W konfiguracji urządzeń audio mAirList wybierz typ **ASIO** i sterownik **BounceAES Master**.
 2. Rozmiar bufora: 128 próbek (2,67 ms) to dobry punkt wyjścia. Przy trzaskach zwiększ do 256.
 3. Częstotliwość próbkowania: **48 000 Hz** (jedyna obsługiwana).
@@ -152,6 +154,19 @@ Rozpoznawane wirtualne karty (po nazwie sterownika, także po zmianie nazwy urz�
 5. Z poziomu okna ustawień ASIO („Panel sterowania”) otwiera się panel WWW.
 
 Sterownik obsługuje **jedną aplikację ASIO naraz**. Druga dostanie komunikat „urządzenie zajęte”.
+
+### Program nie widzi sterownika „BounceAES Master”
+1. Upewnij się, że zainstalowana jest wersja **1.1.2 lub nowsza**. Starsze instalowały tylko sterownik 64-bitowy, którego nie widzą programy 32-bitowe (np. 32-bitowy mAirList).
+2. Uruchom w wierszu poleceń oba narzędzia z folderu `C:\Program Files\BounceAES Master`:
+   - `asio-probe.exe` — co widzą programy **64-bitowe**,
+   - `asio-probe32.exe` — co widzą programy **32-bitowe**.
+
+   Każde wypisuje listę sterowników ASIO, ładuje „BounceAES Master” tak jak mAirList i kończy się `OK` albo opisem błędu.
+3. Jeśli „BounceAES Master” nie ma na liście: zainstaluj ponownie jako administrator albo zarejestruj ręcznie w wierszu poleceń uruchomionym jako administrator:
+   - 64-bit: `C:\Windows\System32\regsvr32.exe "C:\Program Files\BounceAES Master\BounceAESAsio.dll"`
+   - 32-bit: `C:\Windows\SysWOW64\regsvr32.exe "C:\Program Files\BounceAES Master\BounceAESAsio32.dll"`
+4. Jeśli sterownik jest na liście, ale `init()` zgłasza „usługa nie działa”: uruchom usługę (`services.msc` → BounceAES Master → Uruchom).
+5. Po zmianach zamknij i uruchom ponownie mAirList — programy czytają listę sterowników ASIO przy starcie.
 
 ## 8. Strojenie Windows i karty sieciowej
 
@@ -179,6 +194,7 @@ Software'owe znaczniki czasu PTP i wysyłanie tysięcy pakietów na sekundę są
 | Aplikacja Windows „wymaga Windows 11” | przechwytywanie procesu działa od Windows 11; na Windows 10 użyj „Odsłuch: urządzenie” albo VB-CABLE |
 | Aplikacja Windows „aplikacja nie działa” | program jest zamknięty; bridge sprawdza co 2 s i podłącza się, gdy program wystartuje |
 | Dwa komputery jednocześnie „PTP: master” | sprawdź domenę PTP i czy oba są w tej samej sieci/VLAN-ie (multicast 224.0.1.129) |
+| mAirList nie pokazuje sterownika ASIO | rozdział 7, „Program nie widzi sterownika”: `asio-probe.exe` i `asio-probe32.exe` |
 | "usługa nie działa" w mAirList | `services.msc` → BounceAES Master → Uruchom; logi w `C:\ProgramData\BounceAES Master\logs` |
 | Ostrzeżenie o konflikcie adresu | inne urządzenie nadaje na tym samym adresie multicast: zmień adres wyjścia |
 
