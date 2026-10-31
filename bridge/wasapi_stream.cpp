@@ -42,16 +42,17 @@ typedef struct AUDIOCLIENT_ACTIVATION_PARAMS {
 #include "bam/meters.hpp"
 #include "bam/platform/time.hpp"
 #include "bam/rate_control.hpp"
+#include "bam/render_pacer.hpp"
 #include "com_ptr.hpp"
 #include "endpoints.hpp"
 
 namespace bam::bridge {
 
 namespace {
-constexpr REFERENCE_TIME kBufferHns = 200000;  // 20 ms shared-mode buffer, 10 ms periods
-constexpr uint32_t kFifoTarget = 480;          // 10 ms cushion at 48 kHz
+constexpr REFERENCE_TIME kBufferHns = 200000;        // 20 ms shared-mode capture buffer, 10 ms periods
+constexpr REFERENCE_TIME kRenderBufferHns = 400000;  // 40 ms: room above the pacer's two-period target
+constexpr uint32_t kFifoTarget = 480;          // capture: 10 ms cushion at 48 kHz
 constexpr uint64_t kReanchorFrames = 4800;     // 100 ms off the media clock: start over
-constexpr uint32_t kChunk = 48;
 
 std::wstring widen(const std::string& s) {
   if (s.empty()) return {};
@@ -489,12 +490,15 @@ void RenderStream::run() {
   hr = client->GetMixFormat(&mix);
   if (FAILED(hr)) return fail(hr_text("format urządzenia", hr));
   const Format fmt = describe(mix);
-  hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, kBufferHns, 0, mix, nullptr);
+  hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, kRenderBufferHns, 0, mix, nullptr);
   CoTaskMemFree(mix);
   if (FAILED(hr)) return fail(hr_text("inicjalizacja WASAPI", hr));
   client->SetEventHandle(ev.h);
   UINT32 buffer_frames = 0;
   client->GetBufferSize(&buffer_frames);
+  REFERENCE_TIME period_hns = 0;
+  if (FAILED(client->GetDevicePeriod(&period_hns, nullptr)) || period_hns <= 0) period_hns = 100000;  // 10 ms
+  const auto period_frames = static_cast<uint32_t>(period_hns * static_cast<int64_t>(fmt.rate) / 10'000'000);
   ComPtr<IAudioRenderClient> render;
   hr = client->GetService(__uuidof(IAudioRenderClient), reinterpret_cast<void**>(render.put()));
   if (SUCCEEDED(hr)) hr = client->Start();
@@ -502,15 +506,12 @@ void RenderStream::run() {
   set_ok();
 
   const ChannelRing src_l = view_.source_ring(kind_, pair_ * 2), src_r = view_.source_ring(kind_, pair_ * 2 + 1);
-  DriftResampler rs(fmt.rate / 48000.0);
-  const double target = fmt.rate / 100.0;  // 10 ms of device frames
-  RateController rc(target);
-  std::vector<float> staging, out;
-  std::vector<int32_t> l(kChunk), r(kChunk);
-  double mult = 1.0;
-  bool anchored = false;
-  uint64_t read_pos = 0, generation = 0;
-  int64_t last_update = platform::monotonic_ns();
+  RenderPacer pacer(fmt.rate, period_frames);
+  const RenderPacer::Reader read = [&](uint64_t pos, int32_t* l, int32_t* r, uint32_t frames) {
+    src_l.read(pos, l, frames);
+    src_r.read(pos, r, frames);
+  };
+  std::vector<float> out;
 
   while (!stopping()) {
     WaitForSingleObject(ev.h, 20);
@@ -520,31 +521,12 @@ void RenderStream::run() {
       fail(hr_text("odtwarzanie", hr));
       break;
     }
-    // ---- pull the source up to "now - D_src" ----
+    // the source is complete up to "now - D_src"
     uint64_t g = 0;
     const uint64_t now_s = media_now(view_, &g);
     const uint64_t ready = now_s > delay_ ? now_s - delay_ : 0;
-    if (!anchored || g != generation || read_pos + kReanchorFrames < ready || read_pos > ready + kReanchorFrames) {
-      read_pos = ready > kFifoTarget ? ready - kFifoTarget : 0;
-      generation = g;
-      anchored = true;
-      out.clear();
-      rc.reset();
-    }
-    while (read_pos + kChunk <= ready) {
-      src_l.read(read_pos, l.data(), kChunk);
-      src_r.read(read_pos, r.data(), kChunk);
-      for (uint32_t i = 0; i < kChunk; ++i) {
-        staging.push_back(to_float(l[i]));
-        staging.push_back(to_float(r[i]));
-      }
-      read_pos += kChunk;
-    }
-    if (!staging.empty()) resample_all(rs, staging, out, mult);
-
-    // ---- feed the device ----
-    const size_t space = buffer_frames > padding ? buffer_frames - padding : 0;
-    const size_t n = std::min(space, out.size() / 2);
+    const uint32_t space = buffer_frames > padding ? buffer_frames - padding : 0;
+    const size_t n = pacer.step(ready, g, padding, space, platform::monotonic_ns() / 1e9, read, out);
     if (n) {
       BYTE* data = nullptr;
       hr = render->GetBuffer(static_cast<UINT32>(n), &data);
@@ -555,11 +537,7 @@ void RenderStream::run() {
       from_stereo(out.data(), n, fmt, data);
       render->ReleaseBuffer(static_cast<UINT32>(n), 0);
       set_peaks(out.data(), n);
-      out.erase(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(n * 2));
     }
-    const int64_t t = platform::monotonic_ns();
-    mult = rc.update(static_cast<double>(padding + n + out.size() / 2), (t - last_update) / 1e9);
-    last_update = t;
   }
   client->Stop();
 }

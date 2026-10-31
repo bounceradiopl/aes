@@ -118,7 +118,7 @@ Siatka jak w Dante Controller: **wiersze to źródła, kolumny to cele**. Klikni
 | ASIO | wejścia „BounceAES NN”, z których nagrywa aplikacja ASIO |
 | Windows | urządzenia odtwarzające: słuchawki, głośniki; wirtualna karta „…: do aplikacji” |
 
-Opóźnienie połączenia zależy od źródła: subskrypcja — jej opóźnienie odbioru; ASIO — jeden bufor; Windows — 20 ms (bufor urządzenia i dopasowanie zegara).
+Opóźnienie połączenia zależy od źródła: subskrypcja — jej opóźnienie odbioru; ASIO — jeden bufor; Windows — 20 ms (bufor urządzenia i dopasowanie zegara). Odtwarzanie na urządzeniu Windows (słuchawki, głośniki) dodaje około 20 ms bufora karty: Windows pobiera dźwięk co 10 ms, więc mniejszy zapas dawał regularne trzaski (poprawione w 1.1.4).
 
 ### Audio Windows
 Źródła i cele Windows obsługuje **BounceAES Audio Bridge**, uruchamiany przez ikonę w zasobniku w sesji zalogowanego użytkownika (usługa Windows nie ma dostępu do dźwięku użytkownika). Bez zalogowanego użytkownika panel pokazuje „Audio Windows: brak sesji użytkownika”; AoIP i ASIO działają dalej. Urządzenia Windows mają własny zegar, więc bridge dopasowuje je do zegara PTP resamplerem (±1000 ppm).

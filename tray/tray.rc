@@ -11,8 +11,8 @@
 #endif
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 1,1,3,0
-PRODUCTVERSION 1,1,3,0
+FILEVERSION 1,1,4,0
+PRODUCTVERSION 1,1,4,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -22,9 +22,9 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "Bounce"
       VALUE "FileDescription", "BounceAES Master - zasobnik"
-      VALUE "FileVersion", "1.1.3"
+      VALUE "FileVersion", "1.1.4"
       VALUE "ProductName", "BounceAES Master"
-      VALUE "ProductVersion", "1.1.3"
+      VALUE "ProductVersion", "1.1.4"
       VALUE "LegalCopyright", "GPL-3.0-or-later"
     END
   END
