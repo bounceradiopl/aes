@@ -369,6 +369,72 @@ TEST_CASE("engine routing view: virtual sound cards are labelled, listed first a
   h.bridge_pid = 0;
 }
 
+TEST_CASE("engine adds an output for a receiver (Orban, Omnia) and removes it") {
+  TestEngine t;
+  t.start();
+  // output 1 is enabled by default; the new one takes the first free slot
+  bam::NewOutput req;
+  req.name = "Orban Warszawa";
+  req.source = "asio-out:3";
+  auto r = t.engine->add_output(req);
+  REQUIRE_MESSAGE(r.ok, (r.issues.empty() ? "" : r.issues[0].message));
+  CHECK(r.created == 2);
+  auto cfg = t.engine->config();
+  CHECK(cfg.outputs[1].enabled);
+  CHECK(cfg.outputs[1].name == "Orban Warszawa");
+  CHECK(cfg.outputs[1].ptime_us == 1000);
+  CHECK(cfg.outputs[1].address != cfg.outputs[0].address);
+  CHECK(cfg.routes["net-out:2"] == "asio-out:3");
+  const std::string sdp = t.engine->output_sdp(2);
+  CHECK(sdp.find("s=TEST / Orban Warszawa") != std::string::npos);
+  CHECK(sdp.find("c=IN IP4 " + cfg.outputs[1].address + "/") != std::string::npos);
+
+  // an address already used by another output is moved to a free one
+  req = {};
+  req.name = "Omnia";
+  req.source = "asio-out:4";
+  req.address = cfg.outputs[0].address;
+  r = t.engine->add_output(req);
+  CHECK_FALSE(r.ok);
+  req.address = "239.69.250.7";
+  req.ptime_us = 4000;
+  r = t.engine->add_output(req);
+  REQUIRE(r.ok);
+  CHECK(r.created == 3);
+  cfg = t.engine->config();
+  CHECK(cfg.outputs[2].address == "239.69.250.7");
+  CHECK(cfg.outputs[2].ptime_us == 4000);
+
+  // the default address of a slot taken by an enabled output is skipped
+  t.set_output(5, "239.69.100.4");
+  req = {};
+  req.name = "Test";
+  r = t.engine->add_output(req);  // no source yet: allowed, routed later in the matrix
+  REQUIRE(r.ok);
+  CHECK(r.created == 4);
+  cfg = t.engine->config();
+  CHECK(cfg.outputs[3].address != "239.69.100.4");
+  CHECK(cfg.routes.count("net-out:4") == 0);
+
+  req = {};
+  req.name = "Zły";
+  req.source = "nie:istnieje";
+  CHECK_FALSE(t.engine->add_output(req).ok);
+  req.source = "asio-out:1";
+  req.name = std::string(60, 'x');
+  CHECK_FALSE(t.engine->add_output(req).ok);
+
+  // removing frees the slot: disabled, default name and address, its route gone
+  r = t.engine->remove_output(2);
+  REQUIRE(r.ok);
+  cfg = t.engine->config();
+  CHECK_FALSE(cfg.outputs[1].enabled);
+  CHECK(cfg.outputs[1].name == "BounceAES 02");
+  CHECK(cfg.outputs[1].address == "239.69.100.2");
+  CHECK(cfg.routes.count("net-out:2") == 0);
+  CHECK_FALSE(t.engine->remove_output(40).ok);
+}
+
 TEST_CASE("engine receives more subscriptions on one port than a socket may join") {
   TestEngine t;
   t.start();

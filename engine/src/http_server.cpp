@@ -222,6 +222,41 @@ struct HttpServer::Impl {
     server.Get(R"(/api/outputs/(\d+)/sdp)", output_sdp);
     server.Get(R"(/api/devices/(\d+)/sdp)", output_sdp);  // 1.0 path
 
+    // "Nadawaj do urządzenia…": a new output with its source, answered with its SDP
+    server.Post("/api/outputs", [this](const httplib::Request& req, httplib::Response& res) {
+      auto body = parse_body(req, res);
+      if (!body) return;
+      if (!body->is_object()) return send_error(res, 400, "oczekiwano obiektu JSON");
+      NewOutput o;
+      auto text = [&](const char* key, std::string& out) {
+        if (body->contains(key) && (*body)[key].is_string()) out = (*body)[key].get<std::string>();
+      };
+      text("name", o.name);
+      text("source", o.source);
+      text("address", o.address);
+      if (body->contains("ptime_us") && (*body)["ptime_us"].is_number_unsigned()) o.ptime_us = (*body)["ptime_us"].get<uint32_t>();
+      const ApplyResult r = engine.add_output(o);
+      json out = api::result_json(r);
+      if (r.ok) {
+        out["config"] = api::config_json(engine.config());
+        out["routing"] = api::routing_json(engine.routing());
+        out["sdp"] = engine.output_sdp(r.created);
+      }
+      send_json(res, out, r.ok ? 200 : 400);
+    });
+
+    server.Delete(R"(/api/outputs/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
+      const int n = std::stoi(req.matches[1]);
+      if (n < 1 || n > kDeviceCount) return send_error(res, 404, "brak wyjścia");
+      const ApplyResult r = engine.remove_output(n);
+      json out = api::result_json(r);
+      if (r.ok) {
+        out["config"] = api::config_json(engine.config());
+        out["routing"] = api::routing_json(engine.routing());
+      }
+      send_json(res, out, r.ok ? 200 : 400);
+    });
+
     server.Get("/api/routing", [this](const httplib::Request&, httplib::Response& res) {
       send_json(res, api::routing_json(engine.routing()));
     });
@@ -266,7 +301,10 @@ struct HttpServer::Impl {
       if (n < 1 || n > kDeviceCount) return send_error(res, 404, "brak subskrypcji");
       const ApplyResult r = engine.remove_subscription(n);
       json out = api::result_json(r);
-      if (r.ok) out["config"] = api::config_json(engine.config());
+      if (r.ok) {
+        out["config"] = api::config_json(engine.config());
+        out["routing"] = api::routing_json(engine.routing());
+      }
       send_json(res, out, r.ok ? 200 : 400);
     });
 

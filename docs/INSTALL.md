@@ -53,16 +53,17 @@ Kolory ikony w zasobniku:
 - **Port panelu**: zmiana działa po restarcie usługi.
 
 ### Wyjścia AoIP (1–32)
-Każde wyjście to strumień stereo nadawany do sieci. Co na nie trafia, ustala zakładka **Routing**.
+Każde wyjście to strumień stereo nadawany do sieci. Co na nie trafia, ustala zakładka **Routing**. Nowe wyjście najprościej dodać przyciskiem **Nadawaj do urządzenia…** (rozdział „Nadawanie do Orbana lub Omnii” niżej).
 
 | Pole | Opis |
 |---|---|
 | Aktywne | włącza wyjście (strumień i ogłoszenie SAP) |
 | Nazwa | druga część nazwy strumienia w sieci |
-| Adres multicast | adres strumienia (domyślnie 239.69.100.N), port 5004; **SDP** pokazuje opis do skopiowania do odbiornika, który nie korzysta z SAP |
+| Adres multicast | adres strumienia (domyślnie 239.69.100.N), port 5004; **SDP** pokazuje opis strumienia: *Kopiuj* albo *Pobierz plik .sdp* dla odbiornika, który nie korzysta z SAP |
 | ptime | 1 ms (standard AES67), 1,333 ms (jak Orban) lub 4 ms (dla odbiorników z małym buforem) |
 | Utrzymuj | nadawaj ciszę, gdy aplikacja ASIO nie gra (Axia: KEEP CHANNEL ACTIVE). Wyjścia zasilane z sieci lub z Windows nadają zawsze |
 | Źródło | aktualne połączenie z zakładki Routing |
+| **Usuń** (pierwsza kolumna) | od razu, po potwierdzeniu: wyłącza wyjście, rozłącza je i wycofuje ogłoszenie SAP; nazwa i adres wracają do domyślnych |
 
 ### Subskrypcje (1–32)
 Subskrypcja to odbierany strumień stereo z sieci (Orban, Omnia, konsola, inny komputer Bounce). **Dodaj źródło…** pokazuje strumienie ogłaszane w sieci (SAP); **Wklej SDP…** przyjmuje plik SDP, np. z Orbana.
@@ -73,7 +74,9 @@ Subskrypcja to odbierany strumień stereo z sieci (Orban, Omnia, konsola, inny k
 | Nazwa | nazwa w siatce routingu (domyślnie nazwa sesji z SDP) |
 | Źródło | nazwa i adres z SDP; kropka pokazuje, czy sygnał dociera; **SDP…** zmienia źródło |
 | Opóźn. ms | opóźnienie odbioru: bufor na jitter sieci. Minimum to ptime źródła + 1 ms; panel sam podnosi zbyt małą wartość. Zacznij od 5 ms i zwiększ, jeśli rośnie licznik RxUnderrun |
-| Usuń | usuwa subskrypcję i jej połączenia |
+| **Usuń** (pierwsza kolumna) | od razu, po potwierdzeniu: usuwa subskrypcję i rozłącza wszystko, co zasilała (okno potwierdzenia wymienia te połączenia) |
+
+Usuwanie i dodawanie (źródeł i wyjść) działa od razu, bez „Zapisz zmiany”; niezapisane zmiany w innych wierszach zostają. To samo okno otwiera się w zakładce **Routing** po kliknięciu nazwy subskrypcji (wiersz) albo wyjścia AoIP (kolumna): adres, połączenia, SDP i **Usuń**.
 
 ### Nazwy par ASIO
 Nazwy 32 par, które widzą aplikacje ASIO, np. „BounceAES 02 L (Kraków)”.
@@ -85,12 +88,20 @@ Po zmianach kliknij **Zapisz zmiany**. Zmiany działają od razu. Przebudowywane
 2. Opóźnienie odbioru zostanie podniesione co najmniej do 2,334 ms (ptime 1,333 ms + 1 ms).
 3. W zakładce Routing połącz subskrypcję z celem, np. z wejściem ASIO albo słuchawkami.
 
+### Nadawanie do Orbana lub Omnii
+1. **Routing** (albo Konfiguracja → Wyjścia AoIP) → **Nadawaj do urządzenia…**
+2. Wpisz nazwę (np. „Orban Warszawa”), wybierz, co nadawać (np. *ASIO: Program* z mAirList), pakiet zostaw **1 ms**, adres zostaw pusty — panel wybierze wolny.
+3. **Utwórz**: wyjście zaczyna nadawać od razu, a okno pokazuje gotowe SDP. **Pobierz plik .sdp** zapisuje plik `STACJA - nazwa.sdp`.
+4. Wczytaj plik w odbiorniku (Orban, Omnia: wejście AES67 → SDP). Urządzenia obsługujące SAP widzą strumień „STACJA / nazwa” bez pliku.
+
+Ten sam plik pobierzesz później przyciskiem **SDP** przy wyjściu albo z okna wyjścia w Routingu.
+
 ### Aktualizacja z wersji 1.0
 Konfiguracja 1.0 przenosi się sama przy pierwszym uruchomieniu 1.1 (kopia: `config.json.v1.bak`). Urządzenie N staje się wyjściem N (zasilanym z ASIO N), subskrypcją N (jeśli miało źródło, połączoną z wejściem ASIO N) i nazwą pary ASIO N, więc wszystko gra tak jak wcześniej.
 
 ## 5. Routing (zakładka Routing)
 
-Siatka jak w Dante Controller: **wiersze to źródła, kolumny to cele**. Kliknięcie kratki łączy źródło z celem od razu, drugie kliknięcie rozłącza. Każdy cel ma jedno źródło; jedno źródło może zasilać wiele celów. Grupy (Sieć AoIP, ASIO, Windows) można zwijać, a „tylko używane” ukrywa nieużywane wiersze i kolumny. Szara kratka oznacza połączenie ze źródłem chwilowo niedostępnym (np. aplikacja zamknięta).
+Siatka jak w Dante Controller: **wiersze to źródła, kolumny to cele**. Kliknięcie kratki łączy źródło z celem od razu, drugie kliknięcie rozłącza. Każdy cel ma jedno źródło; jedno źródło może zasilać wiele celów. Grupy (Sieć AoIP, ASIO, Windows) można zwijać, a „tylko używane” ukrywa nieużywane wiersze i kolumny. Szara kratka oznacza połączenie ze źródłem chwilowo niedostępnym (np. aplikacja zamknięta). Kliknięcie nazwy subskrypcji albo wyjścia AoIP otwiera jego okno: adres, połączenia, SDP i **Usuń**. Przyciski **Nadawaj do urządzenia…** i **Dodaj źródło…** dodają wyjście i subskrypcję.
 
 | Źródło | Co to jest |
 |---|---|

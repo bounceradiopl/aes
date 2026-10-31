@@ -163,6 +163,27 @@ TEST_CASE("HTTP API: auth flow, config, SDP, panel, live feed") {
   CHECK(f.engine->config().routes.count("asio-in:2") == 0);
   CHECK(f.client.Delete("/api/subscriptions/40", f.auth())->status == 404);
 
+  // ---- outputs for receivers ----
+  auto made = f.client.Post("/api/outputs", f.auth(),
+                            json{{"name", "Orban Warszawa"}, {"source", "asio-out:2"}, {"ptime_us", 1000}}.dump(), "application/json");
+  REQUIRE(made);
+  CHECK(made->status == 200);
+  auto mj = json::parse(made->body);
+  const int made_n = mj["created"].get<int>();
+  CHECK(made_n >= 2);
+  CHECK(mj["sdp"].get<std::string>().find("Orban Warszawa") != std::string::npos);
+  CHECK(mj["routing"]["routes"]["net-out:" + std::to_string(made_n)] == "asio-out:2");
+  CHECK(f.engine->config().outputs[made_n - 1].enabled);
+  CHECK(f.client.Post("/api/outputs", f.auth(), R"({"name": "x", "address": "10.0.0.1"})", "application/json")->status == 400);
+  CHECK(f.client.Post("/api/outputs", f.auth(), "[]", "application/json")->status == 400);
+  auto unmade = f.client.Delete("/api/outputs/" + std::to_string(made_n), f.auth());
+  REQUIRE(unmade);
+  CHECK(unmade->status == 200);
+  CHECK_FALSE(f.engine->config().outputs[made_n - 1].enabled);
+  CHECK(json::parse(unmade->body)["routing"]["routes"].count("net-out:" + std::to_string(made_n)) == 0);
+  CHECK(f.client.Delete("/api/outputs/40", f.auth())->status == 404);
+  CHECK(f.client.Post("/api/outputs", R"({"name": "x"})", "application/json")->status == 401);
+
   auto status = f.client.Get("/api/status", f.auth());
   REQUIRE(status);
   auto sj = json::parse(status->body);

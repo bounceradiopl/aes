@@ -714,6 +714,79 @@ ApplyResult Engine::remove_subscription(int index) {
   return r;
 }
 
+ApplyResult Engine::add_output(const NewOutput& req) {
+  auto& m = *impl_;
+  ApplyResult r;
+  std::set<std::string> announced;  // multicast addresses other senders announce in SAP
+  {
+    std::lock_guard lock(m.sap_mutex);
+    const std::string self = m.current_interface();
+    for (const auto& st : m.directory.list())
+      if (st.origin != self) announced.insert(st.parsed.multicast_address);
+  }
+
+  std::lock_guard lock(m.config_mutex);
+  Config next = m.config;
+  int slot = 0;
+  for (int i = 0; i < kDeviceCount && !slot; ++i)
+    if (!next.outputs[i].enabled) slot = i + 1;
+  if (!slot) {
+    r.issues.push_back({0, "outputs", "wszystkie 32 wyjścia są zajęte"});
+    return r;
+  }
+  std::set<std::string> used = announced;
+  for (const auto& o : next.outputs)
+    if (o.enabled) used.insert(o.address);
+
+  auto& out = next.outputs[slot - 1];
+  out.enabled = true;
+  out.name = req.name;
+  out.ptime_us = req.ptime_us;
+  out.keep_active = true;
+  if (!req.address.empty()) {
+    out.address = req.address;  // validated (format, duplicates) by commit
+  } else if (used.count(out.address)) {
+    // the slot's default address is taken: the first free 239.69.100.x, then 239.69.101.x, ...
+    std::string free;
+    for (int net = 100; net < 110 && free.empty(); ++net)
+      for (int host = 1; host < 255 && free.empty(); ++host) {
+        const std::string a = "239.69." + std::to_string(net) + "." + std::to_string(host);
+        if (!used.count(a)) free = a;
+      }
+    out.address = free;
+  }
+  if (!req.source.empty()) {
+    if (!parse_source(req.source)) {
+      r.issues.push_back({slot, "source", "nieznane źródło " + req.source});
+      return r;
+    }
+    next.routes["net-out:" + std::to_string(slot)] = req.source;
+  }
+  r = m.commit(std::move(next));
+  if (r.ok) {
+    r.created = slot;
+    log_info("Dodano wyjście " + two_digits(slot) + ": " + req.name);
+  }
+  return r;
+}
+
+ApplyResult Engine::remove_output(int index) {
+  auto& m = *impl_;
+  ApplyResult r;
+  if (index < 1 || index > kDeviceCount) {
+    r.issues.push_back({0, "outputs", "brak wyjścia " + std::to_string(index)});
+    return r;
+  }
+  std::lock_guard lock(m.config_mutex);
+  Config next = m.config;
+  next.outputs[index - 1] = default_config().outputs[index - 1];
+  next.outputs[index - 1].enabled = false;
+  next.routes.erase("net-out:" + std::to_string(index));
+  r = m.commit(std::move(next));
+  if (r.ok) log_info("Usunięto wyjście " + two_digits(index));
+  return r;
+}
+
 EngineStatus Engine::status() const {
   const auto& m = *impl_;
   EngineStatus s;

@@ -218,7 +218,6 @@ h4.virtual-head { margin: 8px 0 -8px; font-size: 13px; font-weight: 600; letter-
 #virtual-body td .hint { font-size: 12px; }
 #virtual-body td.actions { white-space: nowrap; }
 #virtual-body td.actions button + button { margin-left: 4px; }
-#virtual-body button[hidden] { display: none; }
 th.dst.unavailable span, tr.unavailable th.src .src-name { color: var(--muted); }
 table.matrix .first { border-left: 1px solid var(--line-strong); }
 table.matrix tbody tr.group-row th { position: sticky; left: 0; background: var(--canvas); z-index: 1; height: 32px; border-top: 1px solid var(--line-strong); }
@@ -274,3 +273,27 @@ dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 8px 0 
   .global .wide { grid-column: auto; }
   .savebar { padding: 12px 16px; }
 }
+
+/* ---- remove, send to a device, stream details ---- */
+[hidden] { display: none !important; }  /* layout rules (grid, flex) must not override hidden */
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+th.c-del, td.c-del { width: 1%; padding-right: 0; }
+button.danger { color: var(--err-fg); border-color: rgba(228, 139, 134, 0.35); }
+button.danger:hover { background: var(--err-bg); border-color: var(--err-fg); color: var(--err-fg); }
+button.mini.danger { border-color: rgba(228, 139, 134, 0.35); }
+button.danger.solid { background: var(--err-fg); border-color: var(--err-fg); color: #121211; font-weight: 500; }
+button.danger.solid:hover { background: #f0a19c; }
+button.src-btn { border: 0; padding: 0; border-radius: 0; text-align: left; font: inherit; cursor: pointer; }
+button.src-btn:hover { background: transparent; text-decoration: underline; text-underline-offset: 3px; }
+button.dst-btn { border: 0; padding: 0; border-radius: 0; width: 100%; height: 100%; display: block; background: transparent; cursor: pointer; }
+button.dst-btn:hover { background: var(--hover); }
+button.dst-btn:hover span { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 8px 20px; margin: 0; font-size: 14px; }
+dl.facts dt { color: var(--muted); }
+dl.facts dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+p.confirm { margin: 0; padding: 12px 14px; border-radius: 8px; background: var(--err-bg); color: var(--ink); line-height: 1.5; }
+dialog menu .spacer { flex: 1; }
+.send-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 16px; }
+.send-grid .wide { grid-column: 1 / -1; }
+.send-done { display: grid; gap: 12px; }
+@media (max-width: 560px) { .send-grid { grid-template-columns: 1fr; } }

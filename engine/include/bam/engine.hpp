@@ -77,7 +77,16 @@ struct ApplyResult {
   bool ok = false;
   std::vector<ConfigIssue> issues;
   std::vector<std::string> notices;
-  int created = 0;  // subscription slot created by add_subscription (1..32)
+  int created = 0;  // slot created by add_subscription / add_output (1..32)
+};
+
+// A new AoIP output for a receiver (Orban, Omnia, another computer): the panel's
+// "Nadawaj do urządzenia…".
+struct NewOutput {
+  std::string name;
+  std::string source;      // route source id ("asio-out:1", "net-in:2", "win-app:…"); empty: route later
+  std::string address;     // multicast address; empty: a free one is chosen
+  uint32_t ptime_us = 1000;
 };
 
 struct EngineOptions {
@@ -111,6 +120,8 @@ class Engine {
   ApplyResult set_route(const std::string& dest, const std::optional<std::string>& source);
   ApplyResult add_subscription(const std::string& sdp_or_sap_id);
   ApplyResult remove_subscription(int index);
+  ApplyResult add_output(const NewOutput& req);
+  ApplyResult remove_output(int index);  // disables it, resets its name and address, drops its route
 
   void reset_stats();
 

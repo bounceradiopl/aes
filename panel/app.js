@@ -246,8 +246,11 @@ function renderMatrix() {
       continue;
     }
     const n = c.node;
-    head2.append(el("th", { class: "dst" + (c.first ? " first" : "") + (n.available ? "" : " unavailable"), title: `${n.name}\n${n.id}${virtualText(n)}${n.note ? "\n" + n.note : ""}` },
-      el("span", {}, n.name)));
+    const dstTitle = `${n.name}\n${n.id}${virtualText(n)}${n.note ? "\n" + n.note : ""}`;
+    head2.append(el("th", { class: "dst" + (c.first ? " first" : "") + (n.available ? "" : " unavailable"), title: n.group === "net" ? `${dstTitle}\nKliknij: SDP, usuń` : dstTitle },
+      n.group === "net"
+        ? el("button", { type: "button", class: "dst-btn", "aria-label": `Wyjście ${n.name}: szczegóły`, onclick: () => openStream(n.id) }, el("span", {}, n.name))
+        : el("span", {}, n.name)));
   }
 
   const body = [];
@@ -262,7 +265,10 @@ function renderMatrix() {
       for (const n of g.nodes) {
         const row = el("tr", { class: n.available ? "" : "unavailable" },
           el("th", { class: "src", title: `${n.id}${virtualText(n)}${n.note ? "\n" + n.note : ""}` },
-            el("span", { class: "src-name" }, n.name), n.virtual ? el("i", { class: "vtag" }, "wirt.") : null, meter(`r-${n.id}`)));
+            n.group === "net"
+              ? el("button", { type: "button", class: "src-name src-btn", title: "Kliknij: SDP, usuń", onclick: () => openStream(n.id) }, n.name)
+              : el("span", { class: "src-name" }, n.name),
+            n.virtual ? el("i", { class: "vtag" }, "wirt.") : null, meter(`r-${n.id}`)));
         for (const c of columns) {
           if (c.placeholder) { row.append(el("td", { class: "cell placeholder first" })); continue; }
           const on = v.routes[c.node.id] === n.id;
@@ -483,19 +489,20 @@ function renderOutputs() {
       ...PTIMES.map(([v, t]) => el("option", { value: v, selected: o.ptime_us === v }, t)));
     const src = state.draft.routes[`net-out:${n}`];
     const row = el("tr", { class: o.enabled ? "" : "off" },
+      el("td", { class: "c-del" }, state.config.outputs[i].enabled ? deleteButton(`net-out:${n}`, `Usuń wyjście ${pad2(n)}`) : null),
       el("td", { class: "c-num" }, pad2(n)),
       el("td", {}, el("input", { type: "checkbox", checked: o.enabled, "aria-label": `Wyjście ${pad2(n)} aktywne`,
         onchange: (e) => { set("enabled", e.target.checked); row.classList.toggle("off", !e.target.checked); } })),
       el("td", {}, el("input", { type: "text", value: o.name, maxLength: 40, dataset: { field: "name" }, "aria-label": `Nazwa wyjścia ${pad2(n)}`, oninput: (e) => set("name", e.target.value) })),
       el("td", {}, el("div", { class: "inline" },
         el("input", { type: "text", class: "addr", value: o.address, dataset: { field: "address" }, "aria-label": `Adres wyjścia ${pad2(n)}`, oninput: (e) => set("address", e.target.value.trim()) }),
-        el("button", { type: "button", class: "mini", title: "Pokaż SDP wyjścia", onclick: () => openSdp(n) }, "SDP"))),
+        el("button", { type: "button", class: "mini", title: "SDP wyjścia: pokaż, kopiuj, pobierz plik", onclick: () => openSdp(n) }, "SDP"))),
       el("td", {}, ptime),
       el("td", {}, el("input", { type: "checkbox", checked: o.keep_active, "aria-label": `Utrzymuj wyjście ${pad2(n)}`, onchange: (e) => set("keep_active", e.target.checked) })),
       el("td", {}, el("a", { class: "route-link" + (src ? "" : " none"), href: "#routing", title: src || "" }, src ? sourceName(src) : "brak")),
       el("td", {}, meter(`out-${n}`)));
     tbody.append(row);
-    issueRow(tbody, row, `outputs[${n}].`, 8);
+    issueRow(tbody, row, `outputs[${n}].`, 9);
   });
   $('[data-issue="0"]').textContent = state.issues.filter((x) => x.device === 0).map((x) => x.message).join(" · ");
   applyLive();
@@ -512,7 +519,9 @@ function renderSubscriptions() {
     const n = i + 1;
     const set = (key, value) => { s[key] = value; markDirty(); };
     const info = sdpInfo(s.sdp);
+    const saved = state.config.subscriptions[i];
     const row = el("tr", { class: s.enabled ? "" : "off" },
+      el("td", { class: "c-del" }, saved.enabled || saved.sdp ? deleteButton(`net-in:${n}`, `Usuń subskrypcję ${pad2(n)}`) : null),
       el("td", { class: "c-num" }, pad2(n)),
       el("td", {}, el("input", { type: "checkbox", checked: s.enabled, "aria-label": `Subskrypcja ${pad2(n)} aktywna`,
         onchange: (e) => { set("enabled", e.target.checked); row.classList.toggle("off", !e.target.checked); } })),
@@ -523,23 +532,30 @@ function renderSubscriptions() {
         el("button", { type: "button", class: "mini", title: "Zmień SDP źródła", onclick: () => openPaste(i) }, "SDP…"))),
       el("td", {}, el("input", { type: "number", class: "lat", min: 1, max: 1000, step: 0.5, value: s.latency_us / 1000, dataset: { field: "latency_us" },
         "aria-label": `Opóźnienie subskrypcji ${pad2(n)} w ms`, oninput: (e) => set("latency_us", Math.round(Number(e.target.value) * 1000)) })),
-      el("td", {}, meter(`sub-${n}`)),
-      el("td", {}, el("button", { type: "button", class: "mini", title: "Usuń subskrypcję i jej połączenia", onclick: () => removeSubscription(i) }, "Usuń")));
+      el("td", {}, meter(`sub-${n}`)));
     tbody.append(row);
-    issueRow(tbody, row, `subscriptions[${n}].`, 7);
+    issueRow(tbody, row, `subscriptions[${n}].`, 8);
   });
-  if (!shown) tbody.append(el("tr", {}, el("td", { colSpan: 7, class: "hint" }, "Brak subskrypcji. „Dodaj źródło…” wybiera strumień z sieci (SAP) albo przyjmuje wklejone SDP.")));
+  if (!shown) tbody.append(el("tr", {}, el("td", { colSpan: 8, class: "hint" }, "Brak subskrypcji. „Dodaj źródło…” wybiera strumień z sieci (SAP) albo przyjmuje wklejone SDP.")));
   applyLive();
 }
 
-function removeSubscription(i) {
-  const d = state.draft;
-  d.subscriptions[i] = { enabled: false, name: "", sdp: "", latency_us: 5000 };
-  const id = `net-in:${i + 1}`;
-  for (const [dst, src] of Object.entries(d.routes)) if (src === id) delete d.routes[dst];
-  markDirty();
-  renderSubscriptions();
-  renderOutputs();
+function deleteButton(id, label) {
+  return el("button", { type: "button", class: "mini danger", title: `${label} (od razu, po potwierdzeniu)`, "aria-label": label,
+    onclick: () => openStream(id, true) }, "Usuń");
+}
+
+// A change the server already saved (add / remove): keep unsaved edits of other rows.
+function applyServerChange(fresh, kind, i) {
+  const dirty = JSON.stringify(state.draft) !== JSON.stringify(state.config);
+  state.config = fresh;
+  if (dirty) {
+    state.draft[kind][i] = clone(fresh[kind][i]);
+    state.draft.routes = clone(fresh.routes);
+  } else {
+    state.draft = clone(fresh);
+  }
+  renderConfig();
 }
 
 function renderAsioNames() {
@@ -621,12 +637,7 @@ async function addSubscription(body) {
   for (const n of r.data.notices || []) toast(n, "warn");
   toast(`Dodano subskrypcję ${pad2(r.data.created)}`);
   // keep unsaved edits: take the new subscription from the server, everything else from the draft
-  const i = r.data.created - 1;
-  const fresh = r.data.config;
-  const dirty = JSON.stringify(state.draft) !== JSON.stringify(state.config);
-  state.config = fresh;
-  if (dirty) state.draft.subscriptions[i] = clone(fresh.subscriptions[i]); else state.draft = clone(fresh);
-  renderConfig();
+  applyServerChange(r.data.config, "subscriptions", r.data.created - 1);
   loadRouting();
   return true;
 }
@@ -656,6 +667,8 @@ $("#dlg-paste").addEventListener("close", async () => {
 });
 
 async function openSdp(n) {
+  $("#sdp-kind").textContent = "SDP wyjścia";
+  $("#sdp-hint").textContent = "Wczytaj plik w odbiorniku AES67 (np. Orban, Omnia), jeśli nie korzysta z SAP.";
   $("#sdp-target").textContent = `${pad2(n)} ${state.config.outputs[n - 1].name}`;
   const res = await fetch(`/api/outputs/${n}/sdp`, { credentials: "same-origin" });
   $("#sdp-text").value = await res.text();
@@ -664,15 +677,159 @@ async function openSdp(n) {
   $("#dlg-sdp").showModal();
 }
 
-$("#sdp-copy").addEventListener("click", async () => {
+function openSourceSdp(n) {
+  $("#sdp-kind").textContent = "SDP źródła";
+  $("#sdp-hint").textContent = "Opis strumienia, który odbiera ta subskrypcja.";
+  $("#sdp-target").textContent = `${pad2(n)} ${state.config.subscriptions[n - 1].name}`;
+  $("#sdp-text").value = state.config.subscriptions[n - 1].sdp || "";
+  $("#dlg-sdp").showModal();
+}
+
+// Saves the SDP as "<station> - <output>.sdp", the name receivers show for the session.
+function downloadSdp(text) {
+  const session = (sdpInfo(text)?.name || "BounceAES").replace(/\s*\/\s*/g, " - ").replace(/[\\/:*?"<>|]+/g, "_").trim();
+  const url = URL.createObjectURL(new Blob([text.replace(/\r?\n/g, "\r\n")], { type: "application/sdp" }));
+  const a = el("a", { href: url, download: `${session || "BounceAES"}.sdp` });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function copyText(text, fallbackInput) {
   try {
-    await navigator.clipboard.writeText($("#sdp-text").value);
+    await navigator.clipboard.writeText(text);
     toast("Skopiowano SDP");
   } catch {
-    $("#sdp-text").select();
+    fallbackInput.select();
     document.execCommand("copy");
   }
+}
+
+$("#sdp-download").addEventListener("click", () => downloadSdp($("#sdp-text").value));
+
+$("#sdp-copy").addEventListener("click", () => copyText($("#sdp-text").value, $("#sdp-text")));
+
+// ---------------------------------------------------------------- send to a device (new output)
+function sendStep(n) {
+  $("#send-step1").hidden = n !== 1;
+  $("#send-step2").hidden = n !== 2;
+  $("#send-create").hidden = n !== 1;
+  $("#send-copy").hidden = n !== 2;
+  $("#send-download").hidden = n !== 2;
+  $("#send-cancel").textContent = n === 1 ? "Anuluj" : "Zamknij";
+}
+
+async function openSend() {
+  if (!state.routing) await loadRouting();
+  const sources = state.routing?.sources || [];
+  const groups = GROUPS.map(([g, label]) => {
+    const list = sources.filter((n) => n.group === g);
+    return list.length ? el("optgroup", { label }, ...list.map((n) => el("option", { value: n.id }, `${label}: ${n.name}${n.available ? "" : " (niedostępne)"}`))) : null;
+  }).filter(Boolean);
+  const sel = $("#send-source");
+  sel.replaceChildren(el("option", { value: "" }, "— wybiorę później w siatce —"), ...groups);
+  sel.value = sources.find((n) => n.group === "asio")?.id || "";
+  $("#send-ptime").replaceChildren(...PTIMES.map(([p, t]) => el("option", { value: p, selected: p === 1000 }, t)));
+  $("#send-name").value = "";
+  $("#send-address").value = "";
+  $("#send-error").textContent = "";
+  sendStep(1);
+  $("#dlg-send").showModal();
+  $("#send-name").focus();
+}
+
+$("#send-create").addEventListener("click", async () => {
+  const name = $("#send-name").value.trim();
+  if (!name) { $("#send-error").textContent = "Podaj nazwę, np. „Orban Warszawa”."; $("#send-name").focus(); return; }
+  const body = { name, source: $("#send-source").value, ptime_us: Number($("#send-ptime").value), address: $("#send-address").value.trim() };
+  const r = await api("/api/outputs", { method: "POST", body: JSON.stringify(body) });
+  if (!r.ok) { $("#send-error").textContent = issuesText(r, "Nie można utworzyć wyjścia"); return; }
+  const n = r.data.created;
+  applyServerChange(r.data.config, "outputs", n - 1);
+  state.routing = r.data.routing;
+  renderMatrix();
+  for (const x of r.data.notices || []) toast(x, "warn");
+  $("#send-made").textContent = `${pad2(n)} „${name}” (${r.data.config.outputs[n - 1].address})`;
+  $("#send-sdp").value = r.data.sdp;
+  sendStep(2);
 });
+$("#send-form").addEventListener("submit", (e) => { if (!$("#send-step1").hidden) { e.preventDefault(); $("#send-create").click(); } });
+$("#send-download").addEventListener("click", () => downloadSdp($("#send-sdp").value));
+$("#send-copy").addEventListener("click", () => copyText($("#send-sdp").value, $("#send-sdp")));
+$("#send-output").addEventListener("click", openSend);
+$("#add-output").addEventListener("click", openSend);
+
+// ---------------------------------------------------------------- stream details and removal
+function plural(n, one, few, many) {
+  if (n === 1) return one;
+  const d = n % 10, t = n % 100;
+  return d >= 2 && d <= 4 && (t < 12 || t > 14) ? few : many;
+}
+
+function destName(id) { return state.routing?.dests.find((d) => d.id === id)?.name || id; }
+
+function streamInfo(id) {
+  const [kind, num] = id.split(":");
+  const n = Number(num);
+  const routes = state.routing?.routes || state.config.routes;
+  if (kind === "net-in") {
+    const sub = state.config.subscriptions[n - 1];
+    const info = sdpInfo(sub.sdp) || { name: "", addr: "" };
+    const feeds = Object.entries(routes).filter(([, src]) => src === id).map(([dst]) => destName(dst));
+    return {
+      kind, n, feeds, name: sub.name || info.name || `Subskrypcja ${pad2(n)}`, title: "Subskrypcja", remove: "Usuń źródło",
+      facts: [["Strumień", info.name || "—"], ["Adres", info.addr || "—"],
+        ["Opóźnienie odbioru", `${(sub.latency_us / 1000).toLocaleString("pl-PL")} ms`], ["Zasila", feeds.length ? feeds.join(", ") : "nic"]],
+    };
+  }
+  const o = state.config.outputs[n - 1];
+  const src = routes[id];
+  return {
+    kind, n, feeds: [], name: o.name || `Wyjście ${pad2(n)}`, title: "Wyjście AoIP", remove: "Usuń wyjście",
+    facts: [["Adres", o.address], ["Pakiet", PTIMES.find(([p]) => p === o.ptime_us)?.[1] || "—"],
+      ["Nadaje", src ? sourceLabel(src) : "nic — połącz źródło w siatce"]],
+  };
+}
+
+function openStream(id, confirmFirst = false) {
+  const info = streamInfo(id);
+  const dlg = $("#dlg-stream");
+  $("#stream-title").replaceChildren(`${info.title} `, el("small", {}, `${pad2(info.n)} · ${info.name}`));
+  $("#stream-facts").replaceChildren(...info.facts.flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]));
+  const showActions = () => {
+    $("#stream-confirm").hidden = true;
+    $("#stream-actions").replaceChildren(
+      el("button", { type: "button", class: "danger", onclick: showConfirm }, info.remove),
+      el("span", { class: "spacer" }),
+      el("button", { type: "button", class: "ghost", onclick: () => { dlg.close(); if (info.kind === "net-in") openSourceSdp(info.n); else openSdp(info.n); } },
+        info.kind === "net-in" ? "SDP źródła…" : "SDP / plik .sdp…"),
+      el("button", { value: "cancel", class: "primary" }, "Zamknij"));
+  };
+  const showConfirm = () => {
+    const links = info.feeds.length;
+    $("#stream-confirm").textContent = info.kind === "net-in"
+      ? `Usunąć źródło „${info.name}”?${links ? ` Rozłączy to ${links} ${plural(links, "połączenie", "połączenia", "połączeń")}: ${info.feeds.join(", ")}.` : ""}`
+      : `Usunąć wyjście „${info.name}”? Przestanie nadawać, a odbiorniki (np. Orban) stracą ten sygnał.`;
+    $("#stream-confirm").hidden = false;
+    $("#stream-actions").replaceChildren(
+      el("span", { class: "spacer" }),
+      el("button", { type: "button", class: "ghost", onclick: () => (confirmFirst ? dlg.close() : showActions()) }, "Anuluj"),
+      el("button", { type: "button", class: "danger solid", onclick: () => removeStream(info) }, "Tak, usuń"));
+  };
+  if (confirmFirst) showConfirm(); else showActions();
+  dlg.showModal();
+}
+
+async function removeStream(info) {
+  const r = await api(`/api/${info.kind === "net-in" ? "subscriptions" : "outputs"}/${info.n}`, { method: "DELETE" });
+  if (!r.ok) { toast(issuesText(r, "Nie można usunąć"), "err"); return; }
+  $("#dlg-stream").close();
+  applyServerChange(r.data.config, info.kind === "net-in" ? "subscriptions" : "outputs", info.n - 1);
+  state.routing = r.data.routing;
+  renderMatrix();
+  toast(`Usunięto ${info.kind === "net-in" ? "źródło" : "wyjście"} „${info.name}”`);
+}
 
 $("#change-password").addEventListener("click", () => {
   for (const id of ["#pw-current", "#pw-new", "#pw-new2"]) $(id).value = "";

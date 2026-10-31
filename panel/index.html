@@ -75,10 +75,11 @@
             <div class="head-tools">
               <label class="toggle"><input type="checkbox" id="only-used"> tylko używane</label>
               <button type="button" class="ghost" id="open-virtual">Wirtualne karty…</button>
+              <button type="button" class="ghost" id="send-output">Nadawaj do urządzenia…</button>
               <button type="button" class="ghost" id="add-source">Dodaj źródło…</button>
             </div>
           </div>
-          <p class="hint matrix-hint">Wiersze to źródła, kolumny to cele. Kliknięcie kratki łączy źródło z celem od razu; drugie kliknięcie rozłącza. Każdy cel ma jedno źródło.</p>
+          <p class="hint matrix-hint">Wiersze to źródła, kolumny to cele. Kliknięcie kratki łączy źródło z celem od razu; drugie kliknięcie rozłącza. Każdy cel ma jedno źródło. Kliknij nazwę subskrypcji albo wyjścia AoIP, aby zobaczyć jego SDP albo je usunąć.</p>
           <div class="matrix-wrap" id="matrix-wrap">
             <table class="matrix" id="matrix"></table>
           </div>
@@ -131,12 +132,16 @@
         <div class="card">
           <div class="card-head">
             <h2>Wyjścia AoIP</h2>
-            <label class="toggle"><input type="checkbox" id="only-active"> tylko aktywne</label>
+            <div class="head-tools">
+              <label class="toggle"><input type="checkbox" id="only-active"> tylko aktywne</label>
+              <button type="button" class="ghost" id="add-output">Nadawaj do urządzenia…</button>
+            </div>
           </div>
           <div class="table-wrap">
             <table class="devices">
               <thead>
                 <tr>
+                  <th class="c-del"><span class="sr-only">Usuń</span></th>
                   <th class="c-num">#</th>
                   <th>Aktywne</th>
                   <th>Nazwa</th>
@@ -161,13 +166,13 @@
             <table class="devices">
               <thead>
                 <tr>
+                  <th class="c-del"><span class="sr-only">Usuń</span></th>
                   <th class="c-num">#</th>
                   <th>Aktywna</th>
                   <th>Nazwa</th>
                   <th>Źródło</th>
                   <th title="Opóźnienie odbioru">Opóźn. ms</th>
                   <th>Poziom</th>
-                  <th></th>
                 </tr>
               </thead>
               <tbody id="subscription-rows"></tbody>
@@ -289,13 +294,47 @@
 
   <dialog id="dlg-sdp">
     <form method="dialog">
-      <h3>SDP wyjścia <small id="sdp-target"></small></h3>
-      <p class="hint">Skopiuj do odbiornika AES67 (np. Orban), jeśli nie korzysta z SAP.</p>
+      <h3><span id="sdp-kind">SDP wyjścia</span> <small id="sdp-target"></small></h3>
+      <p class="hint" id="sdp-hint">Wczytaj plik w odbiorniku AES67 (np. Orban, Omnia), jeśli nie korzysta z SAP.</p>
       <textarea id="sdp-text" rows="16" readonly spellcheck="false"></textarea>
       <menu>
         <button type="button" class="ghost" id="sdp-copy">Kopiuj</button>
+        <button type="button" class="ghost" id="sdp-download">Pobierz plik .sdp</button>
         <button value="cancel" class="primary">Zamknij</button>
       </menu>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-send">
+    <form method="dialog" id="send-form">
+      <h3>Nadawaj do urządzenia <small>nowe wyjście AES67, np. do Orbana lub Omnii</small></h3>
+      <div id="send-step1" class="send-grid">
+        <label class="wide">Nazwa <input type="text" id="send-name" maxlength="40" placeholder="np. Orban Warszawa" autocomplete="off"></label>
+        <label class="wide">Co nadawać <select id="send-source"></select></label>
+        <label>Pakiet (ptime) <select id="send-ptime"></select></label>
+        <label>Adres multicast <input type="text" id="send-address" placeholder="automatycznie" autocomplete="off"></label>
+        <p class="hint wide">1 ms to standard AES67, który przyjmują Orban i Omnia. Adres zostaw pusty, a panel wybierze wolny.</p>
+        <p class="form-error wide" id="send-error"></p>
+      </div>
+      <div id="send-step2" class="send-done" hidden>
+        <p class="hint">Wyjście <b id="send-made"></b> nadaje. Wczytaj ten plik SDP w odbiorniku (Orban, Omnia: wejście AES67 → SDP). Urządzenia obsługujące SAP zobaczą strumień same.</p>
+        <textarea id="send-sdp" rows="13" readonly spellcheck="false"></textarea>
+      </div>
+      <menu>
+        <button value="cancel" class="ghost" id="send-cancel">Anuluj</button>
+        <button type="button" class="primary" id="send-create">Utwórz</button>
+        <button type="button" class="ghost" id="send-copy" hidden>Kopiuj</button>
+        <button type="button" class="primary" id="send-download" hidden>Pobierz plik .sdp</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-stream">
+    <form method="dialog">
+      <h3 id="stream-title"></h3>
+      <dl class="facts" id="stream-facts"></dl>
+      <p class="confirm" id="stream-confirm" hidden></p>
+      <menu id="stream-actions"></menu>
     </form>
   </dialog>
 
