@@ -2,6 +2,7 @@
 #include <doctest/doctest.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <fstream>
 #include <map>
@@ -64,6 +65,11 @@ struct TestEngine {
     cfg.outputs[n - 1].address = address;
     REQUIRE(engine->apply_config(cfg).ok);
   }
+  int subscribe_to_output_of(const bam::Engine& sender, int n) {
+    auto r = engine->add_subscription(sender.output_sdp(n));
+    REQUIRE(r.ok);
+    return r.created;
+  }
   int subscribe_to_output(int n) {
     auto r = engine->add_subscription(engine->output_sdp(n));
     REQUIRE(r.ok);
@@ -80,6 +86,7 @@ struct FakeAsioHost {
   uint64_t last_start = 0;
   int periods = 0;
   int skipped = 0;
+  std::vector<std::pair<uint64_t, uint64_t>> late;  // output sample ranges written after their period
 
   explicit FakeAsioHost(const TestEngine& t) {
     std::string err;
@@ -121,7 +128,10 @@ struct FakeAsioHost {
       uint64_t first = s;
       if (last_start) {
         CHECK((s - last_start) % 128 == 0);
-        if (s - last_start > 128) ++skipped;
+        if (s - last_start > 128) {
+          ++skipped;
+          late.emplace_back(bam::AsioBridge::output_start(last_start + 128, 128), bam::AsioBridge::output_start(s, 128) + 128);
+        }
         first = last_start + 128;
       }
       for (uint64_t p = first; p <= s; p += 128) {
@@ -433,6 +443,96 @@ TEST_CASE("engine adds an output for a receiver (Orban, Omnia) and removes it") 
   CHECK(cfg.outputs[1].address == "239.69.100.2");
   CHECK(cfg.routes.count("net-out:2") == 0);
   CHECK_FALSE(t.engine->remove_output(40).ok);
+}
+
+// Two BounceAES computers (here: two engines on loopback): A is the PTP master and sends ASIO
+// pair 1, B follows A's clock and receives the stream. B's receive ring must carry A's samples at
+// their own timeline positions, without gaps, for the whole run. BAM_TWO_ENGINES_SECONDS
+// lengthens the run for investigations.
+TEST_CASE("two engines: A is the PTP master and sends, B follows and receives without gaps") {
+  const char* env = std::getenv("BAM_TWO_ENGINES_SECONDS");
+  const int seconds = env ? std::atoi(env) : 8;
+  auto make = [](const char* station, const char* role, bool output) {
+    auto cfg = bam::default_config();
+    cfg.interface_ip = "127.0.0.1";  // tests never send multicast onto a real network
+    cfg.station_name = station;
+    cfg.ptp_role = role == std::string("preferred") ? bam::PtpRole::Preferred : bam::PtpRole::Slave;
+    cfg.outputs[0].enabled = output;
+    cfg.outputs[0].address = "239.69.77.1";
+    return bam::config_to_json(cfg);
+  };
+  TestEngine a(make("A", "preferred", true));
+  TestEngine b(make("B", "slave", false));
+  a.opts.enable_ptp = true;
+  b.opts.enable_ptp = true;
+  a.engine = std::make_unique<bam::Engine>(a.opts);
+  b.engine = std::make_unique<bam::Engine>(b.opts);
+  a.start();
+  b.start();
+  REQUIRE(b.subscribe_to_output_of(*a.engine, 1) == 1);
+
+  std::string err;
+  auto b_shm = bp::SharedMemory::open(b.opts.shm_name, bam::ShmLayout::total_bytes(), &err);
+  REQUIRE_MESSAGE(b_shm, err);
+  bam::ShmView bview(b_shm->data());
+
+  // B steps its clock while it locks to A; checks start once it follows A
+  const int64_t lock_deadline = bp::monotonic_ns() + 20'000'000'000;
+  while (b.engine->status().ptp.state != bam::PtpState::Locked && bp::monotonic_ns() < lock_deadline) bp::sleep_ns(100'000'000);
+  REQUIRE(b.engine->status().ptp.state == bam::PtpState::Locked);
+  const uint64_t steps_at_lock = b.engine->status().ptp.steps;
+
+  FakeAsioHost host(a);  // mAirList on A plays the ramp on pair 1
+  constexpr uint32_t kWindow = 4800;
+  std::vector<int32_t> l(kWindow), r(kWindow);
+  uint64_t checked = 0, bad = 0, bad_windows = 0, windows = 0;
+  uint64_t first_bad_at = 0, bad_outside_late = 0;
+  auto written_late = [&](uint64_t x) {
+    for (const auto& [lo, hi] : host.late)
+      if (x >= lo && x < hi) return true;
+    return false;
+  };
+  int64_t next_check = bp::monotonic_ns() + 1'000'000'000;  // stream start
+  const int64_t start = bp::monotonic_ns();
+  host.run(int64_t(seconds + 1) * 1'000'000'000, [&](uint64_t) {
+    const int64_t now = bp::monotonic_ns();
+    if (now < next_check) return;
+    next_check = now + 250'000'000;
+    uint64_t gen = 0;
+    const bam::MediaClock clk = bview.read_clock(&gen);
+    const uint64_t b_now = clk.sample_at(now);
+    const uint64_t from = b_now - kRxDelay - 96 - kWindow;  // fully played-out region on B
+    bview.net_in(0).read(from, l.data(), kWindow);
+    bview.net_in(1).read(from, r.data(), kWindow);
+    uint64_t w = 0;
+    for (uint32_t i = 0; i < kWindow; ++i) {
+      const int e = (l[i] != ramp_value(from + i, 0)) + (r[i] != ramp_value(from + i, 1));
+      w += e;
+      if (e && !written_late(from + i)) bad_outside_late += e;
+    }
+    checked += kWindow;
+    ++windows;
+    if (w) {
+      ++bad_windows;
+      bad += w;
+      if (!first_bad_at) first_bad_at = static_cast<uint64_t>((now - start) / 1'000'000);
+    }
+  });
+  const auto st = b.engine->status();
+  const auto& rx = st.subscriptions[0].rx;
+  MESSAGE("windows " << windows << ", bad windows " << bad_windows << ", bad samples " << bad << " (outside client-late ranges: "
+          << bad_outside_late << "), first bad at "
+          << first_bad_at << " ms; B ptp offset " << st.ptp.offset_ns << " ns, steps " << st.ptp.steps << ", sync lost "
+          << st.ptp.sync_lost << ", rate " << st.ptp.rate_ppm << " ppm; rx underruns " << rx.underruns << ", overruns "
+          << rx.overruns << ", seq " << rx.seq_errors << ", jitter " << rx.jitter_ms << " ms; A client skipped " << host.skipped);
+  CHECK(windows > 0);
+  CHECK(st.ptp.has_master);
+  // Samples this non-realtime test client wrote after their period may be missing on the
+  // network, as with any late ASIO host; everything else must arrive bit for bit.
+  CHECK(bad_outside_late == 0);
+  CHECK(rx.underruns == 0);
+  CHECK(rx.overruns == 0);
+  CHECK(st.ptp.steps == steps_at_lock);  // no clock step while streaming
 }
 
 TEST_CASE("engine receives more subscriptions on one port than a socket may join") {
