@@ -481,6 +481,8 @@ TEST_CASE("two engines: A is the PTP master and sends, B follows and receives wi
   while (b.engine->status().ptp.state != bam::PtpState::Locked && bp::monotonic_ns() < lock_deadline) bp::sleep_ns(100'000'000);
   REQUIRE(b.engine->status().ptp.state == bam::PtpState::Locked);
   const uint64_t steps_at_lock = b.engine->status().ptp.steps;
+  // packets received before B followed A's clock are rejected by design; count from the lock on
+  const bam::RxStats rx_at_lock = b.engine->status().subscriptions[0].rx;
 
   FakeAsioHost host(a);  // mAirList on A plays the ramp on pair 1
   constexpr uint32_t kWindow = 4800;
@@ -524,14 +526,14 @@ TEST_CASE("two engines: A is the PTP master and sends, B follows and receives wi
           << bad_outside_late << "), first bad at "
           << first_bad_at << " ms; B ptp offset " << st.ptp.offset_ns << " ns, steps " << st.ptp.steps << ", sync lost "
           << st.ptp.sync_lost << ", rate " << st.ptp.rate_ppm << " ppm; rx underruns " << rx.underruns << ", overruns "
-          << rx.overruns << ", seq " << rx.seq_errors << ", jitter " << rx.jitter_ms << " ms; A client skipped " << host.skipped);
+          << rx.overruns << " (" << rx_at_lock.overruns << " before lock), seq " << rx.seq_errors << ", jitter " << rx.jitter_ms << " ms; A client skipped " << host.skipped);
   CHECK(windows > 0);
   CHECK(st.ptp.has_master);
   // Samples this non-realtime test client wrote after their period may be missing on the
   // network, as with any late ASIO host; everything else must arrive bit for bit.
   CHECK(bad_outside_late == 0);
-  CHECK(rx.underruns == 0);
-  CHECK(rx.overruns == 0);
+  CHECK(rx.underruns == rx_at_lock.underruns);
+  CHECK(rx.overruns == rx_at_lock.overruns);
   CHECK(st.ptp.steps == steps_at_lock);  // no clock step while streaming
 }
 
