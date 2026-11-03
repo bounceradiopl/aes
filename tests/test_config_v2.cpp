@@ -135,11 +135,16 @@ TEST_CASE("config: mixes round trip and validation") {
   CHECK(old->mixes.empty());
 }
 
-TEST_CASE("config: a mix with one unmuted 0 dB source is direct") {
+TEST_CASE("config: only a single-member, unmuted 0 dB mix is direct") {
   bam::MixConfig m;
-  m.sources = {{"asio-out:1", 0, false}, {"asio-out:2", -3, true}};
+  m.sources = {{"asio-out:1", 0, false}};
   CHECK(bam::direct_source(m) == std::optional<std::string>("asio-out:1"));
-  m.sources[0].gain_db = -0.5;
+  m.sources[0].mute = true;
+  CHECK_FALSE(bam::direct_source(m));
+  m.sources = {{"asio-out:1", -0.5, false}};
+  CHECK_FALSE(bam::direct_source(m));
+  // two members stay on the bus even when only one is audible at 0 dB: muting must not reroute
+  m.sources = {{"asio-out:1", 0, false}, {"asio-out:2", -3, true}};
   CHECK_FALSE(bam::direct_source(m));
   m.sources = {{"asio-out:1", 0, false}, {"asio-out:2", 0, false}};
   CHECK_FALSE(bam::direct_source(m));

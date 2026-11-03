@@ -360,14 +360,9 @@ double gain_to_network(const Config& c) {
 }
 
 std::optional<std::string> direct_source(const MixConfig& m) {
-  const MixSource* only = nullptr;
-  for (const auto& s : m.sources) {
-    if (s.mute) continue;
-    if (only) return std::nullopt;
-    only = &s;
-  }
-  if (!only || only->gain_db != 0.0) return std::nullopt;
-  return only->source;
+  // Muting or levelling one member of a larger mix must not move the destination off its bus.
+  if (m.sources.size() != 1 || m.sources[0].mute || m.sources[0].gain_db != 0.0) return std::nullopt;
+  return m.sources[0].source;
 }
 
 }  // namespace bam

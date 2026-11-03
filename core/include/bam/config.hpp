@@ -80,7 +80,9 @@ std::optional<Config> config_from_json(std::string_view text, std::string* error
 std::vector<ConfigIssue> validate_config(const Config& c);
 // Raises subscription latencies below "source ptime + 1 ms". Returns Polish notices describing each change.
 std::vector<std::string> normalize_config(Config& c);
-// The single unmuted source at 0 dB of a mix that therefore needs no mixing, else nullopt.
+// The source of a mix with exactly one member, unmuted at 0 dB, which therefore plays as a direct
+// route without a bus; else nullopt. A mix of two or more members always uses its bus, so muting a
+// member never reroutes the destination.
 std::optional<std::string> direct_source(const MixConfig& m);
 
 const char* ptp_role_name(PtpRole r);

@@ -612,6 +612,14 @@ TEST_CASE("engine sends a mix to a Windows device as a mix bus") {
   CHECK(req->dests[0].kind == bam::ShmSource::Mix);
   CHECK(req->dests[0].delay_frames == 96);
   const int bus = req->dests[0].pair;
+  // muting a member keeps the destination on its bus at the same D_mix (no reroute, no gap)
+  REQUIRE(t.engine->set_mix(dst, true, bam::MixConfig{{{"asio-out:1", 0, false}, {"asio-out:2", -6, true}}}, std::nullopt).ok);
+  req = bam::request_from_json(host.view->read_request(nullptr));
+  REQUIRE(req);
+  REQUIRE(req->dests.size() == 1);
+  CHECK(req->dests[0].kind == bam::ShmSource::Mix);
+  CHECK(req->dests[0].pair == bus);
+  CHECK(req->dests[0].delay_frames == 96);
   // another mix and a gain change elsewhere keep this destination on its bus (no interruption)
   REQUIRE(t.engine->set_mix("asio-in:2", true, bam::MixConfig{{{"asio-out:3", 0, false}, {"asio-out:4", 0, false}}}, std::nullopt).ok);
   REQUIRE(t.engine->set_mix(dst, true, bam::MixConfig{{{"asio-out:1", -3, false}, {"asio-out:2", -6, false}}}, std::nullopt).ok);
