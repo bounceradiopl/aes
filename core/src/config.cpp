@@ -123,6 +123,13 @@ std::string config_to_json(const Config& c) {
   json routes = json::object();
   for (const auto& [dst, src] : c.routes) routes[dst] = src;
   j["routes"] = routes;
+  json mixes = json::object();
+  for (const auto& [dst, m] : c.mixes) {
+    json list = json::array();
+    for (const auto& s : m.sources) list.push_back({{"source", s.source}, {"gain_db", s.gain_db}, {"mute", s.mute}});
+    mixes[dst] = {{"sources", list}};
+  }
+  j["mixes"] = mixes;
   return j.dump(2);
 }
 
@@ -183,6 +190,23 @@ std::optional<Config> config_from_json(std::string_view text, std::string* error
       for (auto it = r.begin(); it != r.end(); ++it) {
         if (it.value().is_null()) continue;
         c.routes[it.key()] = it.value().get<std::string>();
+      }
+    }
+    if (j.contains("mixes")) {
+      const auto& mj = j.at("mixes");
+      if (!mj.is_object()) throw std::runtime_error("\"mixes\" musi być obiektem");
+      c.mixes.clear();
+      for (auto it = mj.begin(); it != mj.end(); ++it) {
+        MixConfig m;
+        if (it.value().contains("sources"))
+          for (const auto& sj : it.value().at("sources")) {
+            MixSource s;
+            read_field(sj, "source", s.source);
+            read_field(sj, "gain_db", s.gain_db);
+            read_field(sj, "mute", s.mute);
+            m.sources.push_back(std::move(s));
+          }
+        c.mixes[it.key()] = std::move(m);
       }
     }
     return c;
@@ -253,6 +277,29 @@ std::vector<ConfigIssue> validate_config(const Config& c) {
     if (is_windows(*s)) win_sources.insert(to_id(*s));
     if (is_windows(*d)) win_dests.insert(dst);
   }
+  if (c.mixes.size() > static_cast<size_t>(kMaxMixes)) add(0, "mixes", "najwyżej 32 miksy jednocześnie");
+  for (const auto& [dst, m] : c.mixes) {
+    const std::string f = "mixes." + dst;
+    auto d = parse_dest(dst);
+    if (!d) {
+      add(0, f, "nieprawidłowy cel miksu: " + dst);
+      continue;
+    }
+    if (c.routes.count(dst)) add(0, f, "cel " + dst + " jest jednocześnie połączony i miksowany");
+    if (is_windows(*d)) win_dests.insert(dst);
+    if (m.sources.size() > static_cast<size_t>(kMaxMixSources)) add(0, f, "miks może mieć najwyżej 16 źródeł");
+    std::set<std::string> seen;
+    for (const auto& s : m.sources) {
+      auto ps = parse_source(s.source);
+      if (!ps) {
+        add(0, f, "nieprawidłowe źródło miksu: " + s.source);
+        continue;
+      }
+      if (!seen.insert(to_id(*ps)).second) add(0, f, "źródło " + s.source + " występuje w miksie dwa razy");
+      if (s.gain_db < kMixGainMinDb || s.gain_db > kMixGainMaxDb) add(0, f, "głośność w miksie musi być w zakresie −60…+12 dB");
+      if (is_windows(*ps)) win_sources.insert(to_id(*ps));
+    }
+  }
   if (win_sources.size() > static_cast<size_t>(kMaxWindowsRoutes))
     add(0, "routes", "najwyżej 16 źródeł Windows jednocześnie");
   if (win_dests.size() > static_cast<size_t>(kMaxWindowsRoutes))
@@ -285,6 +332,18 @@ std::vector<std::string> normalize_config(Config& c) {
     canonical[d ? to_id(*d) : dst] = s ? to_id(*s) : src;
   }
   c.routes = std::move(canonical);
+  std::map<std::string, MixConfig> mixes;
+  for (auto& [dst, m] : c.mixes) {
+    auto d = parse_dest(dst);
+    MixConfig out;
+    for (auto s : m.sources) {
+      if (auto ps = parse_source(s.source)) s.source = to_id(*ps);
+      s.gain_db = std::round(s.gain_db * 2.0) / 2.0;  // 0.5 dB steps
+      out.sources.push_back(std::move(s));
+    }
+    mixes[d ? to_id(*d) : dst] = std::move(out);
+  }
+  c.mixes = std::move(mixes);
   return notices;
 }
 
@@ -298,6 +357,17 @@ double gain_to_app(const Config& c) {
 double gain_to_network(const Config& c) {
   const int db = c.pc_nominal_level_dbfs + 20;
   return db == 0 ? 1.0 : db_to_gain(-db);
+}
+
+std::optional<std::string> direct_source(const MixConfig& m) {
+  const MixSource* only = nullptr;
+  for (const auto& s : m.sources) {
+    if (s.mute) continue;
+    if (only) return std::nullopt;
+    only = &s;
+  }
+  if (!only || only->gain_db != 0.0) return std::nullopt;
+  return only->source;
 }
 
 }  // namespace bam

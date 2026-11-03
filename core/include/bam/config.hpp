@@ -14,6 +14,21 @@ namespace bam {
 
 inline constexpr int kConfigVersion = 2;
 inline constexpr int kMaxWindowsRoutes = 16;  // Windows sources and Windows destinations, each
+inline constexpr int kMaxMixes = 32;
+inline constexpr int kMaxMixSources = 16;
+inline constexpr double kMixGainMinDb = -60.0;
+inline constexpr double kMixGainMaxDb = 12.0;
+
+// One member of a mix (a destination fed by several sources).
+struct MixSource {
+  std::string source;  // route source id
+  double gain_db = 0;
+  bool mute = false;
+};
+
+struct MixConfig {
+  std::vector<MixSource> sources;
+};
 
 // A stereo AoIP stream this computer transmits.
 struct OutputConfig {
@@ -49,6 +64,7 @@ struct Config {
   std::array<SubscriptionConfig, kDeviceCount> subscriptions;
   std::array<std::string, kDeviceCount> asio_names;  // pair names shown to ASIO hosts
   std::map<std::string, std::string> routes;         // destination id -> source id (see routing.hpp)
+  std::map<std::string, MixConfig> mixes;            // destination id -> mix; such a destination is not in routes
 };
 
 struct ConfigIssue {
@@ -64,6 +80,8 @@ std::optional<Config> config_from_json(std::string_view text, std::string* error
 std::vector<ConfigIssue> validate_config(const Config& c);
 // Raises subscription latencies below "source ptime + 1 ms". Returns Polish notices describing each change.
 std::vector<std::string> normalize_config(Config& c);
+// The single unmuted source at 0 dB of a mix that therefore needs no mixing, else nullopt.
+std::optional<std::string> direct_source(const MixConfig& m);
 
 const char* ptp_role_name(PtpRole r);
 std::optional<PtpRole> parse_ptp_role(std::string_view s);

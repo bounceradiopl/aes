@@ -100,3 +100,48 @@ TEST_CASE("ptp role names") {
   CHECK(bam::parse_ptp_role("slave") == bam::PtpRole::Slave);
   CHECK_FALSE(bam::parse_ptp_role("boss"));
 }
+
+TEST_CASE("config: mixes round trip and validation") {
+  auto c = bam::default_config();
+  c.mixes["asio-in:3"].sources = {{"asio-out:1", 0, false}, {"net-in:2", -6.5, true}};
+  auto back = bam::config_from_json(bam::config_to_json(c), nullptr);
+  REQUIRE(back);
+  REQUIRE(back->mixes.count("asio-in:3"));
+  const auto& m = back->mixes.at("asio-in:3");
+  REQUIRE(m.sources.size() == 2);
+  CHECK(m.sources[1].source == "net-in:2");
+  CHECK(m.sources[1].gain_db == doctest::Approx(-6.5));
+  CHECK(m.sources[1].mute);
+  CHECK(bam::validate_config(c).empty());
+
+  auto bad = c;
+  bad.routes["asio-in:3"] = "asio-out:4";  // a destination is either routed or mixed
+  CHECK_FALSE(bam::validate_config(bad).empty());
+  bad = c;
+  bad.mixes["asio-in:3"].sources[0].gain_db = 13;
+  CHECK_FALSE(bam::validate_config(bad).empty());
+  bad = c;
+  bad.mixes["asio-in:3"].sources.push_back({"asio-out:1", 0, false});  // duplicate
+  CHECK_FALSE(bam::validate_config(bad).empty());
+  bad = c;
+  for (int i = 1; i <= 17; ++i) bad.mixes["asio-in:4"].sources.push_back({"asio-out:" + std::to_string(i), 0, false});
+  CHECK_FALSE(bam::validate_config(bad).empty());
+  bad = c;
+  bad.mixes["nie:cel"].sources = {};
+  CHECK_FALSE(bam::validate_config(bad).empty());
+
+  auto old = bam::config_from_json(R"({"version":2})", nullptr);  // 1.1 file: no mixes
+  REQUIRE(old);
+  CHECK(old->mixes.empty());
+}
+
+TEST_CASE("config: a mix with one unmuted 0 dB source is direct") {
+  bam::MixConfig m;
+  m.sources = {{"asio-out:1", 0, false}, {"asio-out:2", -3, true}};
+  CHECK(bam::direct_source(m) == std::optional<std::string>("asio-out:1"));
+  m.sources[0].gain_db = -0.5;
+  CHECK_FALSE(bam::direct_source(m));
+  m.sources = {{"asio-out:1", 0, false}, {"asio-out:2", 0, false}};
+  CHECK_FALSE(bam::direct_source(m));
+  CHECK_FALSE(bam::direct_source(bam::MixConfig{}));
+}
