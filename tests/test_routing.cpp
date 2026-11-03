@@ -36,3 +36,19 @@ TEST_CASE("application keys are case-insensitive") {
   CHECK(s->key == "chrome.exe");
   CHECK(bam::to_id(*s) == "win-app:chrome.exe");
 }
+
+TEST_CASE("win-out channel pairs") {
+  auto d = bam::parse_dest("win-out:{0.0.0.00000000}.{abc}#3");
+  REQUIRE(d);
+  CHECK(d->key == "{0.0.0.00000000}.{abc}");
+  CHECK(d->pair == 3);
+  CHECK(bam::to_id(*d) == "win-out:{0.0.0.00000000}.{abc}#3");
+  auto first = bam::parse_dest("win-out:{0.0.0.00000000}.{abc}");
+  REQUIRE(first);
+  CHECK(first->pair == 1);
+  CHECK(bam::to_id(*first) == "win-out:{0.0.0.00000000}.{abc}");
+  CHECK_FALSE(bam::parse_dest("win-out:{x}#1"));   // pair 1 has no suffix
+  CHECK_FALSE(bam::parse_dest("win-out:{x}#0"));
+  CHECK_FALSE(bam::parse_dest("win-out:{x}#99"));
+  CHECK_FALSE(bam::parse_dest("win-out:#2"));
+}

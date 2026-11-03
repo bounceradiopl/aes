@@ -68,6 +68,15 @@ std::optional<RouteDest> parse_dest(std::string_view id) {
   }
   if (prefix == "win-out" && !rest.empty()) {
     d.kind = DestKind::WinOut;
+    const auto hash = rest.rfind('#');
+    if (hash != std::string_view::npos) {
+      int pair = 0;
+      const auto tail = rest.substr(hash + 1);
+      auto r = std::from_chars(tail.data(), tail.data() + tail.size(), pair);
+      if (r.ec != std::errc() || r.ptr != tail.data() + tail.size() || pair < 2 || pair > kDeviceCount || hash == 0) return std::nullopt;
+      d.pair = pair;
+      rest = rest.substr(0, hash);
+    }
     d.key = std::string(rest);
     return d;
   }
@@ -99,7 +108,7 @@ std::string to_id(const RouteDest& d) {
     case DestKind::AsioIn:
       return "asio-in:" + std::to_string(d.index);
     case DestKind::WinOut:
-      return "win-out:" + d.key;
+      return "win-out:" + d.key + (d.pair > 1 ? "#" + std::to_string(d.pair) : std::string());
   }
   return {};
 }

@@ -20,6 +20,7 @@ struct RouteDest {
   DestKind kind = DestKind::NetOut;
   int index = 0;    // 1..32 for net-out / asio-in
   std::string key;  // Windows endpoint id
+  int pair = 1;     // Windows device channel pair: 1 = channels 1-2
 };
 
 std::optional<RouteSource> parse_source(std::string_view id);
