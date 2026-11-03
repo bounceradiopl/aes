@@ -21,6 +21,9 @@ const state = {
   pasteTarget: null,  // null = add a new subscription, number = edit that subscription (0-based)
   collapsed: new Set(),  // "src:net", "dst:asio", ...
   routingTimer: null,
+  statsTimer: null,
+  destOpen: null,       // id of the dest dialog's destination while open, else null
+  destDisabling: null,  // id of a dest whose mix checkbox was just unchecked, pending the "keep" choice
 };
 
 // ---------------------------------------------------------------- helpers
@@ -165,23 +168,26 @@ function showTab() {
   for (const s of $$(".tab")) s.classList.toggle("hidden", s.id !== `tab-${valid}`);
   if (valid === "logs") loadLogs();
   if (valid === "routing") startRoutingPoll(); else stopRoutingPoll();
-  if (valid === "stats") renderStats();
+  if (valid === "stats") startStatsPoll(); else stopStatsPoll();
 }
 window.addEventListener("hashchange", showTab);
 
 // ---------------------------------------------------------------- routing
+function routingSnapshot(v) {
+  return JSON.stringify({ s: v.sources.map((n) => [n.id, n.name, n.available, n.note, n.virtual]),
+    d: v.dests.map((n) => [n.id, n.name, n.available, n.note, n.virtual, n.mix]), r: v.routes, m: v.mixes });
+}
+
 async function loadRouting() {
   try {
     const r = await api("/api/routing");
     if (!r.ok) return;
-    const before = state.routing ? JSON.stringify({ s: state.routing.sources.map((n) => [n.id, n.name, n.available, n.note, n.virtual]),
-      d: state.routing.dests.map((n) => [n.id, n.name, n.available, n.note, n.virtual]), r: state.routing.routes }) : "";
+    const before = state.routing ? routingSnapshot(state.routing) : "";
     state.routing = r.data;
-    const after = JSON.stringify({ s: r.data.sources.map((n) => [n.id, n.name, n.available, n.note, n.virtual]),
-      d: r.data.dests.map((n) => [n.id, n.name, n.available, n.note, n.virtual]), r: r.data.routes });
-    if (before !== after) {
+    if (before !== routingSnapshot(r.data)) {
       renderMatrix();
       if ($("#dlg-virtual").open) renderVirtual();
+      if (state.destOpen) renderDest(state.destOpen);
     } else applyRoutingMeters();
   } catch { /* shown by the auth screen */ }
 }
@@ -246,11 +252,10 @@ function renderMatrix() {
       continue;
     }
     const n = c.node;
-    const dstTitle = `${n.name}\n${n.id}${virtualText(n)}${n.note ? "\n" + n.note : ""}`;
-    head2.append(el("th", { class: "dst" + (c.first ? " first" : "") + (n.available ? "" : " unavailable"), title: n.group === "net" ? `${dstTitle}\nKliknij: SDP, usuń` : dstTitle },
-      n.group === "net"
-        ? el("button", { type: "button", class: "dst-btn", "aria-label": `Wyjście ${n.name}: szczegóły`, onclick: () => openStream(n.id) }, el("span", {}, n.name))
-        : el("span", {}, n.name)));
+    const dstTitle = `${n.name}\n${n.id}${virtualText(n)}${n.note ? "\n" + n.note : ""}${n.mix ? "\ntryb miksu" : ""}`;
+    head2.append(el("th", { class: "dst" + (c.first ? " first" : "") + (n.available ? "" : " unavailable") + (n.mix ? " mix" : ""), title: `${dstTitle}\nKliknij: szczegóły` },
+      el("button", { type: "button", class: "dst-btn", "aria-label": `${n.name}: szczegóły`, onclick: () => openDest(n.id) },
+        el("span", {}, (n.mix ? "Σ " : "") + n.name))));
   }
 
   const body = [];
@@ -271,7 +276,7 @@ function renderMatrix() {
             n.virtual ? el("i", { class: "vtag" }, "wirt.") : null, meter(`r-${n.id}`)));
         for (const c of columns) {
           if (c.placeholder) { row.append(el("td", { class: "cell placeholder first" })); continue; }
-          const on = v.routes[c.node.id] === n.id;
+          const on = c.node.mix ? (v.mixes[c.node.id] || []).some((s) => s.source === n.id) : v.routes[c.node.id] === n.id;
           const label = `${n.name} → ${c.node.name}`;
           row.append(el("td", { class: "cell" + (c.first ? " first" : "") },
             el("button", {
@@ -296,7 +301,7 @@ function applyRoutingMeters() {
   const v = state.routing;
   if (!v) return;
   const peaks = new Map(v.sources.map((n) => [n.id, n.db]));
-  for (const span of $$("#matrix [data-meter]")) {
+  for (const span of $$("#matrix [data-meter], #dlg-dest [data-meter]")) {
     const key = span.dataset.meter;
     const side = Number(key.slice(-1));
     const id = key.slice(2, -2);
@@ -488,6 +493,7 @@ function renderOutputs() {
     const ptime = el("select", { onchange: (e) => set("ptime_us", Number(e.target.value)) },
       ...PTIMES.map(([v, t]) => el("option", { value: v, selected: o.ptime_us === v }, t)));
     const src = state.draft.routes[`net-out:${n}`];
+    const mixMembers = state.routing?.mixes?.[`net-out:${n}`];
     const row = el("tr", { class: o.enabled ? "" : "off" },
       el("td", { class: "c-del" }, state.config.outputs[i].enabled ? deleteButton(`net-out:${n}`, `Usuń wyjście ${pad2(n)}`) : null),
       el("td", { class: "c-num" }, pad2(n)),
@@ -499,7 +505,9 @@ function renderOutputs() {
         el("button", { type: "button", class: "mini", title: "SDP wyjścia: pokaż, kopiuj, pobierz plik", onclick: () => openSdp(n) }, "SDP"))),
       el("td", {}, ptime),
       el("td", {}, el("input", { type: "checkbox", checked: o.keep_active, "aria-label": `Utrzymuj wyjście ${pad2(n)}`, onchange: (e) => set("keep_active", e.target.checked) })),
-      el("td", {}, el("a", { class: "route-link" + (src ? "" : " none"), href: "#routing", title: src || "" }, src ? sourceName(src) : "brak")),
+      el("td", {}, mixMembers
+        ? el("span", {}, `miks (${mixMembers.length} ${plural(mixMembers.length, "źródło", "źródła", "źródeł")})`)
+        : el("a", { class: "route-link" + (src ? "" : " none"), href: "#routing", title: src || "" }, src ? sourceName(src) : "brak")),
       el("td", {}, meter(`out-${n}`)));
     tbody.append(row);
     issueRow(tbody, row, `outputs[${n}].`, 9);
@@ -834,6 +842,173 @@ async function removeStream(info) {
   toast(`Usunięto ${info.kind === "net-in" ? "źródło" : "wyjście"} „${info.name}”`);
 }
 
+// ---------------------------------------------------------------- destination dialog, mix mode
+function groupLabel(group) { return (GROUPS.find(([g]) => g === group) || [group, group])[1]; }
+
+// facts shown above the "Miks" toggle: AoIP outputs reuse streamInfo (address, packet, current
+// source — dropped once mixing, since the rows below cover it); other destinations just say what they are.
+function destFacts(n) {
+  if (n.group === "net") {
+    const info = streamInfo(n.id);
+    return n.mix ? info.facts.filter(([k]) => k !== "Nadaje") : info.facts;
+  }
+  const types = { asio: "Wejście ASIO (czyta aplikacja ASIO)", win: "Odtwarzanie Windows" };
+  return [["Typ", types[n.group] || n.group]];
+}
+
+// Matches core's direct_source(): a mix with exactly one unmuted member at 0 dB plays without a bus.
+function mixIsDirect(members) { return members.length === 1 && !members[0].mute && members[0].gain_db === 0; }
+
+function fmtDb(v) { return `${Number(v).toFixed(1).replace(".", ",")} dB`; }
+function fmtMs(ms) { return `${Number(ms).toLocaleString("pl-PL", { maximumFractionDigits: 1 })} ms`; }
+
+function openDest(id) {
+  state.destOpen = id;
+  state.destDisabling = null;
+  renderDest(id);
+  $("#dlg-dest").showModal();
+}
+
+function renderDest(id) {
+  const dlg = $("#dlg-dest");
+  const n = state.routing?.dests.find((d) => d.id === id);
+  if (!n) { if (dlg.open) dlg.close(); return; }
+  $("#dest-title").replaceChildren(`${groupLabel(n.group)} `, el("small", {}, n.name));
+  $("#dest-facts").replaceChildren(...destFacts(n).flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]));
+  const box = $("#dest-mix");
+  box.checked = n.mix && state.destDisabling !== id;
+  box.onchange = () => onMixToggle(id);
+  $("#dest-mix-body").hidden = !n.mix;
+  if (n.mix) { if (state.destDisabling === id) renderDisableChooser(id); else renderMixRows(id); }
+  if (n.group === "net") renderDestNetActions(id); else renderDestPlainActions();
+}
+
+$("#dlg-dest").addEventListener("close", () => { state.destOpen = null; state.destDisabling = null; });
+
+// AoIP outputs: same SDP / Usuń flow as the old per-output dialog (dlg-stream), embedded here.
+function renderDestNetActions(id) {
+  const info = streamInfo(id);
+  const dlg = $("#dlg-dest");
+  const showActions = () => {
+    $("#dest-confirm").hidden = true;
+    $("#dest-actions").replaceChildren(
+      el("button", { type: "button", class: "danger", onclick: showConfirm }, info.remove),
+      el("span", { class: "spacer" }),
+      el("button", { type: "button", class: "ghost", onclick: () => { dlg.close(); openSdp(info.n); } }, "SDP / plik .sdp…"),
+      el("button", { value: "cancel", class: "primary" }, "Zamknij"));
+  };
+  const showConfirm = () => {
+    $("#dest-confirm").textContent = `Usunąć wyjście „${info.name}”? Przestanie nadawać, a odbiorniki (np. Orban) stracą ten sygnał.`;
+    $("#dest-confirm").hidden = false;
+    $("#dest-actions").replaceChildren(
+      el("span", { class: "spacer" }),
+      el("button", { type: "button", class: "ghost", onclick: showActions }, "Anuluj"),
+      el("button", { type: "button", class: "danger solid", onclick: async () => { await removeStream(info); dlg.close(); } }, "Tak, usuń"));
+  };
+  showActions();
+}
+
+function renderDestPlainActions() {
+  $("#dest-confirm").hidden = true;
+  $("#dest-actions").replaceChildren(el("span", { class: "spacer" }), el("button", { value: "cancel", class: "primary" }, "Zamknij"));
+}
+
+function renderMixRows(id) {
+  const members = state.routing.mixes[id] || [];
+  const direct = mixIsDirect(members);
+  $("#dest-mix-delay").textContent =
+    `Opóźnienie miksu: ${direct ? "0 ms (połączenie bezpośrednie)" : fmtMs(state.routing.mix_delay_ms[id] || 0)}`;
+  const tbody = $("#dest-mix-rows");
+  if (!members.length) {
+    tbody.replaceChildren(el("tr", {}, el("td", { colSpan: 5, class: "hint" }, "Brak źródeł — kliknij kratkę w siatce, aby dodać.")));
+    return;
+  }
+  tbody.replaceChildren(...members.map((m, i) => {
+    const val = el("span", {}, fmtDb(m.gain_db));
+    const slider = el("input", { type: "range", min: -60, max: 12, step: 0.5, value: m.gain_db,
+      "aria-label": `Głośność: ${sourceLabel(m.source)}`,
+      oninput: (e) => { val.textContent = fmtDb(e.target.value); queueMixUpdate(id, i, { gain_db: Number(e.target.value) }); } });
+    const mute = el("button", { type: "button", class: "mini", "aria-pressed": String(m.mute), title: m.mute ? "Włącz z powrotem" : "Wycisz",
+      onclick: () => applyMixUpdate(id, i, { mute: !m.mute }) }, "Wycisz");
+    const remove = el("button", { type: "button", class: "mini", "aria-label": `Usuń ${sourceLabel(m.source)} z miksu`, onclick: () => removeMixMember(id, i) }, "×");
+    return el("tr", {},
+      el("td", {}, sourceLabel(m.source)),
+      el("td", {}, el("span", { class: "range-row" }, slider, val)),
+      el("td", {}, mute),
+      el("td", {}, meter(`r-${m.source}`)),
+      el("td", {}, remove));
+  }));
+  applyRoutingMeters();
+}
+
+// Turning the mix off with ≥ 2 members: ask which one stays as the single route, instead of
+// closing the body — the chooser replaces the rows while the mix (still active server-side) waits.
+function renderDisableChooser(id) {
+  const members = state.routing.mixes[id] || [];
+  $("#dest-mix-delay").textContent = "Wyłączanie miksu: wybierz źródło, które zostanie pojedynczym połączeniem.";
+  const sel = el("select", { "aria-label": "Źródło do zachowania" }, ...members.map((m) => el("option", { value: m.source }, sourceLabel(m.source))));
+  $("#dest-mix-rows").replaceChildren(el("tr", {}, el("td", { colSpan: 5 },
+    el("div", { class: "mix-off" }, sel,
+      el("button", { type: "button", class: "mini", onclick: () => { state.destDisabling = null; renderDest(id); } }, "Anuluj"),
+      el("button", { type: "button", class: "mini primary", onclick: () => finishDisableMix(id, sel.value) }, "Zostaw to źródło")))));
+}
+
+async function finishDisableMix(id, keep) {
+  state.destDisabling = null;
+  await setMix(id, false, undefined, keep);
+}
+
+function onMixToggle(id) {
+  if ($("#dest-mix").checked) { state.destDisabling = null; setMix(id, true); return; }
+  const members = state.routing.mixes[id] || [];
+  if (members.length >= 2) { state.destDisabling = id; renderDest(id); return; }
+  state.destDisabling = null;
+  setMix(id, false);
+}
+
+let mixDebounce = null;
+function queueMixUpdate(id, index, patch) {
+  const list = state.routing.mixes[id];
+  if (!list?.[index]) return;
+  Object.assign(list[index], patch);
+  clearTimeout(mixDebounce);
+  mixDebounce = setTimeout(() => sendMix(id), 150);
+}
+
+function applyMixUpdate(id, index, patch) {
+  const list = state.routing.mixes[id];
+  if (!list?.[index]) return;
+  Object.assign(list[index], patch);
+  clearTimeout(mixDebounce);
+  sendMix(id);
+}
+
+function removeMixMember(id, index) {
+  const list = state.routing.mixes[id] || [];
+  list.splice(index, 1);
+  clearTimeout(mixDebounce);
+  sendMix(id);
+}
+
+function sendMix(id) {
+  const list = state.routing.mixes[id] || [];
+  return setMix(id, true, list.map((m) => ({ source: m.source, gain_db: m.gain_db, mute: m.mute })));
+}
+
+async function setMix(dst, enabled, sources, keep) {
+  const body = { dst, enabled };
+  if (sources) body.sources = sources;
+  if (keep) body.keep = keep;
+  const r = await api("/api/mixes", { method: "PUT", body: JSON.stringify(body) });
+  if (!r.ok) { toast(issuesText(r, "Nie można zmienić miksu"), "err"); loadRouting(); return false; }
+  for (const x of r.data.notices || []) toast(x, "warn");
+  state.routing = r.data.routing;
+  syncRoutes(r.data.routing.routes);
+  renderMatrix();
+  if ($("#dlg-dest").open) renderDest(dst);
+  return true;
+}
+
 $("#change-password").addEventListener("click", () => {
   for (const id of ["#pw-current", "#pw-new", "#pw-new2"]) $(id).value = "";
   $("#pw-error").textContent = "";
@@ -899,6 +1074,24 @@ function applyLive() {
   renderStats();
 }
 
+// /api/status carries counters the SSE live feed does not (e.g. mixer_late); poll it only on the
+// Statystyki tab, since the rest of that tab already follows the live feed.
+async function loadStatus() {
+  const r = await api("/api/status");
+  if (r.ok) { state.status = r.data; renderStats(); }
+}
+
+function startStatsPoll() {
+  if (state.statsTimer) return;
+  loadStatus();
+  state.statsTimer = setInterval(loadStatus, 2000);
+}
+
+function stopStatsPoll() {
+  clearInterval(state.statsTimer);
+  state.statsTimer = null;
+}
+
 function renderStats() {
   const live = state.live;
   if (!live || $("#tab-stats").classList.contains("hidden")) return;
@@ -923,6 +1116,7 @@ function renderStats() {
     ["Bufor ASIO", live.asio.connected ? `${live.asio.buffer_frames} próbek (${(live.asio.buffer_frames / 48).toFixed(2).replace(".", ",")} ms)` : "—"],
     ["Audio Windows", live.bridge?.connected ? "aktywne" : "brak sesji użytkownika"],
     ["Karta sieciowa", state.status?.interface_ip || "—"],
+    ["Miks: spóźnienia", fmtNumber(state.status?.mixer_late || 0)],
     ["Wersja", state.status?.version || "—"],
   ]);
   const cell = (v, bad) => el("td", { class: bad ? "bad" : "" }, fmtNumber(v));

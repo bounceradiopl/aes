@@ -338,6 +338,22 @@
     </form>
   </dialog>
 
+  <dialog id="dlg-dest">
+    <form method="dialog">
+      <h3 id="dest-title"></h3>
+      <dl class="facts" id="dest-facts"></dl>
+      <label class="toggle"><input type="checkbox" id="dest-mix"> Miks (kilka źródeł z głośnością)</label>
+      <div id="dest-mix-body" hidden>
+        <p class="hint" id="dest-mix-delay"></p>
+        <div class="table-wrap"><table class="streams"><thead><tr><th>Źródło</th><th>Głośność</th><th></th><th>Poziom</th><th></th></tr></thead>
+          <tbody id="dest-mix-rows"></tbody></table></div>
+        <p class="hint">W trybie miksu kliknięcie kratki w siatce dodaje albo usuwa źródło.</p>
+      </div>
+      <p class="confirm" id="dest-confirm" hidden></p>
+      <menu id="dest-actions"></menu>
+    </form>
+  </dialog>
+
   <dialog id="dlg-password">
     <form method="dialog" id="password-form">
       <h3>Zmień hasło panelu</h3>

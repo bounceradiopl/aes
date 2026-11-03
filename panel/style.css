@@ -219,6 +219,7 @@ h4.virtual-head { margin: 8px 0 -8px; font-size: 13px; font-weight: 600; letter-
 #virtual-body td.actions { white-space: nowrap; }
 #virtual-body td.actions button + button { margin-left: 4px; }
 th.dst.unavailable span, tr.unavailable th.src .src-name { color: var(--muted); }
+th.dst.mix span { color: var(--ink); }
 table.matrix .first { border-left: 1px solid var(--line-strong); }
 table.matrix tbody tr.group-row th { position: sticky; left: 0; background: var(--canvas); z-index: 1; height: 32px; border-top: 1px solid var(--line-strong); }
 table.matrix th.src {
@@ -297,3 +298,11 @@ dialog menu .spacer { flex: 1; }
 .send-grid .wide { grid-column: 1 / -1; }
 .send-done { display: grid; gap: 12px; }
 @media (max-width: 560px) { .send-grid { grid-template-columns: 1fr; } }
+
+/* ---- destination dialog: mix mode ---- */
+#dest-mix-rows input[type=range] { width: 180px; }
+#dest-mix-rows .range-row { display: flex; align-items: center; gap: 8px; }
+#dest-mix-rows .range-row span { font-family: var(--mono); font-size: 12px; color: var(--muted); min-width: 60px; text-align: right; white-space: nowrap; }
+button.mini[aria-pressed=true] { color: var(--err-fg); }
+.mix-off { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 4px 0; }
+.mix-off select { flex: 1; min-width: 160px; }
