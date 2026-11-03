@@ -152,3 +152,18 @@ TEST_CASE("shared memory view layout") {
   view.header().magic = 0;
   CHECK_FALSE(view.compatible());
 }
+
+TEST_CASE("shared memory v3 has mix bus rings that do not overlap the others") {
+  std::vector<std::byte> mem(bam::ShmLayout::total_bytes());
+  bam::ShmView::initialize(mem.data(), 1);
+  bam::ShmView v(mem.data());
+  CHECK(v.compatible());
+  CHECK(v.header().version == 3u);
+  CHECK(v.header().channels_mix == 64u);
+  std::vector<int32_t> x(100, 0x12345600), y(100);
+  v.mix_bus(63).write(1000, x.data(), x.size());
+  v.source_ring(bam::ShmSource::Mix, 63).read(1000, y.data(), y.size());
+  CHECK(y == x);
+  v.win_src(31).read(1000, y.data(), y.size());  // the last Windows ring is untouched
+  CHECK(y[0] == 0);
+}

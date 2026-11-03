@@ -12,19 +12,21 @@
 
 namespace bam {
 
-inline constexpr uint32_t kShmMagic = 0x42414D32;  // "BAM2"
-inline constexpr uint32_t kShmVersion = 2;
-inline constexpr const char* kShmName = "BounceAESMaster.v2";
-inline constexpr const char* kPeriodEventName = "BounceAESMaster.v2.period";
+inline constexpr uint32_t kShmMagic = 0x42414D33;  // "BAM3"
+inline constexpr uint32_t kShmVersion = 3;
+inline constexpr const char* kShmName = "BounceAESMaster.v3";
+inline constexpr const char* kPeriodEventName = "BounceAESMaster.v3.period";
 inline constexpr size_t kDeviceNameBytes = 48;
 inline constexpr int kWinPairs = 16;              // Windows source pairs on the timeline
 inline constexpr int kWinChannels = kWinPairs * 2;
 inline constexpr size_t kBridgeBufferBytes = 65536;
+inline constexpr int kMixBuses = 32;              // stereo mix-bus ring pairs
+inline constexpr int kMixChannels = kMixBuses * 2;
 
 enum class ShmPtpState : uint32_t { Listening = 0, Locked = 1, Holdover = 2, FreeRun = 3, Master = 4 };
 
 // Where an ASIO input pair (or a Windows output) reads its audio from.
-enum class ShmSource : uint32_t { None = 0, Net = 1, Asio = 2, Win = 3 };
+enum class ShmSource : uint32_t { None = 0, Net = 1, Asio = 2, Win = 3, Mix = 4 };
 
 struct ShmAsioRoute {
   std::atomic<uint32_t> kind{0};          // ShmSource
@@ -81,6 +83,8 @@ struct ShmHeader {
   std::atomic<uint32_t> report_len;
   char request[kBridgeBufferBytes];
   char report[kBridgeBufferBytes];
+
+  uint32_t channels_mix;
 };
 
 struct ShmLayout {
@@ -91,6 +95,8 @@ struct ShmLayout {
   static size_t net_in_tags_offset(int ch);
   static size_t asio_out_tags_offset(int ch);
   static size_t win_src_tags_offset(int ch);
+  static size_t mix_samples_offset(int ch);
+  static size_t mix_tags_offset(int ch);
   static size_t total_bytes();
 };
 
@@ -105,6 +111,7 @@ class ShmView {
   ChannelRing net_in(int ch) const;    // ch 0..63: received AES67 subscriptions
   ChannelRing asio_out(int ch) const;  // ch 0..63: what the ASIO host plays
   ChannelRing win_src(int ch) const;   // ch 0..31: captured Windows audio
+  ChannelRing mix_bus(int ch) const;   // ch 0..63: mix bus outputs
   ChannelRing source_ring(ShmSource kind, int ch) const;  // dispatch by kind; None -> invalid ring
 
   void set_asio_route(int pair, ShmSource kind, int src_pair, uint32_t delay_frames);  // seqlock write

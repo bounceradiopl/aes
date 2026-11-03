@@ -16,6 +16,8 @@ const char* kind_name(ShmSource k) {
       return "asio";
     case ShmSource::Win:
       return "win";
+    case ShmSource::Mix:
+      return "mix";
     case ShmSource::None:
       break;
   }
@@ -26,6 +28,7 @@ ShmSource kind_from(const std::string& s) {
   if (s == "net") return ShmSource::Net;
   if (s == "asio") return ShmSource::Asio;
   if (s == "win") return ShmSource::Win;
+  if (s == "mix") return ShmSource::Mix;
   return ShmSource::None;
 }
 }  // namespace

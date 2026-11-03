@@ -23,17 +23,19 @@ static_assert(offsetof(ShmHeader, client_heartbeat) == 2064);
 static_assert(offsetof(ShmHeader, bridge_heartbeat) == 2080);
 static_assert(offsetof(ShmHeader, request) == 2108);
 static_assert(offsetof(ShmHeader, report) == 67644);
+static_assert(offsetof(ShmHeader, channels_mix) == 133180);
 static_assert(sizeof(ShmHeader) == 133184);
 
 namespace {
 constexpr size_t kPage = 4096;
 constexpr size_t kRingBytes = size_t(kRingFrames) * sizeof(int32_t);
 constexpr size_t kTagBytes = size_t(kBlocksPerRing) * sizeof(uint32_t);
-// Ring groups laid out back to back after the header: net_in, asio_out, win_src.
+// Ring groups laid out back to back after the header: net_in, asio_out, win_src, mix.
 constexpr int kNetInCh = kChannelCount;      // 64
 constexpr int kAsioOutCh = kChannelCount;    // 64
 constexpr int kWinSrcCh = kWinChannels;      // 32
-constexpr size_t kSamplesBytes = size_t(kNetInCh + kAsioOutCh + kWinSrcCh) * kRingBytes;
+constexpr int kMixCh = kMixChannels;         // 64
+constexpr size_t kSamplesBytes = size_t(kNetInCh + kAsioOutCh + kWinSrcCh + kMixCh) * kRingBytes;
 
 size_t utf8_safe_length(std::string_view s, size_t max_bytes) {
   if (s.size() <= max_bytes) return s.size();
@@ -48,10 +50,12 @@ size_t ShmLayout::header_bytes() { return (sizeof(ShmHeader) + kPage - 1) / kPag
 size_t ShmLayout::net_in_samples_offset(int ch) { return header_bytes() + size_t(ch) * kRingBytes; }
 size_t ShmLayout::asio_out_samples_offset(int ch) { return net_in_samples_offset(kNetInCh) + size_t(ch) * kRingBytes; }
 size_t ShmLayout::win_src_samples_offset(int ch) { return asio_out_samples_offset(kAsioOutCh) + size_t(ch) * kRingBytes; }
+size_t ShmLayout::mix_samples_offset(int ch) { return win_src_samples_offset(kWinSrcCh) + size_t(ch) * kRingBytes; }
 size_t ShmLayout::net_in_tags_offset(int ch) { return header_bytes() + kSamplesBytes + size_t(ch) * kTagBytes; }
 size_t ShmLayout::asio_out_tags_offset(int ch) { return net_in_tags_offset(kNetInCh) + size_t(ch) * kTagBytes; }
 size_t ShmLayout::win_src_tags_offset(int ch) { return asio_out_tags_offset(kAsioOutCh) + size_t(ch) * kTagBytes; }
-size_t ShmLayout::total_bytes() { return win_src_tags_offset(kWinSrcCh); }
+size_t ShmLayout::mix_tags_offset(int ch) { return win_src_tags_offset(kWinSrcCh) + size_t(ch) * kTagBytes; }
+size_t ShmLayout::total_bytes() { return mix_tags_offset(kMixCh); }
 
 void ShmView::initialize(void* base, uint64_t generation) {
   std::memset(base, 0, ShmLayout::total_bytes());
@@ -64,6 +68,7 @@ void ShmView::initialize(void* base, uint64_t generation) {
   h->channels_net_in = kNetInCh;
   h->channels_asio_out = kAsioOutCh;
   h->channels_win_src = kWinSrcCh;
+  h->channels_mix = kMixCh;
   h->header_size = static_cast<uint32_t>(sizeof(ShmHeader));
   h->service_generation.store(generation);
 }
@@ -72,7 +77,8 @@ bool ShmView::compatible() const {
   const auto& h = header();
   return h.magic == kShmMagic && h.version == kShmVersion && h.sample_rate == kSampleRate &&
          h.ring_frames == kRingFrames && h.block_frames == kBlockFrames && h.channels_net_in == kNetInCh &&
-         h.channels_asio_out == kAsioOutCh && h.channels_win_src == kWinSrcCh && h.header_size == sizeof(ShmHeader);
+         h.channels_asio_out == kAsioOutCh && h.channels_win_src == kWinSrcCh && h.channels_mix == kMixCh &&
+         h.header_size == sizeof(ShmHeader);
 }
 
 ChannelRing ShmView::net_in(int ch) const {
@@ -87,6 +93,10 @@ ChannelRing ShmView::win_src(int ch) const {
   return ChannelRing(reinterpret_cast<int32_t*>(base_ + ShmLayout::win_src_samples_offset(ch)),
                      reinterpret_cast<uint32_t*>(base_ + ShmLayout::win_src_tags_offset(ch)));
 }
+ChannelRing ShmView::mix_bus(int ch) const {
+  return ChannelRing(reinterpret_cast<int32_t*>(base_ + ShmLayout::mix_samples_offset(ch)),
+                     reinterpret_cast<uint32_t*>(base_ + ShmLayout::mix_tags_offset(ch)));
+}
 
 ChannelRing ShmView::source_ring(ShmSource kind, int ch) const {
   switch (kind) {
@@ -96,6 +106,8 @@ ChannelRing ShmView::source_ring(ShmSource kind, int ch) const {
       return asio_out(ch);
     case ShmSource::Win:
       return ch < kWinChannels ? win_src(ch) : ChannelRing{};
+    case ShmSource::Mix:
+      return ch < kMixCh ? mix_bus(ch) : ChannelRing{};
     case ShmSource::None:
       break;
   }

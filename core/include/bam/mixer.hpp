@@ -9,11 +9,11 @@
 
 #include "bam/constants.hpp"
 #include "bam/rate_control.hpp"
+#include "bam/shm_layout.hpp"
 #include "bam/timeline.hpp"
 
 namespace bam {
 
-inline constexpr int kMixBuses = 32;
 inline constexpr uint32_t kMixMarginFrames = 96;  // 2 ms: a mix is ready this long after its slowest member
 
 struct MixInput {
