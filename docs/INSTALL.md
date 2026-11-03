@@ -99,9 +99,12 @@ Ten sam plik pobierzesz później przyciskiem **SDP** przy wyjściu albo z okna 
 ### Aktualizacja z wersji 1.0
 Konfiguracja 1.0 przenosi się sama przy pierwszym uruchomieniu 1.1 (kopia: `config.json.v1.bak`). Urządzenie N staje się wyjściem N (zasilanym z ASIO N), subskrypcją N (jeśli miało źródło, połączoną z wejściem ASIO N) i nazwą pary ASIO N, więc wszystko gra tak jak wcześniej.
 
+### Aktualizacja: zgodność wersji usługi i sterownika
+Usługa, sterownik ASIO (wersja 64- i 32-bitowa) oraz BounceAES Audio Bridge muszą być w tej samej wersji — nowy instalator wymienia je wszystkie naraz, więc zwykła aktualizacja (rozdział 2) wystarczy. Jeśli po aktualizacji tylko części plików (np. ręcznie podmieniony sterownik ASIO ze starszej wersji) sterownik zgłosi w aplikacji ASIO błąd „**niezgodna wersja usługi i sterownika ASIO**” — zainstaluj ponownie pełny pakiet.
+
 ## 5. Routing (zakładka Routing)
 
-Siatka jak w Dante Controller: **wiersze to źródła, kolumny to cele**. Kliknięcie kratki łączy źródło z celem od razu, drugie kliknięcie rozłącza. Każdy cel ma jedno źródło; jedno źródło może zasilać wiele celów. Grupy (Sieć AoIP, ASIO, Windows) można zwijać, a „tylko używane” ukrywa nieużywane wiersze i kolumny. Szara kratka oznacza połączenie ze źródłem chwilowo niedostępnym (np. aplikacja zamknięta). Kliknięcie nazwy subskrypcji albo wyjścia AoIP otwiera jego okno: adres, połączenia, SDP i **Usuń**. Przyciski **Nadawaj do urządzenia…** i **Dodaj źródło…** dodają wyjście i subskrypcję.
+Siatka jak w Dante Controller: **wiersze to źródła, kolumny to cele**. Kliknięcie kratki łączy źródło z celem od razu, drugie kliknięcie rozłącza (w trybie miksu — patrz niżej — kliknięcie dodaje albo usuwa źródło z miksu). Każdy cel ma jedno źródło albo jeden miks; jedno źródło może zasilać wiele celów. Grupy (Sieć AoIP, ASIO, Windows) można zwijać, a „tylko używane” ukrywa nieużywane wiersze i kolumny. Szara kratka oznacza połączenie ze źródłem chwilowo niedostępnym (np. aplikacja zamknięta). **Kliknięcie nazwy dowolnej kolumny (celu) otwiera jego okno**: dla wyjść AoIP dodatkowo adres, połączenia, SDP i **Usuń**; dla każdego celu — przełącznik **Miks**. Przyciski **Nadawaj do urządzenia…** i **Dodaj źródło…** dodają wyjście i subskrypcję.
 
 | Źródło | Co to jest |
 |---|---|
@@ -119,6 +122,23 @@ Siatka jak w Dante Controller: **wiersze to źródła, kolumny to cele**. Klikni
 | Windows | urządzenia odtwarzające: słuchawki, głośniki; wirtualna karta „…: do aplikacji” |
 
 Opóźnienie połączenia zależy od źródła: subskrypcja — jej opóźnienie odbioru; ASIO — jeden bufor; Windows — 20 ms (bufor urządzenia i dopasowanie zegara). Odtwarzanie na urządzeniu Windows (słuchawki, głośniki) dodaje około 20 ms bufora karty: Windows pobiera dźwięk co 10 ms, więc mniejszy zapas dawał regularne trzaski (poprawione w 1.1.4).
+
+### Miksowanie (kilka źródeł na jeden cel)
+Zamiast pojedynczego źródła cel może mieć **miks**: kilka źródeł naraz, każde z własną głośnością — przydatne np. do kilku par ASIO z mAirList na jednych słuchawkach albo na jednym wyjściu do Orbana. Włącza go przełącznik **Miks (kilka źródeł z głośnością)** w oknie celu; dotychczasowe źródło staje się pierwszym członkiem (0 dB). W trybie miksu kliknięcie kratki w siatce dodaje albo usuwa źródło (kolumna może mieć wiele kropek), a nagłówek kolumny dostaje oznaczenie „**Σ**”.
+
+Dla każdego źródła w oknie celu: suwak głośności **−60…+12 dB** (krok 0,5 dB), **Wycisz**, miernik poziomu i **×** (usuwa z miksu). Okno pokazuje też opóźnienie miksu w ms. Wyłączenie miksu przy ≥ 2 źródłach: okno pyta, które z nich zostanie pojedynczym połączeniem.
+
+| | |
+|---|---|
+| Limity | do **32 miksów** jednocześnie, do **16 źródeł** w jednym miksie |
+| Opóźnienie | opóźnienie najwolniejszego członka + 2 ms, np. ASIO (0 ms) + subskrypcja 5 ms ≈ **7 ms** |
+| Miks jednoźródłowy | dokładnie jedno niewyciszone źródło na 0 dB nie przechodzi przez mikser — zostaje połączeniem bezpośrednim, bit w bit, bez dodatkowego opóźnienia |
+| Wyciszanie | wyciszenie jednego źródła w miksie wielu źródeł nie przerywa dźwięku pozostałych |
+
+Zakładka **Statystyki** pokazuje licznik **Miks: spóźnienia** (przebiegi miksera, które nie zdążyły na czas) — powinien zostać na 0.
+
+### Karty wielokanałowe Windows
+Urządzenie odtwarzające Windows z więcej niż dwoma kanałami (interfejs USB z kilkoma parami wyjść, karta 7.1 itp.) pojawia się w siatce jako kilka osobnych celów, po jednym na parę kanałów: „**Nazwa 1-2**”, „**Nazwa 3-4**”… Liczbę par wyznacza format głośników urządzenia w Windows (**Panel dźwięku → urządzenie → Konfiguruj** albo **Właściwości → Zaawansowane**) — urządzenie ustawione na stereo udostępnia tylko parę 1-2. Nagrywanie (przechwytywanie) z urządzeń wielokanałowych pozostaje stereo, zawsze para 1-2.
 
 ### Audio Windows
 Źródła i cele Windows obsługuje **BounceAES Audio Bridge**, uruchamiany przez ikonę w zasobniku w sesji zalogowanego użytkownika (usługa Windows nie ma dostępu do dźwięku użytkownika). Bez zalogowanego użytkownika panel pokazuje „Audio Windows: brak sesji użytkownika”; AoIP i ASIO działają dalej. Urządzenia Windows mają własny zegar, więc bridge dopasowuje je do zegara PTP resamplerem (±1000 ppm).

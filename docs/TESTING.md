@@ -8,15 +8,16 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Zakres (108 przypadków testowych):
+Zakres (135 przypadków testowych):
 - SDP (w tym plik z Orbana), RTP L16/L24, zegar medialny, oś czasu i pamięć współdzielona (ringi źródeł, tabela routingu, zegar, żądanie/raport bridge'a);
 - RxStream (duplikaty, przestawione pakiety, spóźnione pakiety, braki) i TxStream (opóźnienie źródła `D_src`);
 - PTP: kodek wiadomości, symulacja slave'a z dryfem ±100 ppm, jitterem, utratą i powrotem mastera; wybór mastera między dwoma komputerami, przejęcie roli przez sprzętowy master i jej odzyskanie, rola „tylko slave”;
-- routing (identyfikatory, kanonizacja), konfiguracja 1.1 z migracją z 1.0, SAP, hasła (wektory RFC), wymiana buforów ASIO;
-- regulator PI i resampler: dryf ±100 ppm z jitterem ±2 ms przez godzinę czasu symulowanego, poziom sinusa 1 kHz ±0,1 dB, protokół bridge'a;
-- warstwa systemowa: gniazda multicast, pamięć współdzielona, zdarzenia;
-- silnik end-to-end, próbka w próbkę: ASIO → sieć → subskrypcja → wejście ASIO; subskrypcja przekazana na inne wyjście; lokalna pętla ASIO ze zmianą połączenia w trakcie pracy; aplikacja Windows (atrapa bridge'a) → wyjście AoIP; migracja pliku 1.0;
-- API HTTP: logowanie, konfiguracja 1.1, SDP, routing, subskrypcje, panel, strumień SSE.
+- routing (identyfikatory, kanonizacja, w tym pary kanałów `win-out:…#N`), konfiguracja 1.1/1.2 z migracją z 1.0, SAP, hasła (wektory RFC), wymiana buforów ASIO;
+- regulator PI i resampler: dryf ±100 ppm z jitterem ±2 ms przez godzinę czasu symulowanego, poziom sinusa 1 kHz ±0,1 dB, protokół bridge'a; `RenderPacer` na kartach 4- i 8-kanałowych;
+- mikser (szyny miksu): suma źródeł z głośnością co do LSB, wyciszenie, nasycenie zamiast zawinięcia, wyrównanie członków o różnym opóźnieniu, stabilny przydział szyn, miks jednoźródłowy 0 dB = połączenie bezpośrednie bit w bit; konfiguracja `mixes` (walidacja, limity 32 miksów / 16 źródeł);
+- warstwa systemowa: gniazda multicast, pamięć współdzielona (w tym 32 szyny miksu, pamięć v3), zdarzenia;
+- silnik end-to-end, próbka w próbkę: ASIO → sieć → subskrypcja → wejście ASIO; subskrypcja przekazana na inne wyjście; lokalna pętla ASIO ze zmianą połączenia w trakcie pracy; aplikacja Windows (atrapa bridge'a) → wyjście AoIP; miks ASIO + ASIO → wyjście AoIP i → wejście ASIO (zgodność z sumą); migracja pliku 1.0;
+- API HTTP: logowanie, konfiguracja 1.1/1.2, SDP, routing, mikse (`PUT /api/mixes`), subskrypcje, panel, strumień SSE.
 
 **Testy nigdy nie wysyłają ruchu do prawdziwej sieci**: używają wyłącznie interfejsu `127.0.0.1`. Na Linuksie trzeba włączyć multicast na pętli zwrotnej: `sudo ip link set lo multicast on`.
 
@@ -75,6 +76,11 @@ Ręcznie, na komputerze z Windows 11, z zalogowanym użytkownikiem (ikona w zaso
 | 5 | Orban (albo inne urządzenie AES67 z zegarem PTP) w sieci | oba komputery są slave'ami Orbana; w SDP wyjść (`a=ts-refclk`) identyfikator Orbana |
 | 6 | Rola „tylko slave” na komputerze bez mastera w sieci | komputer nie zostaje masterem (stan „brak mastera”), Wireshark nie pokazuje jego Announce |
 | 7 | 24 godziny: Chrome → AoIP i subskrypcja → słuchawki jednocześnie | brak trzasków; opóźnienie stałe (porównanie z nagraniem kontrolnym); w Statystykach brak błędów |
+| 8 | Miks na słuchawkach: dwie pary ASIO z mAirList (np. Program 1 i Program 2) w jednym miksie na **Windows → Słuchawki**, z różną głośnością; wycisz jedno źródło, potem odcisz | obie pary słyszalne razem z zadaną proporcją głośności; wyciszenie/odciszenie bez trzasku i bez przerwy w drugim źródle; opóźnienie miksu w oknie celu ≈ 20 ms + 2 ms (człon Windows najwolniejszy) |
+| 9 | Miks na wyjściu AoIP do Orbana: **Nadawaj do urządzenia…** → włącz **Miks** na tym wyjściu, dodaj dwie pary ASIO z gain/mute | Orban odbiera sumę obu źródeł ze słyszalną proporcją głośności; w Statystykach **Miks: spóźnienia** = 0 |
+| 10 | Prawdziwa karta wielokanałowa Windows (interfejs USB z ≥ 2 parami wyjść albo karta 7.1, ustawiona w Windows na odpowiedni format głośników): osobne sygnały na parach **1-2** i **3-4**, przy czym inne, niezwiązane urządzenie gra jednocześnie | w siatce osobne kolumny „Nazwa 1-2”, „Nazwa 3-4”…; obie pary grają niezależnie bez przesłuchu; zmiana routingu pary 3-4 nie przerywa dźwięku na parze 1-2 ani na niezwiązanym urządzeniu |
+
+Pozycje 8–10 (miks i karta wielokanałowa) nie były jeszcze wykonane na prawdziwym sprzęcie Windows — zweryfikowane dotąd tylko testami automatycznymi i atrapami (Statystyki → „Miks: spóźnienia”, testy silnika i Bridge'a).
 
 ## 5. Test wytrzymałościowy (odbiór)
 

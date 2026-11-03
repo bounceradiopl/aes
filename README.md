@@ -4,6 +4,8 @@ Otwarty (GPLv3) sterownik audio **AES67** dla **Windows 10/11 x64** z interfejse
 
 - **32 wyjścia i 32 subskrypcje stereo**, każde jako osobny strumień AES67 (RTP L24/48 kHz, multicast), oraz 32 + 32 pary ASIO.
 - **Routing jak w Dante Controller**: siatka źródła × cele. Dowolne źródło (subskrypcja AoIP, wyjście ASIO, aplikacja Windows, urządzenie Windows) do dowolnego celu (wyjście AoIP, wejście ASIO, urządzenie Windows), zmiana od razu, bez przerywania innych strumieni.
+- **Miksowanie**: dowolny cel może zamiast jednego źródła mieć miks kilku źródeł naraz, każde z własną głośnością (−60…+12 dB) i wyciszeniem — do 32 miksów, do 16 źródeł w miksie. Jednoźródłowy miks na 0 dB zostaje połączeniem bezpośrednim, bit w bit.
+- **Karty wielokanałowe Windows**: urządzenie odtwarzające z więcej niż dwoma kanałami (interfejs USB, karta 7.1) jest widoczne jako osobny cel na każdą parę kanałów („Nazwa 1-2”, „Nazwa 3-4”…), zgodnie z formatem głośników ustawionym w Windows.
 - **Audio Windows bez sterownika jądra**: dźwięk dowolnej aplikacji (np. przeglądarki) przechwytywany wprost z procesu (Windows 11), odsłuch i wejścia urządzeń Windows, odtwarzanie strumieni AoIP na słuchawkach. Aplikacje, które wymagają karty dźwiękowej, korzystają z darmowego VB-CABLE: panel rozpoznaje wirtualne karty (VB-CABLE, Voicemeeter, Virtual Audio Cable, Virtual Audio Driver i inne) i łączy je z AoIP jednym kliknięciem („Wirtualne karty…”).
 - **PTPv2** (IEEE 1588, profil AES67, E2E): komputer podąża za grandmasterem (Orban, Omnia, konsola) albo sam zostaje masterem, gdy w sieci nie ma lepszego zegara (BMCA, role: automatyczna, preferowany master, tylko slave).
 - **SAP**: wyjścia są ogłaszane jako „stacja / wyjście”, strumienie innych urządzeń i innych komputerów Bounce można dodać z listy.
@@ -22,7 +24,7 @@ Otwarty (GPLv3) sterownik audio **AES67** dla **Windows 10/11 x64** z interfejse
  BounceAESTray.exe ─────── ikona stanu w zasobniku, otwiera panel, nadzoruje bridge
 ```
 
-Każda próbka ma pozycję na wspólnej osi czasu, wyznaczonej przez zegar PTP (`mediaclk:direct=0`). Każde źródło zapisuje swój ring na tej osi i deklaruje opóźnienie gotowości `D_src` (subskrypcja: opóźnienie odbioru, ASIO: 0, Windows: 20 ms), a cel czyta z pozycji „teraz − `D_src`”. Dzięki temu każde połączenie działa bez kopiowania i bez dodatkowych wątków. Audio Windows ma własny zegar urządzenia, więc bridge dopasowuje je do PTP resamplerem z regulatorem PI. Szczegóły: [specyfikacja 1.0](docs/superpowers/specs/2026-10-30-bounceaes-master-design.md), [specyfikacja 1.1](docs/superpowers/specs/2026-10-30-bounceaes-routing-ptp-windows-design.md).
+Każda próbka ma pozycję na wspólnej osi czasu, wyznaczonej przez zegar PTP (`mediaclk:direct=0`). Każde źródło zapisuje swój ring na tej osi i deklaruje opóźnienie gotowości `D_src` (subskrypcja: opóźnienie odbioru, ASIO: 0, Windows: 20 ms), a cel czyta z pozycji „teraz − `D_src`”. Dzięki temu każde połączenie działa bez kopiowania i bez dodatkowych wątków. Cel w trybie miksu czyta zamiast tego gotowy miks z szyny miksera (usługa, osobny wątek o rytmie 1 ms), z opóźnieniem najwolniejszego członka + 2 ms. Audio Windows ma własny zegar urządzenia, więc bridge dopasowuje je do PTP resamplerem z regulatorem PI. Szczegóły: [specyfikacja 1.0](docs/superpowers/specs/2026-10-30-bounceaes-master-design.md), [specyfikacja 1.1](docs/superpowers/specs/2026-10-30-bounceaes-routing-ptp-windows-design.md), [specyfikacja 1.2](docs/superpowers/specs/2026-11-03-bounceaes-mixing-design.md).
 
 ## Porównanie z Axia IP-Audio Driver
 
