@@ -90,3 +90,23 @@ TEST_CASE("mixer restarts on a clock step without mixing the past") {
   ol.ring().read(50100, &v, 1);
   CHECK(v == static_cast<int32_t>(a(50100) / 2));
 }
+
+TEST_CASE("mixer keeps the bus peak when a process() call mixes no new block") {
+  Ring al, ar, ol, orr;
+  std::vector<int32_t> half(20000, 0x40000000);
+  al.ring().write(0, half.data(), half.size());
+  ar.ring().write(0, half.data(), half.size());
+  bam::Mixer mixer;
+  bam::MixBusPlan p;
+  p.bus = 0;
+  p.out_left = ol.ring();
+  p.out_right = orr.ring();
+  p.inputs = {{al.ring(), ar.ring(), 1.0, 0}};
+  mixer.set_plan({p});
+  mixer.process(1000, 1);  // first call: nothing mixed yet (mixed_upto starts at "now")
+  mixer.process(1048, 1);  // one full 48-frame block mixed: bus is at 0.5 amplitude
+  const float peak = mixer.peak_db(0, 0);
+  CHECK(peak > -120.0f);  // playing, not silent
+  mixer.process(1060, 1);  // only 12 more frames of "now": less than one block, nothing new mixed
+  CHECK(mixer.peak_db(0, 0) == peak);  // must keep the last real peak, not reset to -120
+}

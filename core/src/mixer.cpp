@@ -55,7 +55,9 @@ void Mixer::process(uint64_t now_s, uint64_t generation) {
     ChannelRing out_left = bus.out_left;
     ChannelRing out_right = bus.out_right;
     float peak[2] = {0, 0};
+    bool mixed_any = false;
     while (st.mixed_upto + kBlock <= limit) {
+      mixed_any = true;
       std::fill(acc_l.begin(), acc_l.end(), 0.0);
       std::fill(acc_r.begin(), acc_r.end(), 0.0);
       for (const auto& m : bus.inputs) {
@@ -78,8 +80,13 @@ void Mixer::process(uint64_t now_s, uint64_t generation) {
       out_right.write(st.mixed_upto, out_r.data(), kBlock);
       st.mixed_upto += kBlock;
     }
-    for (int c = 0; c < 2; ++c)
-      peak_[bus.bus * 2 + c].store(peak[c] > 1e-6f ? 20.0f * std::log10(peak[c]) : -120.0f, std::memory_order_relaxed);
+    // Only touch the reported peak when this call actually mixed a block: a pass that mixes
+    // nothing (less than one block of new "now" since the last call) must leave the last real
+    // peak in place, not report silence.
+    if (mixed_any) {
+      for (int c = 0; c < 2; ++c)
+        peak_[bus.bus * 2 + c].store(peak[c] > 1e-6f ? 20.0f * std::log10(peak[c]) : -120.0f, std::memory_order_relaxed);
+    }
   }
 }
 
