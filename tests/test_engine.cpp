@@ -611,6 +611,7 @@ TEST_CASE("engine sends a mix to a Windows device as a mix bus") {
   CHECK(req->dests[0].id == dst);
   CHECK(req->dests[0].kind == bam::ShmSource::Mix);
   CHECK(req->dests[0].delay_frames == 96);
+  CHECK(req->dests[0].channel_pair == 2);
   const int bus = req->dests[0].pair;
   // muting a member keeps the destination on its bus at the same D_mix (no reroute, no gap)
   REQUIRE(t.engine->set_mix(dst, true, bam::MixConfig{{{"asio-out:1", 0, false}, {"asio-out:2", -6, true}}}, std::nullopt).ok);
@@ -627,6 +628,38 @@ TEST_CASE("engine sends a mix to a Windows device as a mix bus") {
   REQUIRE(req);
   REQUIRE(req->dests.size() == 1);
   CHECK(req->dests[0].pair == bus);
+}
+
+TEST_CASE("engine routing view: a multichannel Windows render device gets one destination per channel pair") {
+  TestEngine t;
+  t.start();
+  FakeAsioHost host(t);
+  auto& h = host.view->header();
+  h.bridge_pid = bp::current_pid();
+  const std::string usb = "{0.0.0.00000000}.{usb}";
+  bam::BridgeReport report;
+  report.generation = 1;
+  report.endpoints.push_back({usb, "Speakers (USB Audio)", true, false, 6});
+  host.view->write_report(bam::to_json(report));
+  host.run(300'000'000, [&](uint64_t) { h.bridge_heartbeat.fetch_add(1); });
+
+  auto v = t.engine->routing();
+  std::map<std::string, bam::RouteNode> dests;
+  for (const auto& n : v.dests) dests[n.id] = n;
+  REQUIRE(dests.count("win-out:" + usb));
+  REQUIRE(dests.count("win-out:" + usb + "#2"));
+  REQUIRE(dests.count("win-out:" + usb + "#3"));
+  CHECK(dests["win-out:" + usb].name == "Speakers (USB Audio) 1-2");
+  CHECK(dests["win-out:" + usb + "#2"].name == "Speakers (USB Audio) 3-4");
+  CHECK(dests["win-out:" + usb + "#3"].name == "Speakers (USB Audio) 5-6");
+
+  t.route("win-out:" + usb + "#3", "asio-out:1");
+  auto req = bam::request_from_json(host.view->read_request(nullptr));
+  REQUIRE(req);
+  REQUIRE(req->dests.size() == 1);
+  CHECK(req->dests[0].id == "win-out:" + usb + "#3");
+  CHECK(req->dests[0].channel_pair == 3);
+  h.bridge_pid = 0;
 }
 
 TEST_CASE("engine receives more subscriptions on one port than a socket may join") {

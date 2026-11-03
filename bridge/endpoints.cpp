@@ -3,6 +3,7 @@
 
 #include <windows.h>
 // windows.h first
+#include <audioclient.h>
 #include <audiopolicy.h>
 #include <mmdeviceapi.h>
 #include <propkeydef.h>
@@ -53,6 +54,17 @@ std::string default_id(IMMDeviceEnumerator* e, EDataFlow flow) {
   return device_id(d.get());
 }
 
+// The channel count of a render device's shared-mode mix format, 2 if it cannot be determined.
+int render_channels(IMMDevice* d) {
+  ComPtr<IAudioClient> client;
+  if (FAILED(d->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(client.put())))) return 2;
+  WAVEFORMATEX* mix = nullptr;
+  if (FAILED(client->GetMixFormat(&mix)) || !mix) return 2;
+  const int channels = mix->nChannels > 0 ? mix->nChannels : 2;
+  CoTaskMemFree(mix);
+  return channels;
+}
+
 std::string process_exe(uint32_t pid) {
   HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
   if (!h) return {};
@@ -95,6 +107,7 @@ std::vector<BridgeEndpoint> list_endpoints() {
     b.name = friendly_name(d.get());
     b.render = flow == eRender;
     b.default_device = b.id == (b.render ? def_render : def_capture);
+    b.channels = b.render ? render_channels(d.get()) : 2;
     out.push_back(std::move(b));
   }
   return out;

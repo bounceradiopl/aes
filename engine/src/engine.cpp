@@ -424,7 +424,7 @@ void Engine::Impl::publish_bridge_request(const Config& cfg, const RuntimeSet& r
     auto d = parse_dest(dst);
     if (!d || d->kind != DestKind::WinOut) continue;
     const ResolvedSource r = resolve_dest(cfg, rt, dst);
-    req.dests.push_back({dst, r.kind, r.pair, r.delay});
+    req.dests.push_back({dst, r.kind, r.pair, r.delay, d->pair});
   }
   const std::string body = to_json(req);  // generation 0: compared without it
   if (body == bridge_request) return;
@@ -1130,8 +1130,16 @@ RoutingView Engine::routing() const {
       if (e.render) {
         win_sources.push_back(tagged(win_node("win-loop:" + e.id, vd ? label + ": z aplikacji" : "Odsłuch: " + e.name)));
         listed.insert("win-loop:" + e.id);
-        win_dests.push_back(tagged(win_node("win-out:" + e.id, vd && !vd->cable.empty() ? label + ": do aplikacji" : e.name)));
-        listed.insert("win-out:" + e.id);
+        // One destination per channel pair of a multichannel Windows render device.
+        const int pairs = std::max(1, (e.channels + 1) / 2);
+        for (int p = 1; p <= pairs; ++p) {
+          const std::string id = "win-out:" + e.id + (p > 1 ? "#" + std::to_string(p) : std::string());
+          std::string name = vd && !vd->cable.empty() ? label + ": do aplikacji" : e.name;
+          if (pairs > 1)
+            name += 2 * p <= e.channels ? " " + std::to_string(2 * p - 1) + "-" + std::to_string(2 * p) : " " + std::to_string(2 * p - 1);
+          win_dests.push_back(tagged(win_node(id, name)));
+          listed.insert(id);
+        }
       } else {
         const std::string id = "win-in:" + e.id;
         if (vd && cable_render_ends.count(vd->pair_key) && !routed_sources.count(id)) continue;

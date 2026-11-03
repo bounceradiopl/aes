@@ -22,6 +22,7 @@ struct BridgeDestReq {
   ShmSource kind = ShmSource::None;
   int pair = 0;
   uint32_t delay_frames = 0;  // D_src of the routed source
+  int channel_pair = 1;       // Windows device channel pair this destination plays (1 = channels 1-2)
 };
 
 struct BridgeRequest {
@@ -36,6 +37,7 @@ struct BridgeEndpoint {
   std::string name;
   bool render = true;  // false: capture device
   bool default_device = false;
+  int channels = 2;    // render device channel count (from its mix format); capture devices: 2
 };
 
 struct BridgeApp {
