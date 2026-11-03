@@ -155,6 +155,27 @@ TEST_CASE("HTTP API: auth flow, config, SDP, panel, live feed") {
   CHECK(unroute->status == 200);
   CHECK(f.engine->config().routes.count("asio-in:1") == 0);
 
+  // ---- mixes ----
+  auto mix = f.client.Put("/api/mixes", f.auth(),
+                          json{{"dst", "asio-in:5"}, {"enabled", true},
+                               {"sources", json::array({{{"source", "asio-out:1"}, {"gain_db", -6}, {"mute", false}},
+                                                        {{"source", "asio-out:2"}, {"gain_db", 0}, {"mute", true}}})}}
+                              .dump(),
+                          "application/json");
+  REQUIRE(mix);
+  CHECK(mix->status == 200);
+  auto mixj = json::parse(mix->body);
+  CHECK(mixj["routing"]["mixes"]["asio-in:5"].size() == 2);
+  CHECK(mixj["routing"]["mixes"]["asio-in:5"][0]["gain_db"] == -6);
+  CHECK(f.engine->config().mixes.count("asio-in:5"));
+  CHECK(f.client.Put("/api/mixes", f.auth(), R"({"dst": "asio-in:5", "enabled": true, "sources": [{"source": "x", "gain_db": 0}]})",
+                     "application/json")->status == 400);
+  auto off = f.client.Put("/api/mixes", f.auth(), R"({"dst": "asio-in:5", "enabled": false, "keep": "asio-out:1"})", "application/json");
+  REQUIRE(off);
+  CHECK(off->status == 200);
+  CHECK(f.engine->config().routes.at("asio-in:5") == "asio-out:1");
+  CHECK(json::parse(f.client.Get("/api/status", f.auth())->body).contains("mixer_late"));
+
   f.client.Put("/api/routing", f.auth(), R"({"dst": "asio-in:2", "src": "net-in:1"})", "application/json");
   auto del = f.client.Delete("/api/subscriptions/1", f.auth());
   REQUIRE(del);

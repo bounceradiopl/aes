@@ -277,6 +277,34 @@ struct HttpServer::Impl {
       send_json(res, out, r.ok ? 200 : 400);
     });
 
+    server.Put("/api/mixes", [this](const httplib::Request& req, httplib::Response& res) {
+      auto body = parse_body(req, res);
+      if (!body) return;
+      if (!body->is_object() || !body->contains("dst") || !(*body)["dst"].is_string() || !body->contains("enabled") ||
+          !(*body)["enabled"].is_boolean())
+        return send_error(res, 400, "oczekiwano {\"dst\": \"...\", \"enabled\": true|false}");
+      std::optional<MixConfig> mix;
+      if (body->contains("sources")) {
+        if (!(*body)["sources"].is_array()) return send_error(res, 400, "\"sources\" musi być listą");
+        MixConfig m;
+        for (const auto& sj : (*body)["sources"]) {
+          if (!sj.is_object() || !sj.contains("source") || !sj["source"].is_string()) return send_error(res, 400, "nieprawidłowe źródło miksu");
+          MixSource s;
+          s.source = sj["source"].get<std::string>();
+          if (sj.contains("gain_db") && sj["gain_db"].is_number()) s.gain_db = sj["gain_db"].get<double>();
+          if (sj.contains("mute") && sj["mute"].is_boolean()) s.mute = sj["mute"].get<bool>();
+          m.sources.push_back(std::move(s));
+        }
+        mix = std::move(m);
+      }
+      std::optional<std::string> keep;
+      if (body->contains("keep") && (*body)["keep"].is_string()) keep = (*body)["keep"].get<std::string>();
+      const ApplyResult r = engine.set_mix((*body)["dst"].get<std::string>(), (*body)["enabled"].get<bool>(), mix, keep);
+      json out = api::result_json(r);
+      if (r.ok) out["routing"] = api::routing_json(engine.routing());
+      send_json(res, out, r.ok ? 200 : 400);
+    });
+
     server.Post("/api/subscriptions", [this](const httplib::Request& req, httplib::Response& res) {
       auto body = parse_body(req, res);
       if (!body) return;

@@ -95,6 +95,7 @@ json status_json(const EngineStatus& s) {
           {"ptp", ptp_json(s)},
           {"asio", asio_json(s)},
           {"bridge", {{"connected", s.bridge_connected}}},
+          {"mixer_late", s.mixer_late},
           {"outputs", outputs},
           {"subscriptions", subs}};
 }
@@ -128,13 +129,21 @@ json routing_json(const RoutingView& v) {
                      {"available", n.available},
                      {"note", n.note},
                      {"virtual", n.virtual_device},
+                     {"mix", n.mix},
                      {"db", db_pair(n.peak_db)}});
     }
     return out;
   };
   json routes = json::object();
   for (const auto& [dst, src] : v.routes) routes[dst] = src;
-  return {{"sources", nodes(v.sources)}, {"dests", nodes(v.dests)}, {"routes", routes}};
+  json mixes = json::object(), delays = json::object();
+  for (const auto& [dst, m] : v.mixes) {
+    json list = json::array();
+    for (const auto& s : m.sources) list.push_back({{"source", s.source}, {"gain_db", s.gain_db}, {"mute", s.mute}});
+    mixes[dst] = list;
+  }
+  for (const auto& [dst, ms] : v.mix_delay_ms) delays[dst] = ms;
+  return {{"sources", nodes(v.sources)}, {"dests", nodes(v.dests)}, {"routes", routes}, {"mixes", mixes}, {"mix_delay_ms", delays}};
 }
 
 json streams_json(const std::vector<DiscoveredStream>& list) {
