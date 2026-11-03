@@ -24,6 +24,10 @@ const state = {
   statsTimer: null,
   destOpen: null,       // id of the dest dialog's destination while open, else null
   destDisabling: null,  // id of a dest whose mix checkbox was just unchecked, pending the "keep" choice
+  mixPending: null,     // { dst, sources } — a mix-member edit (gain/mute/membership) not yet confirmed
+                        // by the server, kept outside state.routing so the 500 ms routing poll (or an
+                        // in-flight PUT's own stale response) can't silently revert it mid-edit.
+  mixSending: null,     // id of a destination whose /api/mixes PUT is currently in flight, else null
 };
 
 // ---------------------------------------------------------------- helpers
@@ -183,11 +187,23 @@ async function loadRouting() {
     const r = await api("/api/routing");
     if (!r.ok) return;
     const before = state.routing ? routingSnapshot(state.routing) : "";
-    state.routing = r.data;
-    if (before !== routingSnapshot(r.data)) {
+    const polled = r.data;
+    // A mix edit still in flight (or just queued) would otherwise be clobbered by this poll's
+    // older snapshot — overlay it back onto the destination it belongs to before adopting the rest.
+    overlayMixPending(polled);
+    state.routing = polled;
+    if (before !== routingSnapshot(polled)) {
       renderMatrix();
       if ($("#dlg-virtual").open) renderVirtual();
-      if (state.destOpen) renderDest(state.destOpen);
+      // The open dialog's member rows must not be rebuilt from this poll tick while its
+      // destination has a pending/in-flight mix edit: overlayMixPending already keeps the values
+      // correct, but replacing the row DOM (e.g. an <input type=range> mid-drag) would still
+      // interrupt the user's gesture. Just keep its meters live instead; the matrix above is safe
+      // to refresh regardless (no per-member editable controls in it).
+      if (state.destOpen) {
+        if (state.mixPending?.dst === state.destOpen) applyRoutingMeters();
+        else renderDest(state.destOpen);
+      }
     } else applyRoutingMeters();
   } catch { /* shown by the auth screen */ }
 }
@@ -966,44 +982,99 @@ function onMixToggle(id) {
   setMix(id, false);
 }
 
+// The member list a new edit for `id` should build on: the outstanding pending edit for this
+// destination, if there is one (so a second edit before the first is confirmed keeps building on
+// the first, not on whatever the last poll happened to see), else the server's last known list.
+function mixPendingSources(id) {
+  if (state.mixPending?.dst === id) return state.mixPending.sources.map((m) => ({ ...m }));
+  return (state.routing.mixes[id] || []).map((m) => ({ source: m.source, gain_db: m.gain_db, mute: m.mute }));
+}
+
+// Replaces a pending destination's mix members in a freshly fetched/returned `routing` with the
+// pending edit's own copy — merge, not replace — so a snapshot seen while that edit is unconfirmed
+// (a poll result, or an in-flight PUT's own now-stale response) can't show, or go on to send, a
+// reverted value.
+function overlayMixPending(routing) {
+  if (!state.mixPending || !routing.mixes) return;
+  routing.mixes[state.mixPending.dst] = state.mixPending.sources.map((m) => ({ ...m }));
+}
+
 let mixDebounce = null;
 function queueMixUpdate(id, index, patch) {
-  const list = state.routing.mixes[id];
-  if (!list?.[index]) return;
-  Object.assign(list[index], patch);
+  const sources = mixPendingSources(id);
+  if (!sources[index]) return;
+  Object.assign(sources[index], patch);
+  state.mixPending = { dst: id, sources };
   clearTimeout(mixDebounce);
   mixDebounce = setTimeout(() => sendMix(id), 150);
 }
 
 function applyMixUpdate(id, index, patch) {
-  const list = state.routing.mixes[id];
-  if (!list?.[index]) return;
-  Object.assign(list[index], patch);
+  const sources = mixPendingSources(id);
+  if (!sources[index]) return;
+  Object.assign(sources[index], patch);
+  state.mixPending = { dst: id, sources };
   clearTimeout(mixDebounce);
   sendMix(id);
 }
 
 function removeMixMember(id, index) {
-  const list = state.routing.mixes[id] || [];
-  list.splice(index, 1);
+  const sources = mixPendingSources(id);
+  if (index < 0 || index >= sources.length) return;
+  sources.splice(index, 1);
+  state.mixPending = { dst: id, sources };
   clearTimeout(mixDebounce);
   sendMix(id);
 }
 
+// Sends the pending edit for `id`. At most one /api/mixes PUT per destination is ever in flight at
+// once: a send that lands while one is already outstanding just returns — sendMixNow's own
+// completion below notices the (by then newer) pending edit and chains it. Without this, a slider's
+// debounced send and an immediate mute/remove send for the same destination could overlap and reach
+// the server out of order, each overwriting the other's full member list.
 function sendMix(id) {
-  const list = state.routing.mixes[id] || [];
-  return setMix(id, true, list.map((m) => ({ source: m.source, gain_db: m.gain_db, mute: m.mute })));
+  if (state.mixSending === id) return;
+  return sendMixNow(id);
 }
 
-async function setMix(dst, enabled, sources, keep) {
+async function sendMixNow(id) {
+  const pending = state.mixPending?.dst === id ? state.mixPending : null;
+  const sources = pending ? pending.sources : (state.routing.mixes[id] || []).map((m) => ({ source: m.source, gain_db: m.gain_db, mute: m.mute }));
+  state.mixSending = id;
+  await setMix(id, true, sources, undefined, pending);
+  state.mixSending = null;
+  if (state.mixPending?.dst === id) sendMixNow(id);  // a newer edit queued while this PUT was in flight
+}
+
+// `pendingRef` is the exact state.mixPending object this call was sent for (only sendMixNow passes
+// one). On return, if state.mixPending is still that same object, the edit is confirmed and cleared;
+// if it has since been replaced (a newer edit queued while this PUT was in flight), this response is
+// for stale data — the newer edit is kept (overlaid back onto the server's answer here) and
+// sendMixNow's caller sends it next.
+async function setMix(dst, enabled, sources, keep, pendingRef) {
   const body = { dst, enabled };
   if (sources) body.sources = sources;
   if (keep) body.keep = keep;
   const r = await api("/api/mixes", { method: "PUT", body: JSON.stringify(body) });
-  if (!r.ok) { toast(issuesText(r, "Nie można zmienić miksu"), "err"); loadRouting(); return false; }
+  if (!r.ok) {
+    toast(issuesText(r, "Nie można zmienić miksu"), "err");
+    if (pendingRef && state.mixPending === pendingRef) state.mixPending = null;
+    loadRouting();
+    return false;
+  }
   for (const x of r.data.notices || []) toast(x, "warn");
-  state.routing = r.data.routing;
-  syncRoutes(r.data.routing.routes);
+  const routing = r.data.routing;
+  if (pendingRef) {
+    if (state.mixPending === pendingRef) state.mixPending = null;
+    else overlayMixPending(routing);
+  } else if (state.mixPending?.dst === dst) {
+    // an enable/disable/keep call for a destination that also has a leftover pending member edit
+    // (e.g. the mix was turned off while a slider edit was still in flight): the mix identity just
+    // changed server-side, so the pending edit no longer applies.
+    state.mixPending = null;
+  }
+  state.routing = routing;
+  syncRoutes(routing.routes);
   renderMatrix();
   if ($("#dlg-dest").open) renderDest(dst);
   return true;
