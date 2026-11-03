@@ -7,10 +7,13 @@
 // windows.h first
 #include <objbase.h>
 
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "bam/bridge_protocol.hpp"
 #include "bam/platform/process.hpp"
@@ -32,7 +35,8 @@ constexpr int64_t kForeignStaleNs = 3000 * kMs;
 constexpr uint32_t kWinSourceDelay = 960;
 
 struct Slot {
-  std::string key;  // what the stream was built for; a change rebuilds it
+  std::string key;  // capture: the source id reported for the slot
+  std::vector<std::pair<std::string, int>> dests;  // render: destination ids and their channel pairs
   std::unique_ptr<AudioStream> stream;
   int64_t failed_at = 0;
 };
@@ -92,15 +96,34 @@ class Bridge {
         slot.stream = std::make_unique<CaptureStream>(view_, s.slot, kind, parsed->key);
       }
     }
+    // one RenderStream per playback device, playing all of its routed channel pairs; the slot key
+    // covers only that device, so a change elsewhere leaves its stream running
+    std::map<std::string, std::vector<const BridgeDestReq*>> devices;
     for (const auto& d : request_.dests) {
-      const std::string key = "dst|" + d.id + "|" + std::to_string(static_cast<int>(d.kind)) + "|" + std::to_string(d.pair) + "|" +
-                              std::to_string(d.delay_frames);
-      wanted[key] = true;
       auto parsed = parse_dest(d.id);
-      if (!parsed) continue;
+      if (parsed && parsed->kind == DestKind::WinOut) devices[parsed->key].push_back(&d);
+    }
+    for (auto& [endpoint, group] : devices) {
+      std::sort(group.begin(), group.end(), [](const BridgeDestReq* a, const BridgeDestReq* b) {
+        return a->channel_pair != b->channel_pair ? a->channel_pair < b->channel_pair : a->id < b->id;
+      });
+      const std::string prefix = "dst|" + endpoint + "|";
+      std::string key = prefix;
+      for (const auto* d : group)
+        key += std::to_string(d->channel_pair) + ":" + std::to_string(static_cast<int>(d->kind)) + ":" + std::to_string(d->pair) + ":" +
+               std::to_string(d->delay_frames) + ";";
+      wanted[key] = true;
       Slot& slot = slots_[key];
-      slot.key = d.id;
-      if (should_start(slot, now)) slot.stream = std::make_unique<RenderStream>(view_, parsed->key, d.kind, d.pair, d.delay_frames);
+      slot.dests.clear();
+      for (const auto* d : group) slot.dests.emplace_back(d->id, d->channel_pair);
+      if (should_start(slot, now)) {
+        // the device's previous layout goes first, so its pairs are never played twice
+        for (auto& [k, other] : slots_)
+          if (k != key && k.rfind(prefix, 0) == 0) other.stream.reset();
+        std::vector<RenderPair> pairs;
+        for (const auto* d : group) pairs.push_back({d->channel_pair, d->kind, d->pair, d->delay_frames});
+        slot.stream = std::make_unique<RenderStream>(view_, endpoint, std::move(pairs));
+      }
     }
     for (auto it = slots_.begin(); it != slots_.end();) {
       if (!wanted.count(it->first)) {
@@ -131,19 +154,39 @@ class Bridge {
     r.endpoints = list_endpoints();
     r.apps = list_apps();
     for (const auto& [key, slot] : slots_) {
-      BridgeSlotState st;
-      st.id = slot.key;
-      if (slot.stream) {
-        st.ok = slot.stream->ok();
-        st.reason = st.ok ? std::string() : slot.stream->reason();
-        st.peak_db[0] = slot.stream->peak_db(0);
-        st.peak_db[1] = slot.stream->peak_db(1);
-      } else {
-        st.reason = "uruchamianie";
+      if (slot.dests.empty()) {
+        r.slots.push_back(slot_state(slot.key, slot, 0));
+        continue;
       }
-      r.slots.push_back(std::move(st));
+      for (const auto& [id, channel_pair] : slot.dests) r.slots.push_back(slot_state(id, slot, channel_pair));
     }
     view_.write_report(to_json(r));
+  }
+
+  // channel_pair 0: a capture slot (meters 0/1); otherwise the render device's pair
+  static BridgeSlotState slot_state(const std::string& id, const Slot& slot, int channel_pair) {
+    BridgeSlotState st;
+    st.id = id;
+    if (!slot.stream) {
+      st.reason = "uruchamianie";
+      return st;
+    }
+    st.ok = slot.stream->ok();
+    st.reason = st.ok ? std::string() : slot.stream->reason();
+    const int first = channel_pair > 0 ? 2 * (channel_pair - 1) : 0;
+    if (const auto* render = dynamic_cast<const RenderStream*>(slot.stream.get()); render && st.ok) {
+      // a mono device plays pair 1 only (downmixed)
+      const int channels = std::max(render->device_channels(), 2);
+      if (render->device_channels() > 0 && first >= channels) {
+        st.ok = false;
+        st.reason = "urządzenie nie ma kanałów " + std::to_string(first + 1) + "-" + std::to_string(first + 2);
+      }
+    }
+    if (st.ok) {
+      st.peak_db[0] = slot.stream->peak_db(first);
+      st.peak_db[1] = slot.stream->peak_db(first + 1);
+    }
+    return st;
   }
 
   ShmView view_;

@@ -40,9 +40,9 @@ double RateController::update(double fill_frames, double dt_seconds) {
   return 1.0 + correction_;
 }
 
-DriftResampler::DriftResampler(double base_ratio) : base_(base_ratio) {
+DriftResampler::DriftResampler(double base_ratio, int channels) : base_(base_ratio), channels_(channels) {
   int err = 0;
-  state_ = src_new(SRC_SINC_MEDIUM_QUALITY, 2, &err);
+  state_ = src_new(SRC_SINC_MEDIUM_QUALITY, channels, &err);
   if (!state_) throw std::runtime_error(std::string("libsamplerate: ") + src_strerror(err));
 }
 

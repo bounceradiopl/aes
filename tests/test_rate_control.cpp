@@ -82,6 +82,30 @@ TEST_CASE("drift resampler keeps a sine's level at ratio 1.0001") {
   CHECK(std::abs(rms_db - expected_db) < 0.1);
 }
 
+TEST_CASE("drift resampler converts 4 interleaved channels") {
+  constexpr int kCh = 4;
+  constexpr size_t kFrames = 4800;
+  const float level[kCh] = {0.1f, -0.2f, 0.3f, -0.4f};
+  bam::DriftResampler rs(1.0, kCh);
+  std::vector<float> in(kFrames * kCh), out(kFrames * 2 * kCh);
+  for (size_t i = 0; i < kFrames; ++i)
+    for (int c = 0; c < kCh; ++c) in[i * kCh + c] = level[c];
+  size_t offset = 0, written = 0;
+  while (offset < kFrames) {
+    size_t used = 0;
+    const size_t n = rs.process(in.data() + offset * kCh, kFrames - offset, out.data() + written * kCh, kFrames * 2 - written, 1.0, &used);
+    offset += used;
+    written += n;
+    if (!used && !n) break;
+  }
+  REQUIRE(written > 2000);
+  double worst = 0;
+  for (size_t i = 1000; i < written; ++i)  // past the filter delay
+    for (int c = 0; c < kCh; ++c) worst = std::max(worst, std::abs(double(out[i * kCh + c]) - level[c]));
+  MESSAGE(written << " frames, worst error " << worst);
+  CHECK(worst < 1e-4);
+}
+
 TEST_CASE("float conversion of left-aligned samples") {
   for (int32_t v : {0, 1 << 8, -(1 << 8), 0x7FFFFF00, static_cast<int32_t>(0x80000000), 0x12345600, -0x12345600})
     CHECK(bam::from_float(bam::to_float(v)) == v);

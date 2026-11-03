@@ -154,16 +154,19 @@ void to_stereo(const BYTE* data, size_t frames, const Format& f, std::vector<flo
   }
 }
 
-void from_stereo(const float* in, size_t frames, const Format& f, BYTE* data) {
+// Interleaved float frames of `in_channels` -> device frames. A mono device gets the average of
+// channels 0/1 (pair 1); otherwise channels are copied one to one and the rest stay silent.
+void from_interleaved(const float* in, size_t frames, int in_channels, const Format& f, BYTE* data) {
   const size_t stride = static_cast<size_t>(f.channels) * f.bytes;
   std::memset(data, 0, frames * stride);
+  const int copy = std::min(in_channels, f.channels);
   for (size_t i = 0; i < frames; ++i) {
     BYTE* fr = data + i * stride;
+    const float* src = in + i * static_cast<size_t>(in_channels);
     if (f.channels == 1) {
-      write_sample(fr, 0.5f * (in[i * 2] + in[i * 2 + 1]), f);
+      write_sample(fr, in_channels > 1 ? 0.5f * (src[0] + src[1]) : src[0], f);
     } else {
-      write_sample(fr, in[i * 2], f);
-      write_sample(fr + f.bytes, in[i * 2 + 1], f);
+      for (int c = 0; c < copy; ++c) write_sample(fr + static_cast<size_t>(c) * f.bytes, src[c], f);
     }
   }
 }
@@ -284,7 +287,16 @@ uint64_t media_now(const ShmView& view, uint64_t* generation) {
 }  // namespace
 
 // ---------------------------------------------------------------- AudioStream
+AudioStream::AudioStream(const ShmView& view, int meter_channels) : view_(view), peak_(static_cast<size_t>(std::max(1, meter_channels))) {
+  for (auto& p : peak_) p.store(-120.0f, std::memory_order_relaxed);
+}
+
 AudioStream::~AudioStream() { stop(); }
+
+float AudioStream::peak_db(int channel) const {
+  if (channel < 0 || static_cast<size_t>(channel) >= peak_.size()) return -120.0f;
+  return peak_[static_cast<size_t>(channel)].load(std::memory_order_relaxed);
+}
 
 void AudioStream::start() {
   thread_ = std::thread([this] {
@@ -310,7 +322,7 @@ void AudioStream::fail(const std::string& reason) {
     reason_ = reason;
   }
   ok_ = false;
-  peak_[0] = peak_[1] = -120.0f;
+  for (auto& p : peak_) p.store(-120.0f, std::memory_order_relaxed);
 }
 
 void AudioStream::set_ok() {
@@ -321,15 +333,15 @@ void AudioStream::set_ok() {
   ok_ = true;
 }
 
-void AudioStream::set_peaks(const float* in, size_t frames) {
-  float m[2] = {0, 0};
-  for (size_t i = 0; i < frames; ++i)
-    for (int c = 0; c < 2; ++c) m[c] = std::max(m[c], std::abs(in[i * 2 + c]));
-  for (int c = 0; c < 2; ++c) {
-    const float db = m[c] > 1e-6f ? 20.0f * std::log10(m[c]) : -120.0f;
+void AudioStream::set_peaks(const float* in, size_t frames, int channels) {
+  const int metered = std::min(channels, static_cast<int>(peak_.size()));
+  for (int c = 0; c < metered; ++c) {
+    float m = 0;
+    for (size_t i = 0; i < frames; ++i) m = std::max(m, std::abs(in[i * static_cast<size_t>(channels) + c]));
+    const float db = m > 1e-6f ? 20.0f * std::log10(m) : -120.0f;
     // simple decay so the meter is readable at the report rate
-    const float prev = peak_[c].load(std::memory_order_relaxed);
-    peak_[c].store(std::max(db, prev - 1.5f), std::memory_order_relaxed);
+    auto& peak = peak_[static_cast<size_t>(c)];
+    peak.store(std::max(db, peak.load(std::memory_order_relaxed) - 1.5f), std::memory_order_relaxed);
   }
 }
 
@@ -457,7 +469,7 @@ void CaptureStream::run() {
         l[i] = from_float(fifo[i * 2]);
         r[i] = from_float(fifo[i * 2 + 1]);
       }
-      if (have) set_peaks(fifo.data(), have);
+      if (have) set_peaks(fifo.data(), have, 2);
       fifo.erase(fifo.begin(), fifo.begin() + static_cast<std::ptrdiff_t>(have * 2));
       ring_l.write(write_pos, l.data(), due);  // a shortfall becomes silence, the timeline stays continuous
       ring_r.write(write_pos, r.data(), due);
@@ -472,8 +484,16 @@ void CaptureStream::run() {
 }
 
 // ---------------------------------------------------------------- render
-RenderStream::RenderStream(const ShmView& view, std::string endpoint, ShmSource kind, int pair, uint32_t delay_frames)
-    : AudioStream(view), endpoint_(std::move(endpoint)), kind_(kind), pair_(pair), delay_(delay_frames) {
+namespace {
+int meter_channels(const std::vector<RenderPair>& pairs) {
+  int top = 1;
+  for (const auto& p : pairs) top = std::max(top, p.channel_pair);
+  return 2 * top;
+}
+}  // namespace
+
+RenderStream::RenderStream(const ShmView& view, std::string endpoint, std::vector<RenderPair> pairs)
+    : AudioStream(view, meter_channels(pairs)), endpoint_(std::move(endpoint)), pairs_(std::move(pairs)) {
   start();
 }
 
@@ -503,13 +523,43 @@ void RenderStream::run() {
   hr = client->GetService(__uuidof(IAudioRenderClient), reinterpret_cast<void**>(render.put()));
   if (SUCCEEDED(hr)) hr = client->Start();
   if (FAILED(hr)) return fail(hr_text("start WASAPI", hr));
+  device_channels_.store(fmt.channels, std::memory_order_relaxed);
   set_ok();
 
-  const ChannelRing src_l = view_.source_ring(kind_, pair_ * 2), src_r = view_.source_ring(kind_, pair_ * 2 + 1);
-  RenderPacer pacer(fmt.rate, period_frames);
-  const RenderPacer::Reader read = [&](uint64_t pos, int32_t* l, int32_t* r, uint32_t frames) {
-    src_l.read(pos, l, frames);
-    src_r.read(pos, r, frames);
+  // A mono device plays pair 1 downmixed (from_interleaved), so the pacer stays at two channels.
+  const int channels = fmt.channels >= 2 ? fmt.channels : 2;
+  // The pacer runs on the slowest pair's timeline: it reads up to ready = now - max_delay. A pair
+  // with a shorter delay reads (max_delay - delay) frames further on, i.e. up to now - delay, so
+  // every pair plays "its own position" like a stream of its own; one pair: ahead = 0.
+  uint32_t max_delay = 0;
+  for (const auto& p : pairs_) max_delay = std::max(max_delay, p.delay);
+  struct Feed {
+    int first;       // device channel of the pair's left side
+    uint64_t ahead;  // max_delay - delay
+    ChannelRing l, r;
+  };
+  std::vector<Feed> feeds;
+  for (const auto& p : pairs_) {
+    const int first = 2 * (p.channel_pair - 1);
+    if (p.channel_pair < 1 || first >= channels) continue;  // the device has no such channels
+    feeds.push_back({first, max_delay - p.delay, view_.source_ring(p.kind, p.pair * 2), view_.source_ring(p.kind, p.pair * 2 + 1)});
+  }
+  std::vector<int32_t> l, r;
+  RenderPacer pacer(fmt.rate, period_frames, channels);
+  const RenderPacer::Reader read = [&](uint64_t pos, uint32_t frames, float* out) {
+    // `out` arrives zeroed: channels without a pair stay silent
+    l.resize(frames);
+    r.resize(frames);
+    const auto stride = static_cast<size_t>(channels);
+    for (const Feed& f : feeds) {
+      f.l.read(pos + f.ahead, l.data(), frames);
+      f.r.read(pos + f.ahead, r.data(), frames);
+      const bool right = f.first + 1 < channels;
+      for (uint32_t i = 0; i < frames; ++i) {
+        out[i * stride + f.first] = to_float(l[i]);
+        if (right) out[i * stride + f.first + 1] = to_float(r[i]);
+      }
+    }
   };
   std::vector<float> out;
 
@@ -521,10 +571,10 @@ void RenderStream::run() {
       fail(hr_text("odtwarzanie", hr));
       break;
     }
-    // the source is complete up to "now - D_src"
+    // the slowest pair's source is complete up to "now - max_delay"
     uint64_t g = 0;
     const uint64_t now_s = media_now(view_, &g);
-    const uint64_t ready = now_s > delay_ ? now_s - delay_ : 0;
+    const uint64_t ready = now_s > max_delay ? now_s - max_delay : 0;
     const uint32_t space = buffer_frames > padding ? buffer_frames - padding : 0;
     const size_t n = pacer.step(ready, g, padding, space, platform::monotonic_ns() / 1e9, read, out);
     if (n) {
@@ -534,9 +584,9 @@ void RenderStream::run() {
         fail(hr_text("odtwarzanie", hr));
         break;
       }
-      from_stereo(out.data(), n, fmt, data);
+      from_interleaved(out.data(), n, channels, fmt, data);
       render->ReleaseBuffer(static_cast<UINT32>(n), 0);
-      set_peaks(out.data(), n);
+      set_peaks(out.data(), n, channels);
     }
   }
   client->Stop();

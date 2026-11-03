@@ -5,6 +5,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "bam/shm_layout.hpp"
 
@@ -21,16 +22,17 @@ class AudioStream {
   bool ok() const { return ok_.load(); }
   bool finished() const { return finished_.load(); }
   std::string reason() const;
-  float peak_db(int side) const { return peak_[side].load(std::memory_order_relaxed); }
+  // Peak of one metered channel (capture: 0/1; render: device channel), -120 when not metered.
+  float peak_db(int channel) const;
 
  protected:
-  explicit AudioStream(const ShmView& view) : view_(view) {}
+  AudioStream(const ShmView& view, int meter_channels = 2);
   void start();  // launches run() on the audio thread
   void stop();   // derived destructors call this before their members go away
   virtual void run() = 0;
   void fail(const std::string& reason);
   void set_ok();
-  void set_peaks(const float* interleaved, size_t frames);
+  void set_peaks(const float* interleaved, size_t frames, int channels);
   bool stopping() const { return stop_.load(std::memory_order_relaxed); }
 
   ShmView view_;
@@ -40,7 +42,7 @@ class AudioStream {
   std::atomic<bool> stop_{false};
   std::atomic<bool> ok_{false};
   std::atomic<bool> finished_{false};
-  std::atomic<float> peak_[2] = {-120.0f, -120.0f};
+  std::vector<std::atomic<float>> peak_;
   mutable std::mutex reason_mutex_;
   std::string reason_ = "uruchamianie";
 };
@@ -61,18 +63,30 @@ class CaptureStream : public AudioStream {
   std::string key_;
 };
 
-// Plays a timeline source (any ring) on a Windows playback device.
+// One channel pair of a playback device and the timeline pair it plays.
+struct RenderPair {
+  int channel_pair = 1;  // device channels 2p-1, 2p (1-based)
+  ShmSource kind = ShmSource::None;
+  int pair = 0;          // ring pair of `kind`
+  uint32_t delay = 0;    // D_src: the rings are complete up to "now - delay"
+};
+
+// Plays timeline sources (any ring, mix buses included) on the channel pairs of one Windows
+// playback device, from a single WASAPI stream so all pairs share the device clock and one
+// resampler. Every pair is heard at "playback time - its own delay", as a stream of its own would be.
 class RenderStream : public AudioStream {
  public:
-  RenderStream(const ShmView& view, std::string endpoint, ShmSource kind, int pair, uint32_t delay_frames);
+  RenderStream(const ShmView& view, std::string endpoint, std::vector<RenderPair> pairs);
   ~RenderStream() override;
+
+  // Channel count of the device's mix format; 0 until the device is open.
+  int device_channels() const { return device_channels_.load(std::memory_order_relaxed); }
 
  private:
   void run() override;
   std::string endpoint_;
-  ShmSource kind_;
-  int pair_;
-  uint32_t delay_;
+  std::vector<RenderPair> pairs_;
+  std::atomic<int> device_channels_{0};
 };
 
 }  // namespace bam::bridge

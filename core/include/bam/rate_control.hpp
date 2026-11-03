@@ -25,10 +25,11 @@ class RateController {
   bool started_ = false;
 };
 
-// Variable-ratio stereo resampler (libsamplerate, SRC_SINC_MEDIUM_QUALITY), interleaved float.
+// Variable-ratio resampler (libsamplerate, SRC_SINC_MEDIUM_QUALITY), interleaved float frames of
+// `channels` samples.
 class DriftResampler {
  public:
-  explicit DriftResampler(double base_ratio);  // output rate / input rate
+  explicit DriftResampler(double base_ratio, int channels = 2);  // base_ratio: output rate / input rate
   ~DriftResampler();
   DriftResampler(const DriftResampler&) = delete;
   DriftResampler& operator=(const DriftResampler&) = delete;
@@ -38,10 +39,12 @@ class DriftResampler {
   size_t process(const float* in, size_t in_frames, float* out, size_t out_capacity, double ratio_multiplier, size_t* consumed);
   void reset();
   double base_ratio() const { return base_; }
+  int channels() const { return channels_; }
 
  private:
   void* state_ = nullptr;
   double base_;
+  int channels_;
 };
 
 // Left-aligned 24-in-32-bit samples <-> float in [-1, 1).
