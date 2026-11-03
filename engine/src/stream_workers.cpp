@@ -12,6 +12,7 @@ constexpr int64_t kTickNs = 5'000'000;
 constexpr int64_t kMeterNs = 50'000'000;
 constexpr uint32_t kMeterFrames = 2400;  // 50 ms window
 constexpr int64_t kTxPeriodNs = 250'000;
+constexpr int64_t kMixPeriodNs = 1'000'000;
 constexpr int64_t kClientGraceNs = 1'000'000'000;
 }  // namespace
 
@@ -113,6 +114,19 @@ void Engine::Impl::tx_loop() {
         e->stream->reset();
       }
     }
+  }
+}
+
+// Sums the mix buses every 1 ms; the mixer itself holds the plan (swapped by rebuild_runtime).
+void Engine::Impl::mix_loop() {
+  platform::set_realtime_priority("Pro Audio");
+  int64_t next_wake = platform::monotonic_ns();
+  while (running) {
+    next_wake += kMixPeriodNs;
+    const int64_t before = platform::monotonic_ns();
+    if (before - next_wake > 5'000'000) next_wake = before;  // fell far behind: don't burst
+    platform::sleep_until_ns(next_wake);
+    mixer.process(clock.get().sample_at(platform::monotonic_ns()), clock.step_generation());
   }
 }
 

@@ -48,6 +48,7 @@ struct EngineStatus {
   bool asio_connected = false;
   uint32_t asio_buffer_frames = 0;
   bool bridge_connected = false;  // Windows audio bridge running in a user session
+  uint64_t mixer_late = 0;        // mixer passes that came later than the mix margin
   int64_t uptime_s = 0;
   std::string interface_ip;
   std::string station_name;
@@ -65,12 +66,23 @@ struct RouteNode {
   std::string note;   // why it is unavailable, or extra info
   float peak_db[2] = {-120, -120};
   std::string virtual_device;  // family of a recognised virtual sound card ("VB-CABLE"), else empty
+  bool mix = false;            // destination in mix mode
+};
+
+// A destination in mix mode.
+struct MixStatus {
+  std::string dest;
+  std::vector<MixSource> sources;
+  double delay_ms = 0;  // readiness delay of what the destination plays (D_mix, or D_src when direct)
+  bool direct = false;  // one unmuted source at 0 dB: played as a direct route, without a bus
 };
 
 struct RoutingView {
   std::vector<RouteNode> sources;
   std::vector<RouteNode> dests;
   std::map<std::string, std::string> routes;  // dest id -> source id
+  std::map<std::string, MixConfig> mixes;     // dest id -> mix (destinations in mix mode)
+  std::map<std::string, double> mix_delay_ms;  // dest id -> readiness delay of the mix
 };
 
 struct ApplyResult {
@@ -117,7 +129,12 @@ class Engine {
   std::string output_sdp(int output) const;  // output 1..32
 
   RoutingView routing() const;
+  // A destination in mix mode toggles `source` as a member (0 dB); no source clears its members.
   ApplyResult set_route(const std::string& dest, const std::optional<std::string>& source);
+  // enabled: the destination mixes `mix` (default: its current route as the only member).
+  // disabled: it is routed from `keep` (a member), else from the only member, else unrouted.
+  ApplyResult set_mix(const std::string& dest, bool enabled, const std::optional<MixConfig>& mix,
+                      const std::optional<std::string>& keep);
   ApplyResult add_subscription(const std::string& sdp_or_sap_id);
   ApplyResult remove_subscription(int index);
   ApplyResult add_output(const NewOutput& req);

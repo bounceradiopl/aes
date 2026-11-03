@@ -13,6 +13,7 @@
 #include "bam/bridge_protocol.hpp"
 #include "bam/clock.hpp"
 #include "bam/engine.hpp"
+#include "bam/mixer.hpp"
 #include "bam/platform/event.hpp"
 #include "bam/platform/shm.hpp"
 #include "bam/platform/udp.hpp"
@@ -71,6 +72,7 @@ struct RuntimeSet {
   std::vector<std::shared_ptr<RxPort>> rx_ports;
   std::vector<std::shared_ptr<TxEntry>> tx;
   std::map<std::string, int> win_slots;  // Windows source id -> win_src pair 0..15
+  std::map<std::string, int> mix_buses;  // mix-mode destination -> bus 0..31 (non-direct mixes only)
 };
 
 struct Engine::Impl {
@@ -113,6 +115,7 @@ struct Engine::Impl {
   std::array<std::atomic<float>, kChannelCount> asio_peak;
   std::array<std::atomic<float>, kWinChannels> win_peak;
   std::array<std::atomic<uint32_t>, kDeviceCount> net_delay;  // subscription D_src for the meters
+  Mixer mixer;  // sums the mix buses; its plan is replaced with every runtime rebuild
   std::atomic<int64_t> last_client_active_ns{0};
 
   // audio bridge (user session process)
@@ -133,6 +136,10 @@ struct Engine::Impl {
   std::string station_name(const Config& cfg) const;
   std::shared_ptr<const RuntimeSet> snapshot() const;
   ResolvedSource resolve(const Config& cfg, const RuntimeSet& rt, const std::string& source_id) const;
+  // What a destination plays: its mix bus, the direct source of a one-source 0 dB mix, or its route.
+  ResolvedSource resolve_dest(const Config& cfg, const RuntimeSet& rt, const std::string& dest_id) const;
+  std::vector<MixBusPlan> mix_plan(const Config& cfg, const RuntimeSet& rt) const;
+  float dest_peak(const Config& cfg, const RuntimeSet& rt, const std::string& dest_id, int side) const;
   void rebuild_runtime(const Config& cfg, bool force);
   void publish_shared_config(const Config& cfg, const RuntimeSet& rt);
   bool save_config(const Config& cfg, std::string* error) const;
@@ -147,6 +154,7 @@ struct Engine::Impl {
   void ptp_loop();
   void rx_loop();
   void tx_loop();
+  void mix_loop();
   void period_loop();
   void sap_loop();
   void monitor_loop();

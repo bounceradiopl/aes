@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -22,6 +24,16 @@ namespace bp = bam::platform;
 
 namespace {
 int32_t ramp_value(uint64_t n, int ch) { return static_cast<int32_t>(((n * 3 + ch) & 0xFFFFFF) << 8); }
+
+// What a 0 dB mix of two ramp channels carries: their sum, saturated like the mixer does.
+// The ramps span the whole int32 range, so about half of the ramp cycle clips.
+int32_t mix_sum(uint64_t n, int ch_a, int ch_b) {
+  const int64_t s = static_cast<int64_t>(ramp_value(n, ch_a)) + ramp_value(n, ch_b);
+  return static_cast<int32_t>(std::clamp<int64_t>(s, INT32_MIN, INT32_MAX));
+}
+
+// A sample after an AES67 L24 hop: the low byte is gone.
+int32_t l24(int32_t v) { return static_cast<int32_t>(static_cast<uint32_t>(v) & 0xFFFFFF00u); }
 
 constexpr uint32_t kRxDelay = 240;  // default subscription latency 5 ms
 
@@ -78,7 +90,7 @@ struct TestEngine {
   void route(const std::string& dst, const std::string& src) { REQUIRE(engine->set_route(dst, src).ok); }
 };
 
-// A fake ASIO host: attaches to the shared timeline and plays ramp_value() on ASIO output pair 1.
+// A fake ASIO host: attaches to the shared timeline and plays ramp_value() on ASIO output pairs 1 and 2.
 struct FakeAsioHost {
   std::optional<bp::SharedMemory> shm;
   std::optional<bp::NamedEvent> ev;
@@ -111,10 +123,9 @@ struct FakeAsioHost {
   void run(int64_t ns, const std::function<void(uint64_t)>& per_buffer = {}) {
     auto& h = view->header();
     bam::AsioBridge bridge(*view);
-    std::vector<std::vector<int32_t>> out(2, std::vector<int32_t>(128));
+    std::vector<std::vector<int32_t>> out(4, std::vector<int32_t>(128));
     std::vector<const int32_t*> out_ptrs(bam::kChannelCount, nullptr);
-    out_ptrs[0] = out[0].data();
-    out_ptrs[1] = out[1].data();
+    for (int ch = 0; ch < 4; ++ch) out_ptrs[ch] = out[ch].data();  // pairs 1 and 2
     uint64_t last_counter = h.period_counter.load();
     const int64_t end = bp::monotonic_ns() + ns;
     while (bp::monotonic_ns() < end) {
@@ -135,7 +146,7 @@ struct FakeAsioHost {
         first = last_start + 128;
       }
       for (uint64_t p = first; p <= s; p += 128) {
-        for (int ch = 0; ch < 2; ++ch)
+        for (int ch = 0; ch < 4; ++ch)
           for (uint32_t i = 0; i < 128; ++i) out[ch][i] = ramp_value(bam::AsioBridge::output_start(p, 128) + i, ch);
         bridge.write_outputs(p, 128, out_ptrs.data());
         if (per_buffer) per_buffer(p);
@@ -535,6 +546,79 @@ TEST_CASE("two engines: A is the PTP master and sends, B follows and receives wi
   CHECK(rx.underruns == rx_at_lock.underruns);
   CHECK(rx.overruns == rx_at_lock.overruns);
   CHECK(st.ptp.steps == steps_at_lock);  // no clock step while streaming
+}
+
+TEST_CASE("engine mixes two ASIO pairs onto an AoIP output and onto an ASIO input") {
+  TestEngine t;
+  t.start();
+  t.set_output(1, "239.69.206.1");
+  REQUIRE(t.engine->set_mix("net-out:1", true, bam::MixConfig{{{"asio-out:1", 0, false}, {"asio-out:2", 0, false}}}, std::nullopt).ok);
+  REQUIRE(t.subscribe_to_output(1) == 1);
+  REQUIRE(t.engine->set_mix("asio-in:4", true, bam::MixConfig{{{"asio-out:1", 0, false}, {"asio-out:2", 0, false}}}, std::nullopt).ok);
+  FakeAsioHost host(t);
+  host.run(1'500'000'000);
+  // the subscription carries ramp(pair 1) + ramp(pair 2), D_mix (96) behind
+  const uint64_t from = host.last_start - 30000;
+  std::vector<int32_t> l(10000);
+  host.view->net_in(0).read(from, l.data(), l.size());
+  int bad = 0;
+  for (size_t i = 0; i < l.size(); ++i) bad += l[i] != l24(mix_sum(from + i - 96, 0, 2));
+  CHECK(bad == 0);
+  auto rec = host.asio_input(3, 0);
+  bad = 0;
+  for (uint32_t i = 0; i < 128; ++i) bad += rec[i] != mix_sum(host.last_start - 128 - 96 + i, 0, 2);
+  CHECK(bad == 0);
+  CHECK(t.engine->status().mixer_late == 0);
+  auto v = t.engine->routing();
+  CHECK(v.mixes.count("net-out:1"));
+  CHECK(v.mix_delay_ms.at("net-out:1") == doctest::Approx(2.0));
+}
+
+TEST_CASE("engine: a one-source 0 dB mix is a direct route, mix mode toggles membership") {
+  TestEngine t;
+  t.start();
+  REQUIRE(t.engine->set_route("asio-in:3", std::string("asio-out:1")).ok);
+  REQUIRE(t.engine->set_mix("asio-in:3", true, std::nullopt, std::nullopt).ok);  // route becomes the first member
+  auto cfg = t.engine->config();
+  CHECK(cfg.routes.count("asio-in:3") == 0);
+  REQUIRE(cfg.mixes.at("asio-in:3").sources.size() == 1);
+  FakeAsioHost host(t);
+  host.run(300'000'000);
+  auto rec = host.asio_input(2, 0);
+  int bad = 0;
+  for (uint32_t i = 0; i < 128; ++i) bad += rec[i] != ramp_value(host.last_start - 128 + i, 0);  // no D_mix: direct
+  CHECK(bad == 0);
+  REQUIRE(t.engine->set_route("asio-in:3", std::string("asio-out:2")).ok);  // mix mode: adds
+  CHECK(t.engine->config().mixes.at("asio-in:3").sources.size() == 2);
+  REQUIRE(t.engine->set_route("asio-in:3", std::string("asio-out:1")).ok);  // removes
+  CHECK(t.engine->config().mixes.at("asio-in:3").sources.size() == 1);
+  CHECK_FALSE(t.engine->set_mix("asio-in:3", false, std::nullopt, std::string("asio-out:9")).ok);  // keep must be a member
+  REQUIRE(t.engine->set_mix("asio-in:3", false, std::nullopt, std::string("asio-out:2")).ok);
+  cfg = t.engine->config();
+  CHECK(cfg.mixes.count("asio-in:3") == 0);
+  CHECK(cfg.routes.at("asio-in:3") == "asio-out:2");
+}
+
+TEST_CASE("engine sends a mix to a Windows device as a mix bus") {
+  TestEngine t;
+  t.start();
+  const std::string dst = "win-out:{0.0.0.00000000}.{spk}#2";
+  REQUIRE(t.engine->set_mix(dst, true, bam::MixConfig{{{"asio-out:1", 0, false}, {"asio-out:2", -6, false}}}, std::nullopt).ok);
+  FakeAsioHost host(t);
+  auto req = bam::request_from_json(host.view->read_request(nullptr));
+  REQUIRE(req);
+  REQUIRE(req->dests.size() == 1);
+  CHECK(req->dests[0].id == dst);
+  CHECK(req->dests[0].kind == bam::ShmSource::Mix);
+  CHECK(req->dests[0].delay_frames == 96);
+  const int bus = req->dests[0].pair;
+  // another mix and a gain change elsewhere keep this destination on its bus (no interruption)
+  REQUIRE(t.engine->set_mix("asio-in:2", true, bam::MixConfig{{{"asio-out:3", 0, false}, {"asio-out:4", 0, false}}}, std::nullopt).ok);
+  REQUIRE(t.engine->set_mix(dst, true, bam::MixConfig{{{"asio-out:1", -3, false}, {"asio-out:2", -6, false}}}, std::nullopt).ok);
+  req = bam::request_from_json(host.view->read_request(nullptr));
+  REQUIRE(req);
+  REQUIRE(req->dests.size() == 1);
+  CHECK(req->dests[0].pair == bus);
 }
 
 TEST_CASE("engine receives more subscriptions on one port than a socket may join") {

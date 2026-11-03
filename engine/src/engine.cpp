@@ -50,13 +50,18 @@ std::string asio_label(const Config& cfg, int pair) {
   return name.empty() ? "BounceAES " + two_digits(pair) : name;
 }
 
-// Windows sources used by any route get a win_src pair; pairs already assigned stay where they are.
+// Windows sources used by any route or mix get a win_src pair; pairs already assigned stay where they are.
 std::map<std::string, int> assign_windows_slots(const Config& cfg, const std::map<std::string, int>& previous) {
   std::set<std::string> used;
   for (const auto& [dst, src] : cfg.routes) {
     auto s = parse_source(src);
     if (s && is_windows(*s)) used.insert(src);
   }
+  for (const auto& [dst, mix] : cfg.mixes)
+    for (const auto& m : mix.sources) {
+      auto s = parse_source(m.source);
+      if (s && is_windows(*s)) used.insert(m.source);
+    }
   std::map<std::string, int> slots;
   std::set<int> taken;
   for (const auto& id : used) {
@@ -75,6 +80,41 @@ std::map<std::string, int> assign_windows_slots(const Config& cfg, const std::ma
     taken.insert(next);
   }
   return slots;
+}
+
+// Destinations mixing more than a direct source get a mix bus; a mix that keeps existing keeps its
+// bus, so its consumers are not interrupted by changes elsewhere.
+std::map<std::string, int> assign_mix_buses(const Config& cfg, const std::map<std::string, int>& previous) {
+  std::vector<std::string> mixed;
+  for (const auto& [dst, mix] : cfg.mixes)
+    if (!direct_source(mix)) mixed.push_back(dst);
+  std::map<std::string, int> buses;
+  std::set<int> taken;
+  for (const auto& id : mixed) {
+    auto it = previous.find(id);
+    if (it != previous.end()) {
+      buses[id] = it->second;
+      taken.insert(it->second);
+    }
+  }
+  int next = 0;
+  for (const auto& id : mixed) {
+    if (buses.count(id)) continue;
+    while (taken.count(next)) ++next;
+    if (next >= kMixBuses) break;  // validate_config limits mixes to 32
+    buses[id] = next;
+    taken.insert(next);
+  }
+  return buses;
+}
+
+// Every source a destination plays: its route, or all members of its mix.
+std::set<std::string> played_sources(const Config& cfg) {
+  std::set<std::string> out;
+  for (const auto& [dst, src] : cfg.routes) out.insert(src);
+  for (const auto& [dst, mix] : cfg.mixes)
+    for (const auto& m : mix.sources) out.insert(m.source);
+  return out;
 }
 }  // namespace
 
@@ -160,6 +200,51 @@ ResolvedSource Engine::Impl::resolve(const Config& cfg, const RuntimeSet& rt, co
   return r;
 }
 
+ResolvedSource Engine::Impl::resolve_dest(const Config& cfg, const RuntimeSet& rt, const std::string& dest_id) const {
+  if (auto m = cfg.mixes.find(dest_id); m != cfg.mixes.end()) {
+    if (auto direct = direct_source(m->second)) return resolve(cfg, rt, *direct);
+    ResolvedSource r;
+    r.id = "mix:" + dest_id;
+    auto bus = rt.mix_buses.find(dest_id);
+    if (bus == rt.mix_buses.end()) {
+      r.note = "brak wolnej szyny miksu";
+      return r;
+    }
+    uint32_t max_delay = 0;
+    for (const auto& s : m->second.sources) max_delay = std::max(max_delay, resolve(cfg, rt, s.source).delay);
+    r.kind = ShmSource::Mix;
+    r.pair = bus->second;
+    r.delay = max_delay + kMixMarginFrames;
+    r.available = true;
+    return r;
+  }
+  auto route = cfg.routes.find(dest_id);
+  return resolve(cfg, rt, route == cfg.routes.end() ? std::string() : route->second);
+}
+
+std::vector<MixBusPlan> Engine::Impl::mix_plan(const Config& cfg, const RuntimeSet& rt) const {
+  std::vector<MixBusPlan> plan;
+  for (const auto& [dest, bus] : rt.mix_buses) {
+    MixBusPlan p;
+    p.bus = bus;
+    p.out_left = view->mix_bus(bus * 2);
+    p.out_right = view->mix_bus(bus * 2 + 1);
+    for (const auto& s : cfg.mixes.at(dest).sources) {
+      const ResolvedSource r = resolve(cfg, rt, s.source);
+      if (r.kind == ShmSource::None) continue;
+      MixInput in;
+      in.left = view->source_ring(r.kind, r.pair * 2);
+      in.right = view->source_ring(r.kind, r.pair * 2 + 1);
+      in.gain = s.mute ? 0.0 : std::pow(10.0, s.gain_db / 20.0);
+      in.delay = r.delay;
+      p.max_delay = std::max(p.max_delay, r.delay);
+      p.inputs.push_back(in);
+    }
+    plan.push_back(std::move(p));
+  }
+  return plan;
+}
+
 void Engine::Impl::rebuild_runtime(const Config& cfg, bool force) {
   const std::string iface = current_interface();
   const auto old = snapshot();
@@ -167,6 +252,7 @@ void Engine::Impl::rebuild_runtime(const Config& cfg, bool force) {
   const double to_app = gain_to_app(cfg);
   const double to_net = gain_to_network(cfg);
   next->win_slots = assign_windows_slots(cfg, old->win_slots);
+  next->mix_buses = assign_mix_buses(cfg, old->mix_buses);
 
   // ---- subscriptions: net_in(2n-2, 2n-1) ----
   for (int i = 0; i < kDeviceCount; ++i) {
@@ -258,12 +344,18 @@ void Engine::Impl::rebuild_runtime(const Config& cfg, bool force) {
     const auto& o = cfg.outputs[i];
     const int n = i + 1;
     if (!o.enabled) continue;
-    auto route = cfg.routes.find("net-out:" + std::to_string(n));
-    const ResolvedSource src = resolve(cfg, *next, route == cfg.routes.end() ? std::string() : route->second);
+    const std::string dest_id = "net-out:" + std::to_string(n);
+    const ResolvedSource src = resolve_dest(cfg, *next, dest_id);
+    bool follows_asio = src.kind == ShmSource::None || src.kind == ShmSource::Asio;
+    if (src.kind == ShmSource::Mix) {
+      // a mix of ASIO outputs only (or of nothing) is silent without an ASIO host, like a direct one
+      follows_asio = true;
+      for (const auto& s : cfg.mixes.at(dest_id).sources)
+        if (resolve(cfg, *next, s.source).kind != ShmSource::Asio) follows_asio = false;
+    }
     std::ostringstream key;
     key << o.address << '|' << o.ptime_us << '|' << to_net << '|' << iface << '|' << static_cast<int>(src.kind) << ':'
-        << src.pair << ':' << src.delay;
-    const bool follows_asio = src.kind == ShmSource::None || src.kind == ShmSource::Asio;
+        << src.pair << ':' << src.delay << ':' << follows_asio;
     std::shared_ptr<TxEntry> reuse;
     for (const auto& e : old->tx)
       if (e->output == n && e->key == key.str() && !force) reuse = e;
@@ -289,6 +381,7 @@ void Engine::Impl::rebuild_runtime(const Config& cfg, bool force) {
     next->tx.push_back(e);
   }
 
+  mixer.set_plan(mix_plan(cfg, *next));
   publish_shared_config(cfg, *next);
   publish_bridge_request(cfg, *next);
   {
@@ -303,15 +396,14 @@ void Engine::Impl::publish_shared_config(const Config& cfg, const RuntimeSet& rt
   auto& h = view->header();
   uint32_t mask = 0;
   uint32_t max_ptime_frames = 48;
-  std::set<int> played;  // ASIO output pairs used as a source
-  for (const auto& [dst, src] : cfg.routes) {
+  std::set<int> played;  // ASIO output pairs used as a source (routed or mixed)
+  for (const auto& src : played_sources(cfg)) {
     auto s = parse_source(src);
     if (s && s->kind == SourceKind::AsioOut) played.insert(s->index - 1);
   }
   for (int i = 0; i < kDeviceCount; ++i) {
     view->set_device_name(i, asio_label(cfg, i + 1));
-    auto route = cfg.routes.find("asio-in:" + std::to_string(i + 1));
-    const ResolvedSource src = resolve(cfg, rt, route == cfg.routes.end() ? std::string() : route->second);
+    const ResolvedSource src = resolve_dest(cfg, rt, "asio-in:" + std::to_string(i + 1));
     view->set_asio_route(i, src.kind, src.pair, src.delay);
     if (src.kind != ShmSource::None || played.count(i)) mask |= 1u << i;
     if (cfg.outputs[i].enabled) max_ptime_frames = std::max(max_ptime_frames, ptime_us_to_frames(cfg.outputs[i].ptime_us));
@@ -325,10 +417,13 @@ void Engine::Impl::publish_bridge_request(const Config& cfg, const RuntimeSet& r
   BridgeRequest req;
   for (const auto& [id, slot] : rt.win_slots) req.sources.push_back({slot, id});
   std::sort(req.sources.begin(), req.sources.end(), [](const auto& a, const auto& b) { return a.slot < b.slot; });
-  for (const auto& [dst, src] : cfg.routes) {
+  std::set<std::string> win_dests;  // routed or mixed Windows devices
+  for (const auto& [dst, src] : cfg.routes) win_dests.insert(dst);
+  for (const auto& [dst, mix] : cfg.mixes) win_dests.insert(dst);
+  for (const auto& dst : win_dests) {
     auto d = parse_dest(dst);
     if (!d || d->kind != DestKind::WinOut) continue;
-    const ResolvedSource r = resolve(cfg, rt, src);
+    const ResolvedSource r = resolve_dest(cfg, rt, dst);
     req.dests.push_back({dst, r.kind, r.pair, r.delay});
   }
   const std::string body = to_json(req);  // generation 0: compared without it
@@ -467,6 +562,16 @@ float Engine::Impl::source_peak(const std::string& source_id, const RuntimeSet& 
   return kSilenceDb;
 }
 
+float Engine::Impl::dest_peak(const Config& cfg, const RuntimeSet& rt, const std::string& dest_id, int side) const {
+  if (auto m = cfg.mixes.find(dest_id); m != cfg.mixes.end()) {
+    if (auto direct = direct_source(m->second)) return source_peak(*direct, rt, side);
+    auto bus = rt.mix_buses.find(dest_id);
+    return bus == rt.mix_buses.end() ? kSilenceDb : mixer.peak_db(bus->second, side);
+  }
+  auto route = cfg.routes.find(dest_id);
+  return route == cfg.routes.end() ? kSilenceDb : source_peak(route->second, rt, side);
+}
+
 // ---------------------------------------------------------------------------------------------
 
 Engine::Engine(EngineOptions opts) : impl_(std::make_unique<Impl>(std::move(opts))) {}
@@ -563,6 +668,7 @@ bool Engine::start(std::string* error) {
   if (m.opts.enable_ptp) m.threads.emplace_back([&m] { m.ptp_loop(); });
   m.threads.emplace_back([&m] { m.rx_loop(); });
   m.threads.emplace_back([&m] { m.tx_loop(); });
+  m.threads.emplace_back([&m] { m.mix_loop(); });
   m.threads.emplace_back([&m] { m.period_loop(); });
   if (m.opts.enable_sap) m.threads.emplace_back([&m] { m.sap_loop(); });
   m.threads.emplace_back([&m] { m.monitor_loop(); });
@@ -581,6 +687,7 @@ void Engine::stop() {
     std::lock_guard lock(m.runtime_mutex);
     m.runtime = std::make_shared<RuntimeSet>();
   }
+  m.mixer.set_plan({});  // its rings point into the shared memory released below
   if (m.view) {
     m.view->header().heartbeat.store(0);
     m.view->header().ptp_state.store(static_cast<uint32_t>(ShmPtpState::Listening));
@@ -634,6 +741,30 @@ ApplyResult Engine::set_route(const std::string& dest, const std::optional<std::
   }
   std::lock_guard lock(m.config_mutex);
   Config next = m.config;
+  if (auto mix = next.mixes.find(dest_id); mix != next.mixes.end()) {
+    // mix mode: a source toggles its membership, no source clears the mix
+    auto& sources = mix->second.sources;
+    std::string verb = "wyczyszczony";
+    if (source && !source->empty()) {
+      const std::string src_id = to_id(*parse_source(*source));
+      auto it = std::find_if(sources.begin(), sources.end(), [&](const MixSource& s) {
+        auto ps = parse_source(s.source);
+        return (ps ? to_id(*ps) : s.source) == src_id;
+      });
+      if (it != sources.end()) {
+        sources.erase(it);
+        verb = "− " + src_id;
+      } else {
+        sources.push_back({src_id, 0, false});
+        verb = "+ " + src_id;
+      }
+    } else {
+      sources.clear();
+    }
+    r = m.commit(std::move(next));
+    if (r.ok) log_info("Miks: " + dest_id + " " + verb);
+    return r;
+  }
   if (source && !source->empty()) {
     next.routes[dest_id] = *source;
   } else {
@@ -643,6 +774,63 @@ ApplyResult Engine::set_route(const std::string& dest, const std::optional<std::
   if (r.ok) {
     auto it = m.config.routes.find(dest_id);
     log_info("Routing: " + dest_id + " ← " + (it != m.config.routes.end() ? it->second : std::string("(brak)")));
+  }
+  return r;
+}
+
+ApplyResult Engine::set_mix(const std::string& dest, bool enabled, const std::optional<MixConfig>& mix,
+                            const std::optional<std::string>& keep) {
+  auto& m = *impl_;
+  ApplyResult r;
+  const auto parsed_dest = parse_dest(dest);
+  if (!parsed_dest) {
+    r.issues.push_back({0, "dst", "nieprawidłowy cel miksu: " + dest});
+    return r;
+  }
+  const std::string dest_id = to_id(*parsed_dest);
+  std::lock_guard lock(m.config_mutex);
+  Config next = m.config;
+  auto current = next.mixes.find(dest_id);
+  if (enabled) {
+    MixConfig mc;
+    if (mix) {
+      mc = *mix;
+    } else if (current != next.mixes.end()) {
+      mc = current->second;  // already mixing: nothing to change
+    } else if (auto route = next.routes.find(dest_id); route != next.routes.end()) {
+      mc.sources.push_back({route->second, 0, false});  // the route becomes the first member
+    }
+    next.routes.erase(dest_id);
+    next.mixes[dest_id] = std::move(mc);
+  } else {
+    std::optional<std::string> route;
+    if (keep && !keep->empty()) {
+      const auto ks = parse_source(*keep);
+      bool member = false;
+      if (ks && current != next.mixes.end())
+        for (const auto& s : current->second.sources) {
+          auto ps = parse_source(s.source);
+          if ((ps ? to_id(*ps) : s.source) == to_id(*ks)) member = true;
+        }
+      if (!member) {
+        r.issues.push_back({0, "keep", "źródło " + *keep + " nie należy do miksu " + dest_id});
+        return r;
+      }
+      route = to_id(*ks);
+    } else if (current != next.mixes.end() && current->second.sources.size() == 1) {
+      route = current->second.sources.front().source;
+    }
+    next.mixes.erase(dest_id);
+    if (route) next.routes[dest_id] = *route;
+  }
+  r = m.commit(std::move(next));
+  if (r.ok) {
+    if (enabled) {
+      log_info("Miks: " + dest_id + " włączony, źródeł: " + std::to_string(m.config.mixes.at(dest_id).sources.size()));
+    } else {
+      auto it = m.config.routes.find(dest_id);
+      log_info("Miks: " + dest_id + " wyłączony, routing ← " + (it != m.config.routes.end() ? it->second : std::string("(brak)")));
+    }
   }
   return r;
 }
@@ -709,6 +897,8 @@ ApplyResult Engine::remove_subscription(int index) {
       ++it;
     }
   }
+  for (auto& [dst, mix] : next.mixes)
+    std::erase_if(mix.sources, [&](const MixSource& s) { return s.source == id; });
   r = m.commit(std::move(next));
   if (r.ok) log_info("Usunięto subskrypcję " + two_digits(index));
   return r;
@@ -782,6 +972,7 @@ ApplyResult Engine::remove_output(int index) {
   next.outputs[index - 1] = default_config().outputs[index - 1];
   next.outputs[index - 1].enabled = false;
   next.routes.erase("net-out:" + std::to_string(index));
+  next.mixes.erase("net-out:" + std::to_string(index));
   r = m.commit(std::move(next));
   if (r.ok) log_info("Usunięto wyjście " + two_digits(index));
   return r;
@@ -810,6 +1001,7 @@ EngineStatus Engine::status() const {
     s.asio_buffer_frames = h.client_pid.load() != 0 ? h.buffer_frames.load() : 0;
   }
   s.bridge_connected = m.bridge_alive();
+  s.mixer_late = m.mixer.late();
   const bool client_recent = now - m.last_client_active_ns.load() < 1'000'000'000;
   std::vector<DiscoveredStream> discovered;
   {
@@ -837,7 +1029,7 @@ EngineStatus Engine::status() const {
           os.conflict = "adres " + o.address + " ogłasza też " + st.origin + " (" + st.name + ")";
       }
     }
-    for (int c = 0; c < 2; ++c) os.peak_db[c] = os.source.empty() ? kSilenceDb : m.source_peak(os.source, *snap, c);
+    for (int c = 0; c < 2; ++c) os.peak_db[c] = m.dest_peak(cfg, *snap, "net-out:" + std::to_string(os.index), c);
     s.outputs.push_back(std::move(os));
   }
 
@@ -870,9 +1062,15 @@ RoutingView Engine::routing() const {
   const Config cfg = config();
   const auto snap = m.snapshot();
   v.routes = cfg.routes;
+  v.mixes = cfg.mixes;
+  for (const auto& [dst, mix] : cfg.mixes) v.mix_delay_ms[dst] = m.resolve_dest(cfg, *snap, dst).delay / 48.0;
 
   auto peaks = [&](RouteNode& n, const std::string& source) {
     for (int c = 0; c < 2; ++c) n.peak_db[c] = source.empty() ? kSilenceDb : m.source_peak(source, *snap, c);
+  };
+  auto dest_peaks = [&](RouteNode& n) {
+    n.mix = cfg.mixes.count(n.id) > 0;
+    for (int c = 0; c < 2; ++c) n.peak_db[c] = m.dest_peak(cfg, *snap, n.id, c);
   };
 
   // ---- sources ----
@@ -881,13 +1079,13 @@ RoutingView Engine::routing() const {
     if (!sub.enabled) continue;
     const std::string id = "net-in:" + std::to_string(i + 1);
     const ResolvedSource r = m.resolve(cfg, *snap, id);
-    RouteNode n{id, sub.name.empty() ? "Subskrypcja " + two_digits(i + 1) : sub.name, "net", r.available, r.note, {}, {}};
+    RouteNode n{id, sub.name.empty() ? "Subskrypcja " + two_digits(i + 1) : sub.name, "net", r.available, r.note, {}, {}, false};
     peaks(n, id);
     v.sources.push_back(std::move(n));
   }
   for (int i = 0; i < kDeviceCount; ++i) {
     const std::string id = "asio-out:" + std::to_string(i + 1);
-    RouteNode n{id, asio_label(cfg, i + 1), "asio", true, {}, {}, {}};
+    RouteNode n{id, asio_label(cfg, i + 1), "asio", true, {}, {}, {}, false};
     peaks(n, id);
     v.sources.push_back(std::move(n));
   }
@@ -901,7 +1099,7 @@ RoutingView Engine::routing() const {
   std::vector<RouteNode> win_sources, win_dests;
   std::set<std::string> listed;
   auto win_node = [&](const std::string& id, const std::string& name) {
-    RouteNode n{id, name, "win", bridge, bridge ? std::string() : no_bridge, {}, {}};
+    RouteNode n{id, name, "win", bridge, bridge ? std::string() : no_bridge, {}, {}, false};
     if (auto it = slot_state.find(id); it != slot_state.end() && !it->second->ok) {
       n.available = false;
       n.note = it->second->reason;
@@ -921,8 +1119,7 @@ RoutingView Engine::routing() const {
     for (const auto& e : report->endpoints)
       if (auto vd = classify_virtual_device(e.name); vd && e.render && !vd->pair_key.empty())
         cable_render_ends.insert(vd->pair_key);
-    std::set<std::string> routed_sources;
-    for (const auto& [dst, src] : cfg.routes) routed_sources.insert(src);
+    const std::set<std::string> routed_sources = played_sources(cfg);
     for (const auto& e : report->endpoints) {
       const auto vd = classify_virtual_device(e.name);
       const std::string label = vd && !vd->cable.empty() ? vd->cable : e.name;
@@ -943,7 +1140,7 @@ RoutingView Engine::routing() const {
       }
     }
   }
-  for (const auto& [dst, src] : cfg.routes) {
+  for (const auto& src : played_sources(cfg)) {
     if (auto sp = parse_source(src); sp && is_windows(*sp) && listed.insert(src).second) {
       RouteNode n = win_node(src, sp->key);
       if (bridge && n.available) {
@@ -952,6 +1149,11 @@ RoutingView Engine::routing() const {
       }
       win_sources.push_back(std::move(n));
     }
+  }
+  std::set<std::string> played_dests;  // routed or mixed
+  for (const auto& [dst, src] : cfg.routes) played_dests.insert(dst);
+  for (const auto& [dst, mix] : cfg.mixes) played_dests.insert(dst);
+  for (const auto& dst : played_dests) {
     if (auto dp = parse_dest(dst); dp && is_windows(*dp) && listed.insert(dst).second) {
       RouteNode n = win_node(dst, dp->key);
       if (bridge) {
@@ -976,21 +1178,18 @@ RoutingView Engine::routing() const {
   for (int i = 0; i < kDeviceCount; ++i) {
     if (!cfg.outputs[i].enabled) continue;
     const std::string id = "net-out:" + std::to_string(i + 1);
-    RouteNode n{id, output_label(cfg, i + 1), "net", true, cfg.outputs[i].address, {}, {}};
-    auto it = cfg.routes.find(id);
-    peaks(n, it == cfg.routes.end() ? std::string() : it->second);
+    RouteNode n{id, output_label(cfg, i + 1), "net", true, cfg.outputs[i].address, {}, {}, false};
+    dest_peaks(n);
     v.dests.push_back(std::move(n));
   }
   for (int i = 0; i < kDeviceCount; ++i) {
     const std::string id = "asio-in:" + std::to_string(i + 1);
-    RouteNode n{id, asio_label(cfg, i + 1), "asio", true, {}, {}, {}};
-    auto it = cfg.routes.find(id);
-    peaks(n, it == cfg.routes.end() ? std::string() : it->second);
+    RouteNode n{id, asio_label(cfg, i + 1), "asio", true, {}, {}, {}, false};
+    dest_peaks(n);
     v.dests.push_back(std::move(n));
   }
   for (auto& n : win_dests) {
-    auto it = cfg.routes.find(n.id);
-    peaks(n, it == cfg.routes.end() ? std::string() : it->second);
+    dest_peaks(n);
     v.dests.push_back(std::move(n));
   }
   return v;
