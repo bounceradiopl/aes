@@ -754,7 +754,10 @@ $("#send-create").addEventListener("click", async () => {
   $("#send-sdp").value = r.data.sdp;
   sendStep(2);
 });
-$("#send-form").addEventListener("submit", (e) => { if (!$("#send-step1").hidden) { e.preventDefault(); $("#send-create").click(); } });
+// Enter in a field creates the output; Cancel / Close always leaves the dialog
+for (const id of ["#send-name", "#send-address"])
+  $(id).addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("#send-create").click(); } });
+$("#send-cancel").addEventListener("click", () => $("#dlg-send").close());
 $("#send-download").addEventListener("click", () => downloadSdp($("#send-sdp").value));
 $("#send-copy").addEventListener("click", () => copyText($("#send-sdp").value, $("#send-sdp")));
 $("#send-output").addEventListener("click", openSend);
