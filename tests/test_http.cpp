@@ -238,3 +238,54 @@ TEST_CASE("HTTP API: auth flow, config, SDP, panel, live feed") {
   CHECK(logout->status == 200);
   CHECK(f.client.Get("/api/config", f.auth())->status == 401);
 }
+
+TEST_CASE("HTTP API: a stale \"mixes\" in PUT /api/config leaves the live mixes alone; PUT /api/mixes checks types") {
+  Fixture f;
+  auto setup = f.client.Post("/api/setup", R"({"password":"tajnehaslo1"})", "application/json");
+  REQUIRE(setup);
+  REQUIRE(setup->status == 200);
+  f.login(setup->get_header_value("Set-Cookie"));
+
+  auto mix = f.client.Put("/api/mixes", f.auth(),
+                          json{{"dst", "asio-in:5"}, {"enabled", true},
+                               {"sources", json::array({{{"source", "asio-out:1"}, {"gain_db", -6}, {"mute", false}},
+                                                        {{"source", "asio-out:2"}, {"gain_db", 0}, {"mute", true}}})}}
+                              .dump(),
+                          "application/json");
+  REQUIRE(mix);
+  REQUIRE(mix->status == 200);
+
+  // a panel draft taken before the mute: other gains, nothing muted, plus a real change (a name)
+  const json stale = {{"outputs", json::array({json::object(), {{"name", "Nowa nazwa"}}})},
+                      {"mixes", {{"asio-in:5", {{"sources", json::array({{{"source", "asio-out:1"}, {"gain_db", 0}, {"mute", false}},
+                                                                         {{"source", "asio-out:2"}, {"gain_db", -12}, {"mute", false}}})}}},
+                                 {"asio-in:6", {{"sources", json::array({{{"source", "asio-out:3"}, {"gain_db", 0}, {"mute", false}}})}}}}}};
+  auto put = f.client.Put("/api/config", f.auth(), stale.dump(), "application/json");
+  REQUIRE(put);
+  CHECK(put->status == 200);
+  const auto cfg = f.engine->config();
+  CHECK(cfg.outputs[1].name == "Nowa nazwa");
+  CHECK(cfg.mixes.size() == 1);
+  REQUIRE(cfg.mixes.count("asio-in:5"));
+  const auto& m = cfg.mixes.at("asio-in:5").sources;
+  REQUIRE(m.size() == 2);
+  CHECK(m[0].gain_db == doctest::Approx(-6));
+  CHECK_FALSE(m[0].mute);
+  CHECK(m[1].gain_db == doctest::Approx(0));
+  CHECK(m[1].mute);
+
+  // gain_db / mute of the wrong type are rejected, not silently replaced by defaults
+  auto bad_gain = f.client.Put("/api/mixes", f.auth(),
+                               R"({"dst": "asio-in:5", "enabled": true, "sources": [{"source": "asio-out:1", "gain_db": "-6"}]})",
+                               "application/json");
+  REQUIRE(bad_gain);
+  CHECK(bad_gain->status == 400);
+  CHECK(json::parse(bad_gain->body)["error"].get<std::string>().find("gain_db") != std::string::npos);
+  auto bad_mute = f.client.Put("/api/mixes", f.auth(),
+                               R"({"dst": "asio-in:5", "enabled": true, "sources": [{"source": "asio-out:1", "mute": 1}]})",
+                               "application/json");
+  REQUIRE(bad_mute);
+  CHECK(bad_mute->status == 400);
+  CHECK(json::parse(bad_mute->body)["error"].get<std::string>().find("mute") != std::string::npos);
+  CHECK(f.engine->config().mixes.at("asio-in:5").sources.size() == 2);  // unchanged by the rejected requests
+}

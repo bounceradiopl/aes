@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <set>
 #include <sstream>
@@ -82,12 +83,12 @@ std::map<std::string, int> assign_windows_slots(const Config& cfg, const std::ma
   return slots;
 }
 
-// Destinations mixing more than a direct source get a mix bus; a mix that keeps existing keeps its
-// bus, so its consumers are not interrupted by changes elsewhere.
+// Every destination in mix mode gets a mix bus, even with a single member (no direct shortcut:
+// mix mode always has the same D_mix and the same fades). A mix that keeps existing keeps its bus,
+// so its consumers are not interrupted by changes elsewhere.
 std::map<std::string, int> assign_mix_buses(const Config& cfg, const std::map<std::string, int>& previous) {
   std::vector<std::string> mixed;
-  for (const auto& [dst, mix] : cfg.mixes)
-    if (!direct_source(mix)) mixed.push_back(dst);
+  for (const auto& [dst, mix] : cfg.mixes) mixed.push_back(dst);
   std::map<std::string, int> buses;
   std::set<int> taken;
   for (const auto& id : mixed) {
@@ -202,7 +203,6 @@ ResolvedSource Engine::Impl::resolve(const Config& cfg, const RuntimeSet& rt, co
 
 ResolvedSource Engine::Impl::resolve_dest(const Config& cfg, const RuntimeSet& rt, const std::string& dest_id) const {
   if (auto m = cfg.mixes.find(dest_id); m != cfg.mixes.end()) {
-    if (auto direct = direct_source(m->second)) return resolve(cfg, rt, *direct);
     ResolvedSource r;
     r.id = "mix:" + dest_id;
     auto bus = rt.mix_buses.find(dest_id);
@@ -227,6 +227,7 @@ std::vector<MixBusPlan> Engine::Impl::mix_plan(const Config& cfg, const RuntimeS
   for (const auto& [dest, bus] : rt.mix_buses) {
     MixBusPlan p;
     p.bus = bus;
+    p.owner = std::hash<std::string>{}(dest);
     p.out_left = view->mix_bus(bus * 2);
     p.out_right = view->mix_bus(bus * 2 + 1);
     for (const auto& s : cfg.mixes.at(dest).sources) {
@@ -563,8 +564,7 @@ float Engine::Impl::source_peak(const std::string& source_id, const RuntimeSet& 
 }
 
 float Engine::Impl::dest_peak(const Config& cfg, const RuntimeSet& rt, const std::string& dest_id, int side) const {
-  if (auto m = cfg.mixes.find(dest_id); m != cfg.mixes.end()) {
-    if (auto direct = direct_source(m->second)) return source_peak(*direct, rt, side);
+  if (cfg.mixes.count(dest_id)) {
     auto bus = rt.mix_buses.find(dest_id);
     return bus == rt.mix_buses.end() ? kSilenceDb : mixer.peak_db(bus->second, side);
   }
@@ -791,6 +791,7 @@ ApplyResult Engine::set_mix(const std::string& dest, bool enabled, const std::op
   std::lock_guard lock(m.config_mutex);
   Config next = m.config;
   auto current = next.mixes.find(dest_id);
+  const bool was_mixing = current != next.mixes.end();
   if (enabled) {
     MixConfig mc;
     if (mix) {
@@ -824,7 +825,7 @@ ApplyResult Engine::set_mix(const std::string& dest, bool enabled, const std::op
     if (route) next.routes[dest_id] = *route;
   }
   r = m.commit(std::move(next));
-  if (r.ok) {
+  if (r.ok && enabled != was_mixing) {  // the mode changed; gain and mute updates are not logged
     if (enabled) {
       log_info("Miks: " + dest_id + " włączony, źródeł: " + std::to_string(m.config.mixes.at(dest_id).sources.size()));
     } else {

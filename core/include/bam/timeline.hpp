@@ -18,6 +18,7 @@ class ChannelRing {
   ChannelRing(int32_t* samples, uint32_t* tags) : samples_(samples), tags_(tags) {}
 
   bool valid() const { return samples_ != nullptr; }
+  const int32_t* samples() const { return samples_; }  // identifies the ring (e.g. a mix member across plans)
   void write(uint64_t start, const int32_t* src, size_t count);  // src == nullptr writes silence
   void read(uint64_t start, int32_t* dst, size_t count) const;
 

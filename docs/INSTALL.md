@@ -132,13 +132,13 @@ Dla każdego źródła w oknie celu: suwak głośności **−60…+12 dB** (krok
 |---|---|
 | Limity | do **32 miksów** jednocześnie, do **16 źródeł** w jednym miksie |
 | Opóźnienie | opóźnienie najwolniejszego członka + 2 ms, np. ASIO (0 ms) + subskrypcja 5 ms ≈ **7 ms** |
-| Miks jednoźródłowy | dokładnie jedno niewyciszone źródło na 0 dB nie przechodzi przez mikser — zostaje połączeniem bezpośrednim, bit w bit, bez dodatkowego opóźnienia |
-| Wyciszanie | wyciszenie jednego źródła w miksie wielu źródeł nie przerywa dźwięku pozostałych |
+| Miks jednoźródłowy | Tryb miksu zawsze przechodzi przez szynę miksu: +2 ms względem najwolniejszego źródła, przy 0 dB bit w bit; chcesz zero dodatkowego opóźnienia — wyłącz miks (pojedyncze połączenie). |
+| Wyciszanie | wyciszenie jednego źródła w miksie wielu źródeł nie przerywa dźwięku pozostałych; głośność, wyciszenie, dodanie i usunięcie źródła przechodzą płynnie w 5 ms, bez trzasku |
 
 Zakładka **Statystyki** pokazuje licznik **Miks: spóźnienia** (przebiegi miksera, które nie zdążyły na czas) — powinien zostać na 0.
 
 ### Karty wielokanałowe Windows
-Urządzenie odtwarzające Windows z więcej niż dwoma kanałami (interfejs USB z kilkoma parami wyjść, karta 7.1 itp.) pojawia się w siatce jako kilka osobnych celów, po jednym na parę kanałów: „**Nazwa 1-2**”, „**Nazwa 3-4**”… Liczbę par wyznacza format głośników urządzenia w Windows (**Panel dźwięku → urządzenie → Konfiguruj** albo **Właściwości → Zaawansowane**) — urządzenie ustawione na stereo udostępnia tylko parę 1-2. Nagrywanie (przechwytywanie) z urządzeń wielokanałowych pozostaje stereo, zawsze para 1-2.
+Urządzenie odtwarzające Windows z więcej niż dwoma kanałami (interfejs USB z kilkoma parami wyjść, karta 7.1 itp.) pojawia się w siatce jako kilka osobnych celów, po jednym na parę kanałów: „**Nazwa 1-2**”, „**Nazwa 3-4**”… Liczbę par wyznacza format głośników urządzenia w Windows (**Panel dźwięku → urządzenie → Konfiguruj** albo **Właściwości → Zaawansowane**) — urządzenie ustawione na stereo udostępnia tylko parę 1-2. Nagrywanie (przechwytywanie) z urządzeń wielokanałowych pozostaje stereo, zawsze para 1-2. Wszystkie pary jednej karty grają jednym strumieniem urządzenia: zmiana routingu jednej pary krótko przerywa pozostałe pary tej karty (restart strumienia urządzenia); inne urządzenia grają bez przerwy.
 
 ### Audio Windows
 Źródła i cele Windows obsługuje **BounceAES Audio Bridge**, uruchamiany przez ikonę w zasobniku w sesji zalogowanego użytkownika (usługa Windows nie ma dostępu do dźwięku użytkownika). Bez zalogowanego użytkownika panel pokazuje „Audio Windows: brak sesji użytkownika”; AoIP i ASIO działają dalej. Urządzenia Windows mają własny zegar, więc bridge dopasowuje je do zegara PTP resamplerem (±1000 ppm).

@@ -343,17 +343,29 @@ async function setRoute(dst, src) {
   if (!r.ok) { toast(issuesText(r, "Nie można zmienić połączenia"), "err"); return false; }
   for (const n of r.data.notices || []) toast(n, "warn");
   state.routing = r.data.routing;
-  syncRoutes(r.data.routing.routes);
+  syncRoutes(r.data.routing);
   renderMatrix();
   if ($("#dlg-virtual").open) renderVirtual();
   return true;
 }
 
-// Routes change immediately (routing tab), so both the saved config and the draft follow them.
-function syncRoutes(routes) {
-  if (state.config) state.config.routes = clone(routes);
-  if (state.draft) state.draft.routes = clone(routes);
+// The routing view's mixes (dst → members) in the configuration's shape (dst → {sources}).
+function configMixes(routing) {
+  return Object.fromEntries(Object.entries(routing.mixes || {}).map(([dst, list]) =>
+    [dst, { sources: list.map((m) => ({ source: m.source, gain_db: m.gain_db, mute: m.mute })) }]));
+}
+
+// Routes and mixes change immediately (routing tab, destination dialog), so both the saved config
+// and the draft follow them; a later "Zapisz" never sends them back stale.
+function syncRoutes(routing) {
+  const mixes = configMixes(routing);
+  if (state.config) { state.config.routes = clone(routing.routes); state.config.mixes = clone(mixes); }
+  if (state.draft) { state.draft.routes = clone(routing.routes); state.draft.mixes = clone(mixes); }
   if (state.draft) renderOutputs();
+}
+
+function mixCountText(members) {
+  return `miks (${members.length} ${plural(members.length, "źródło", "źródła", "źródeł")})`;
 }
 
 // ---------------------------------------------------------------- virtual sound cards
@@ -373,14 +385,22 @@ function renderVirtual() {
       : "Nie wykryto wirtualnej karty. Zainstaluj darmowy VB-CABLE (vb-audio.com/Cable) jako administrator, uruchom komputer ponownie i ustaw CABLE Input oraz CABLE Output na 48 000 Hz."));
     return;
   }
-  const feeding = (src) => outputs.filter((o) => v.routes[o.id] === src).map((o) => o.name);
-  const option = (value, text) => el("option", { value }, text);
+  const mixes = v.mixes || {};
+  const inMix = (dst, src) => (mixes[dst] || []).some((m) => m.source === src);
+  const feeding = (src) => outputs.filter((o) => v.routes[o.id] === src || inMix(o.id, src))
+    .map((o) => (mixes[o.id] ? `${o.name} (miks)` : o.name));
+  const option = (value, text, disabled = false) => el("option", { value, disabled }, text);
+  // An output in mix mode is not free: sending to it here would silently add or remove a mix
+  // member (or clear the mix), so it is listed but cannot be picked; its dialog edits the mix.
+  const pickable = outputs.filter((o) => !mixes[o.id]);
 
   const sendRows = vSources.map((n) => {
     const sel = el("select", { "aria-label": `Wyjście AoIP dla ${n.name}` },
-      ...outputs.map((o) => option(o.id, v.routes[o.id] && v.routes[o.id] !== n.id ? `${o.name} — teraz gra ${sourceLabel(v.routes[o.id])}` : o.name)));
-    // preselect an output this card already feeds, else a free one
-    const pick = outputs.find((o) => v.routes[o.id] === n.id) || outputs.find((o) => !v.routes[o.id]);
+      ...outputs.map((o) => mixes[o.id]
+        ? option(o.id, `${o.name} — miks (zmiana w oknie wyjścia)`, true)
+        : option(o.id, v.routes[o.id] && v.routes[o.id] !== n.id ? `${o.name} — teraz gra ${sourceLabel(v.routes[o.id])}` : o.name)));
+    // preselect an output this card already feeds, else a free one (never a mixed one)
+    const pick = pickable.find((o) => v.routes[o.id] === n.id) || pickable.find((o) => !v.routes[o.id]) || pickable[0];
     if (pick) sel.value = pick.id;
     const now = feeding(n.id);
     const send = el("button", { type: "button", class: "mini primary", onclick: () => setRoute(sel.value, n.id) }, "Wysyłaj");
@@ -391,10 +411,18 @@ function renderVirtual() {
     return el("tr", {},
       el("td", {}, n.name, el("div", { class: "hint" }, n.virtual)),
       el("td", {}, now.length ? now.join(", ") : el("span", { class: "hint" }, "—")),
-      el("td", {}, outputs.length ? sel : el("span", { class: "hint" }, "brak włączonych wyjść")),
-      el("td", { class: "actions" }, outputs.length ? send : null, outputs.length ? stop : null));
+      el("td", {}, !outputs.length ? el("span", { class: "hint" }, "brak włączonych wyjść")
+        : !pickable.length ? el("span", { class: "hint" }, "wszystkie wyjścia AoIP są w trybie miksu") : sel),
+      el("td", { class: "actions" }, pickable.length ? send : null, pickable.length ? stop : null));
   });
   const recvRows = vDests.map((d) => {
+    if (mixes[d.id]) {
+      // in mix mode: "Odbieraj" / "Rozłącz" would toggle or clear members; the destination dialog edits the mix
+      return el("tr", {},
+        el("td", {}, d.name, el("div", { class: "hint" }, d.virtual)),
+        el("td", {}, mixCountText(mixes[d.id])),
+        el("td", { colSpan: 2, class: "hint" }, "tryb miksu — zmiana w oknie celu (kliknij nazwę w siatce)"));
+    }
     const cur = v.routes[d.id];
     const sel = el("select", { "aria-label": `Źródło dla ${d.name}` }, ...netSources.map((s) => option(s.id, s.name)));
     if (cur && netSources.some((s) => s.id === cur)) sel.value = cur;
@@ -522,7 +550,7 @@ function renderOutputs() {
       el("td", {}, ptime),
       el("td", {}, el("input", { type: "checkbox", checked: o.keep_active, "aria-label": `Utrzymuj wyjście ${pad2(n)}`, onchange: (e) => set("keep_active", e.target.checked) })),
       el("td", {}, mixMembers
-        ? el("span", {}, `miks (${mixMembers.length} ${plural(mixMembers.length, "źródło", "źródła", "źródeł")})`)
+        ? el("span", {}, mixCountText(mixMembers))
         : el("a", { class: "route-link" + (src ? "" : " none"), href: "#routing", title: src || "" }, src ? sourceName(src) : "brak")),
       el("td", {}, meter(`out-${n}`)));
     tbody.append(row);
@@ -571,11 +599,12 @@ function deleteButton(id, label) {
 
 // A change the server already saved (add / remove): keep unsaved edits of other rows.
 function applyServerChange(fresh, kind, i) {
-  const dirty = JSON.stringify(state.draft) !== JSON.stringify(state.config);
+  const dirty = draftDirty();
   state.config = fresh;
   if (dirty) {
     state.draft[kind][i] = clone(fresh[kind][i]);
     state.draft.routes = clone(fresh.routes);
+    state.draft.mixes = clone(fresh.mixes);
   } else {
     state.draft = clone(fresh);
   }
@@ -598,9 +627,15 @@ function renderConfig() {
   markDirty();
 }
 
+// Unsaved edits in Konfiguracja. Mixes are not edited there (they change at once in Routing and are
+// never sent with "Zapisz"), so they never make the draft dirty.
+function draftDirty() {
+  const strip = (c) => JSON.stringify({ ...c, mixes: undefined });
+  return strip(state.draft) !== strip(state.config);
+}
+
 function markDirty() {
-  const dirty = JSON.stringify(state.draft) !== JSON.stringify(state.config);
-  $("#savebar").classList.toggle("hidden", !dirty);
+  $("#savebar").classList.toggle("hidden", !draftDirty());
 }
 
 $("#discard").addEventListener("click", () => {
@@ -613,6 +648,7 @@ $("#save").addEventListener("click", async () => {
   const body = clone(state.draft);
   // routes are merged on the server: removed routes are sent as null
   for (const dst of Object.keys(state.config.routes)) if (!(dst in body.routes)) body.routes[dst] = null;
+  delete body.mixes;  // mixes change only through Routing (PUT /api/mixes); the server ignores them here too
   const r = await api("/api/config", { method: "PUT", body: JSON.stringify(body) });
   state.issues = r.data?.issues || [];
   if (!r.ok) {
@@ -872,9 +908,6 @@ function destFacts(n) {
   return [["Typ", types[n.group] || n.group]];
 }
 
-// Matches core's direct_source(): a mix with exactly one unmuted member at 0 dB plays without a bus.
-function mixIsDirect(members) { return members.length === 1 && !members[0].mute && members[0].gain_db === 0; }
-
 function fmtDb(v) { return `${Number(v).toFixed(1).replace(".", ",")} dB`; }
 function fmtMs(ms) { return `${Number(ms).toLocaleString("pl-PL", { maximumFractionDigits: 1 })} ms`; }
 
@@ -931,9 +964,8 @@ function renderDestPlainActions() {
 
 function renderMixRows(id) {
   const members = state.routing.mixes[id] || [];
-  const direct = mixIsDirect(members);
-  $("#dest-mix-delay").textContent =
-    `Opóźnienie miksu: ${direct ? "0 ms (połączenie bezpośrednie)" : fmtMs(state.routing.mix_delay_ms[id] || 0)}`;
+  // mix mode always plays through the mix bus, even with one member: +2 ms over its slowest source
+  $("#dest-mix-delay").textContent = `Opóźnienie miksu: ${fmtMs(state.routing.mix_delay_ms[id] || 0)}`;
   const tbody = $("#dest-mix-rows");
   if (!members.length) {
     tbody.replaceChildren(el("tr", {}, el("td", { colSpan: 5, class: "hint" }, "Brak źródeł — kliknij kratkę w siatce, aby dodać.")));
@@ -1074,7 +1106,7 @@ async function setMix(dst, enabled, sources, keep, pendingRef) {
     state.mixPending = null;
   }
   state.routing = routing;
-  syncRoutes(routing.routes);
+  syncRoutes(routing);
   renderMatrix();
   if ($("#dlg-dest").open) renderDest(dst);
   return true;
@@ -1193,11 +1225,13 @@ function renderStats() {
   const cell = (v, bad) => el("td", { class: bad ? "bad" : "" }, fmtNumber(v));
   $("#stats-out-rows").replaceChildren(...live.outputs.map((d) => {
     const c = d.c;
-    const src = state.config?.routes[`net-out:${d.i}`];
+    const id = `net-out:${d.i}`;
+    const src = state.config?.routes[id];
+    const mix = state.routing?.mixes ? state.routing.mixes[id] : state.config?.mixes?.[id]?.sources;
     return el("tr", {},
       el("td", { class: "c-num" }, pad2(d.i)),
       el("td", {}, state.config?.outputs[d.i - 1]?.name || ""),
-      el("td", { class: "src-cell" }, src ? sourceName(src) : "—"),
+      el("td", { class: "src-cell" }, mix ? mixCountText(mix) : src ? sourceName(src) : "—"),
       cell(c.tx_packets), cell(c.tx_bytes), cell(c.tx_errors, c.tx_errors > 0),
       el("td", {}, el("span", { class: "dot" + (d.tx ? " on" : "") })));
   }));

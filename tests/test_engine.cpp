@@ -13,6 +13,7 @@
 #include "bam/asio_bridge.hpp"
 #include "bam/bridge_protocol.hpp"
 #include "bam/engine.hpp"
+#include "bam/log.hpp"
 #include "bam/platform/event.hpp"
 #include "bam/platform/process.hpp"
 #include "bam/platform/shm.hpp"
@@ -574,7 +575,7 @@ TEST_CASE("engine mixes two ASIO pairs onto an AoIP output and onto an ASIO inpu
   CHECK(v.mix_delay_ms.at("net-out:1") == doctest::Approx(2.0));
 }
 
-TEST_CASE("engine: a one-source 0 dB mix is a direct route, mix mode toggles membership") {
+TEST_CASE("engine: a one-source 0 dB mix plays through its bus bit-exact, mix mode toggles membership") {
   TestEngine t;
   t.start();
   REQUIRE(t.engine->set_route("asio-in:3", std::string("asio-out:1")).ok);
@@ -586,8 +587,10 @@ TEST_CASE("engine: a one-source 0 dB mix is a direct route, mix mode toggles mem
   host.run(300'000'000);
   auto rec = host.asio_input(2, 0);
   int bad = 0;
-  for (uint32_t i = 0; i < 128; ++i) bad += rec[i] != ramp_value(host.last_start - 128 + i, 0);  // no D_mix: direct
+  // mix mode always uses the bus: D_mix = member D (0) + 96, and a 0 dB member passes bit for bit
+  for (uint32_t i = 0; i < 128; ++i) bad += rec[i] != ramp_value(host.last_start - 128 - 96 + i, 0);
   CHECK(bad == 0);
+  CHECK(t.engine->routing().mix_delay_ms.at("asio-in:3") == doctest::Approx(2.0));
   REQUIRE(t.engine->set_route("asio-in:3", std::string("asio-out:2")).ok);  // mix mode: adds
   CHECK(t.engine->config().mixes.at("asio-in:3").sources.size() == 2);
   REQUIRE(t.engine->set_route("asio-in:3", std::string("asio-out:1")).ok);  // removes
@@ -613,6 +616,14 @@ TEST_CASE("engine sends a mix to a Windows device as a mix bus") {
   CHECK(req->dests[0].delay_frames == 96);
   CHECK(req->dests[0].channel_pair == 2);
   const int bus = req->dests[0].pair;
+  auto mix_log_lines = [&] {
+    int n = 0;
+    for (const auto& e : bam::Logger::instance().recent())
+      if (e.message.rfind("Miks: " + dst, 0) == 0) ++n;
+    return n;
+  };
+  const int logged = mix_log_lines();
+  CHECK(logged >= 1);  // switching mix mode on is logged
   // muting a member keeps the destination on its bus at the same D_mix (no reroute, no gap)
   REQUIRE(t.engine->set_mix(dst, true, bam::MixConfig{{{"asio-out:1", 0, false}, {"asio-out:2", -6, true}}}, std::nullopt).ok);
   req = bam::request_from_json(host.view->read_request(nullptr));
@@ -628,6 +639,9 @@ TEST_CASE("engine sends a mix to a Windows device as a mix bus") {
   REQUIRE(req);
   REQUIRE(req->dests.size() == 1);
   CHECK(req->dests[0].pair == bus);
+  CHECK(mix_log_lines() == logged);  // gain and mute updates are not logged
+  REQUIRE(t.engine->set_mix(dst, false, std::nullopt, std::string("asio-out:1")).ok);
+  CHECK(mix_log_lines() == logged + 1);  // switching it off is
 }
 
 TEST_CASE("engine routing view: a multichannel Windows render device gets one destination per channel pair") {

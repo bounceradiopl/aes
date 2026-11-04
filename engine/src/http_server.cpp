@@ -191,6 +191,9 @@ struct HttpServer::Impl {
       if (!body->is_object()) return send_error(res, 400, "oczekiwano obiektu JSON");
       json patch = *body;
       patch.erase("version");
+      // Mixes change only through PUT /api/mixes and PUT /api/routing: a configuration draft the panel
+      // took earlier would otherwise put back gains and mutes changed since then (or a removed mix).
+      patch.erase("mixes");
       // outputs, subscriptions and asio_names are matched by position; each entry is merged onto
       // the current one, so a client may send only the entries (and fields) it changes.
       json current = json::parse(config_to_json(engine.config()));
@@ -291,8 +294,14 @@ struct HttpServer::Impl {
           if (!sj.is_object() || !sj.contains("source") || !sj["source"].is_string()) return send_error(res, 400, "nieprawidłowe źródło miksu");
           MixSource s;
           s.source = sj["source"].get<std::string>();
-          if (sj.contains("gain_db") && sj["gain_db"].is_number()) s.gain_db = sj["gain_db"].get<double>();
-          if (sj.contains("mute") && sj["mute"].is_boolean()) s.mute = sj["mute"].get<bool>();
+          if (sj.contains("gain_db")) {
+            if (!sj["gain_db"].is_number()) return send_error(res, 400, "\"gain_db\" źródła miksu musi być liczbą (dB)");
+            s.gain_db = sj["gain_db"].get<double>();
+          }
+          if (sj.contains("mute")) {
+            if (!sj["mute"].is_boolean()) return send_error(res, 400, "\"mute\" źródła miksu musi być wartością true albo false");
+            s.mute = sj["mute"].get<bool>();
+          }
           m.sources.push_back(std::move(s));
         }
         mix = std::move(m);
