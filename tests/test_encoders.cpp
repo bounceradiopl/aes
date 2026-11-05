@@ -689,6 +689,80 @@ TEST_CASE("encoders: FLAC open again starts a new Ogg logical stream") {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Complete Ogg pages at the start of `data` (a stream that starts on a page boundary).
+size_t complete_ogg_pages(const std::vector<uint8_t>& data, bool* eos = nullptr) {
+  size_t pos = 0, pages = 0;
+  while (pos + 27 <= data.size() && std::memcmp(data.data() + pos, "OggS", 4) == 0) {
+    const size_t segs = data[pos + 26];
+    if (pos + 27 + segs > data.size()) break;
+    size_t len = 27 + segs;
+    for (size_t i = 0; i < segs; ++i) len += data[pos + 27 + i];
+    if (pos + len > data.size()) break;
+    if (eos) *eos = (data[pos + 5] & 0x04) != 0;
+    pos += len;
+    ++pages;
+  }
+  return pages;
+}
+
+TEST_CASE("encoders: Ogg FLAC sends a page at least every 300 ms, also on digital silence") {
+  SKIP_UNLESS_AVAILABLE(be::Codec::Flac);
+  // Icecast drops a source that sends nothing for 10 s (source-timeout): a silent FLAC stream
+  // must still go out page by page, not in ~4 KB pages every ~20 s.
+  for (const uint32_t rate : {48000u, 22050u}) {
+    CAPTURE(rate);
+    auto enc = be::make_encoder(be::Codec::Flac);
+    REQUIRE(enc);
+    std::string err;
+    REQUIRE(enc->open({be::Codec::Flac, 0, rate}, &err));
+    std::vector<uint8_t> out;
+    const std::vector<float> silence(size_t(rate / 100) * 2, 0.0f);  // 10 ms
+    enc->encode(silence.data(), 0, out);
+    const size_t header_pages = complete_ogg_pages(out);
+    CHECK(header_pages >= 2);  // the header is there right after open()
+    size_t pages = header_pages, fed = 0, last_page_at = 0, longest = 0;
+    for (int i = 0; i < 1000; ++i) {  // 10 s
+      enc->encode(silence.data(), rate / 100, out);
+      fed += rate / 100;
+      const size_t now = complete_ogg_pages(out);
+      if (now > pages) {
+        longest = std::max(longest, fed - last_page_at);
+        last_page_at = fed;
+        pages = now;
+      }
+    }
+    longest = std::max(longest, fed - last_page_at);
+    MESSAGE(rate << " Hz: " << (pages - header_pages) << " audio pages in 10 s, longest wait " << longest * 1000 / rate << " ms");
+    // a page once 250 ms are pending, so at most 250 ms + one 4096-frame block (48 kHz: 256 ms)
+    CHECK(longest * 1000 <= size_t(rate) * 250 + 4096 * 1000);
+    if (rate == 48000) CHECK(longest * 1000 <= size_t(rate) * 300);
+    enc->flush(out);
+    bool eos = false;
+    complete_ogg_pages(out, &eos);
+    CHECK(eos);  // the last page ends the logical stream
+    const auto dec = decode_ogg_flac(out);
+    CHECK(dec.sample_rate == rate);
+    REQUIRE(dec.samples.size() == fed * 2);
+    CHECK(std::all_of(dec.samples.begin(), dec.samples.end(), [](int32_t v) { return v == 0; }));
+  }
+  // a stream of whole 4096-frame blocks: flush() has no last frame left, the stream still ends
+  auto enc = be::make_encoder(be::Codec::Flac);
+  std::string err;
+  REQUIRE(enc->open({be::Codec::Flac, 0, 48000}, &err));
+  const auto ref = noise16(4096 * 3, 2, 5);
+  const auto pcm = to_float(ref);
+  std::vector<uint8_t> out;
+  enc->encode(pcm.data(), 4096 * 3, out);
+  enc->flush(out);
+  bool eos = false;
+  complete_ogg_pages(out, &eos);
+  CHECK(eos);
+  const auto dec = decode_ogg_flac(out);
+  CHECK_FALSE(dec.error);
+  REQUIRE(dec.samples.size() == ref.size());
+  CHECK(std::equal(ref.begin(), ref.end(), dec.samples.begin()));
+}
+
 TEST_CASE("encoders: MP3 128 kb/s at 44.1 kHz, CBR frames, decoded sine level and correlation") {
   SKIP_UNLESS_AVAILABLE(be::Codec::Mp3);
   const uint32_t rate = 44100;
