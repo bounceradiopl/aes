@@ -131,8 +131,8 @@ Dla każdego źródła w oknie celu: suwak głośności **−60…+12 dB** (krok
 | | |
 |---|---|
 | Limity | do **32 miksów** jednocześnie, do **16 źródeł** w jednym miksie |
-| Opóźnienie | opóźnienie najwolniejszego członka + 2 ms, np. ASIO (0 ms) + subskrypcja 5 ms ≈ **7 ms** |
-| Miks jednoźródłowy | Tryb miksu zawsze przechodzi przez szynę miksu: +2 ms względem najwolniejszego źródła, przy 0 dB bit w bit; chcesz zero dodatkowego opóźnienia — wyłącz miks (pojedyncze połączenie). |
+| Opóźnienie | opóźnienie najwolniejszego członka + 4 ms, np. ASIO (0 ms) + subskrypcja 5 ms ≈ **9 ms** |
+| Miks jednoźródłowy | Tryb miksu zawsze przechodzi przez szynę miksu: +4 ms względem najwolniejszego źródła, przy 0 dB bit w bit; chcesz zero dodatkowego opóźnienia — wyłącz miks (pojedyncze połączenie). |
 | Wyciszanie | wyciszenie jednego źródła w miksie wielu źródeł nie przerywa dźwięku pozostałych; głośność, wyciszenie, dodanie i usunięcie źródła przechodzą płynnie w 5 ms, bez trzasku |
 
 Zakładka **Statystyki** pokazuje licznik **Miks: spóźnienia** (przebiegi miksera, które nie zdążyły na czas) — powinien zostać na 0.

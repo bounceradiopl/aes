@@ -2,6 +2,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <random>
 #include <vector>
 
 #include "bam/mixer.hpp"
@@ -262,4 +263,62 @@ TEST_CASE("mixer: a bus taken over by another destination starts clean") {
   for (int32_t v : got) a_audio += v < 0;
   CHECK(a_audio == 0);  // nothing of A's mix left in what B plays
   CHECK(got.back() == 0x20000000);
+}
+
+// The real mix_loop (engine/src/stream_workers.cpp) wakes process() on a fixed 1 ms schedule, but
+// under OS scheduling jitter the wake can land late; process() then drains every outstanding
+// block at once, so the mixer itself always catches up. The danger is the consumer: it never
+// calls process(), it just reads D_mix = max_delay + kMixMarginFrames behind its own clock,
+// whenever it likes. If the margin does not comfortably exceed the mixer thread's wake-up
+// jitter, a read landing just before the mixer's next, late wake-up finds frames not yet mixed
+// (ruling R16: this is what Windows CI's mixer_late counter caught at kMixMarginFrames == 96).
+TEST_CASE("mixer stays ahead of the margin through a jittered mixer-thread wake-up") {
+  Ring ml, mr, ol, orr;
+  constexpr int32_t kValue = 0x11223300;  // a constant, non-zero, non-clipping member signal
+  const std::vector<int32_t> loud(54000, kValue);  // covers the whole run, one ring lap (< 65536)
+  ml.ring().write(0, loud.data(), loud.size());
+  mr.ring().write(0, loud.data(), loud.size());
+  bam::Mixer mixer;
+  bam::MixBusPlan p;
+  p.out_left = ol.ring();
+  p.out_right = orr.ring();
+  constexpr uint32_t kMemberDelay = 240;  // 5 ms: a plausible D_src for a mixed member
+  p.inputs = {{ml.ring(), mr.ring(), 1.0, kMemberDelay}};
+  p.max_delay = kMemberDelay;
+  mixer.set_plan({p});
+
+  std::mt19937 rng(7);  // deterministic: same wake-up sequence every run
+  // The wake-up lateness itself drifts from one wake to the next (a loaded scheduler's jitter
+  // does not jump between "on time" and "2.5 ms late" from one 1 ms tick to the next); model it
+  // as a bounded walk within [0, 2.5] ms, each step at most 0.6 ms.
+  std::uniform_real_distribution<double> jitter_step_ms(-0.6, 0.6);
+  constexpr double kMaxJitterMs = 2.5;
+  constexpr double kPeriodMs = 1.0;  // mix_loop's nominal cadence
+  constexpr double kFramesPerMs = 48.0;
+  constexpr uint64_t kStart = 4000;  // clear of frame 0 so "now - delay - margin" never underflows
+  constexpr int kWakes = 1000;       // ~1 s of simulated mixer-thread wakes
+
+  double schedule_ms = 0.0, jitter_ms = 0.0;
+  uint64_t checks = 0, bad_reads = 0;
+  for (int i = 0; i < kWakes; ++i) {
+    schedule_ms += kPeriodMs;  // the nominal schedule never slips, however late a wake lands
+    jitter_ms = std::clamp(jitter_ms + jitter_step_ms(rng), 0.0, kMaxJitterMs);
+    const uint64_t now = kStart + static_cast<uint64_t>((schedule_ms + jitter_ms) * kFramesPerMs);
+    // Skip the member's own join fade-in (kMixRampFrames, unrelated to the margin under test):
+    // past that, a 0 dB member plays bit-exact and any mismatch is purely a margin/jitter miss.
+    if (i > 20) {
+      // The consumer reads at the single most adversarial instant of the gap just ending: the
+      // moment right before this (possibly late) wake finally catches the mix up.
+      const uint64_t consumer_now = now - 1;
+      const uint64_t pos = consumer_now - kMemberDelay - bam::kMixMarginFrames;
+      int32_t v = 0;
+      ol.ring().read(pos, &v, 1);
+      ++checks;
+      if (v != kValue) ++bad_reads;
+    }
+    mixer.process(now, 1);
+  }
+  MESSAGE(checks << " consumer reads at the margin, " << bad_reads << " not yet mixed; late() = " << mixer.late());
+  CHECK(bad_reads == 0);
+  CHECK(mixer.late() == 0);
 }

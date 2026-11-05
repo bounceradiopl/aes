@@ -15,7 +15,11 @@
 
 namespace bam {
 
-inline constexpr uint32_t kMixMarginFrames = 96;  // 2 ms: a mix is ready this long after its slowest member
+inline constexpr uint32_t kMixMarginFrames = 192;  // 4 ms: a mix is ready this long after its slowest member
+// margin - block(48) = 144 frames (~3 ms) of slack for the mixer thread's wake-up scheduling
+// jitter (engine/src/stream_workers.cpp mix_loop, 1 ms cadence); 96 (2 ms, 1 ms slack) was not
+// enough for Windows timer jitter on a loaded CI runner (ruling R16: Windows CI saw mixer_late > 0
+// and consumers reading frames not yet mixed; Linux/macOS, with tighter scheduling, did not).
 inline constexpr uint32_t kMixRampFrames = 240;   // 5 ms: gain, mute, join and leave fade over this long
 
 struct MixInput {

@@ -14,6 +14,7 @@
 #include "bam/bridge_protocol.hpp"
 #include "bam/engine.hpp"
 #include "bam/log.hpp"
+#include "bam/mixer.hpp"
 #include "bam/platform/event.hpp"
 #include "bam/platform/process.hpp"
 #include "bam/platform/shm.hpp"
@@ -558,21 +559,21 @@ TEST_CASE("engine mixes two ASIO pairs onto an AoIP output and onto an ASIO inpu
   REQUIRE(t.engine->set_mix("asio-in:4", true, bam::MixConfig{{{"asio-out:1", 0, false}, {"asio-out:2", 0, false}}}, std::nullopt).ok);
   FakeAsioHost host(t);
   host.run(1'500'000'000);
-  // the subscription carries ramp(pair 1) + ramp(pair 2), D_mix (96) behind
+  // the subscription carries ramp(pair 1) + ramp(pair 2), D_mix (kMixMarginFrames) behind
   const uint64_t from = host.last_start - 30000;
   std::vector<int32_t> l(10000);
   host.view->net_in(0).read(from, l.data(), l.size());
   int bad = 0;
-  for (size_t i = 0; i < l.size(); ++i) bad += l[i] != l24(mix_sum(from + i - 96, 0, 2));
+  for (size_t i = 0; i < l.size(); ++i) bad += l[i] != l24(mix_sum(from + i - bam::kMixMarginFrames, 0, 2));
   CHECK(bad == 0);
   auto rec = host.asio_input(3, 0);
   bad = 0;
-  for (uint32_t i = 0; i < 128; ++i) bad += rec[i] != mix_sum(host.last_start - 128 - 96 + i, 0, 2);
+  for (uint32_t i = 0; i < 128; ++i) bad += rec[i] != mix_sum(host.last_start - 128 - bam::kMixMarginFrames + i, 0, 2);
   CHECK(bad == 0);
   CHECK(t.engine->status().mixer_late == 0);
   auto v = t.engine->routing();
   CHECK(v.mixes.count("net-out:1"));
-  CHECK(v.mix_delay_ms.at("net-out:1") == doctest::Approx(2.0));
+  CHECK(v.mix_delay_ms.at("net-out:1") == doctest::Approx(bam::kMixMarginFrames / 48.0));
 }
 
 TEST_CASE("engine: a one-source 0 dB mix plays through its bus bit-exact, mix mode toggles membership") {
@@ -587,10 +588,10 @@ TEST_CASE("engine: a one-source 0 dB mix plays through its bus bit-exact, mix mo
   host.run(300'000'000);
   auto rec = host.asio_input(2, 0);
   int bad = 0;
-  // mix mode always uses the bus: D_mix = member D (0) + 96, and a 0 dB member passes bit for bit
-  for (uint32_t i = 0; i < 128; ++i) bad += rec[i] != ramp_value(host.last_start - 128 - 96 + i, 0);
+  // mix mode always uses the bus: D_mix = member D (0) + kMixMarginFrames, and a 0 dB member passes bit for bit
+  for (uint32_t i = 0; i < 128; ++i) bad += rec[i] != ramp_value(host.last_start - 128 - bam::kMixMarginFrames + i, 0);
   CHECK(bad == 0);
-  CHECK(t.engine->routing().mix_delay_ms.at("asio-in:3") == doctest::Approx(2.0));
+  CHECK(t.engine->routing().mix_delay_ms.at("asio-in:3") == doctest::Approx(bam::kMixMarginFrames / 48.0));
   REQUIRE(t.engine->set_route("asio-in:3", std::string("asio-out:2")).ok);  // mix mode: adds
   CHECK(t.engine->config().mixes.at("asio-in:3").sources.size() == 2);
   REQUIRE(t.engine->set_route("asio-in:3", std::string("asio-out:1")).ok);  // removes
@@ -613,7 +614,7 @@ TEST_CASE("engine sends a mix to a Windows device as a mix bus") {
   REQUIRE(req->dests.size() == 1);
   CHECK(req->dests[0].id == dst);
   CHECK(req->dests[0].kind == bam::ShmSource::Mix);
-  CHECK(req->dests[0].delay_frames == 96);
+  CHECK(req->dests[0].delay_frames == bam::kMixMarginFrames);
   CHECK(req->dests[0].channel_pair == 2);
   const int bus = req->dests[0].pair;
   auto mix_log_lines = [&] {
@@ -631,7 +632,7 @@ TEST_CASE("engine sends a mix to a Windows device as a mix bus") {
   REQUIRE(req->dests.size() == 1);
   CHECK(req->dests[0].kind == bam::ShmSource::Mix);
   CHECK(req->dests[0].pair == bus);
-  CHECK(req->dests[0].delay_frames == 96);
+  CHECK(req->dests[0].delay_frames == bam::kMixMarginFrames);
   // another mix and a gain change elsewhere keep this destination on its bus (no interruption)
   REQUIRE(t.engine->set_mix("asio-in:2", true, bam::MixConfig{{{"asio-out:3", 0, false}, {"asio-out:4", 0, false}}}, std::nullopt).ok);
   REQUIRE(t.engine->set_mix(dst, true, bam::MixConfig{{{"asio-out:1", -3, false}, {"asio-out:2", -6, false}}}, std::nullopt).ok);
