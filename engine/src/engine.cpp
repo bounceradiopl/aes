@@ -688,6 +688,7 @@ void Engine::stop() {
     m.runtime = std::make_shared<RuntimeSet>();
   }
   m.mixer.set_plan({});  // its rings point into the shared memory released below
+  m.mixer.reset();       // and drop every bus's own state too, so a later start plays no stale member
   if (m.view) {
     m.view->header().heartbeat.store(0);
     m.view->header().ptp_state.store(static_cast<uint32_t>(ShmPtpState::Listening));

@@ -24,6 +24,11 @@ void Mixer::set_plan(std::vector<MixBusPlan> plan) {
   plan_ = std::move(next);
 }
 
+void Mixer::reset() {
+  for (auto& st : state_) st = State{};  // drop every bus's levels, leaving set and timing
+  generation_ = 0;                       // the next process() call starts every bus as if brand new
+}
+
 float Mixer::peak_db(int bus, int side) const {
   if (bus < 0 || bus >= kMixBuses) return -120.0f;
   return peak_[bus * 2 + side].load(std::memory_order_relaxed);
@@ -75,6 +80,16 @@ void Mixer::follow_plan(State& st, const MixBusPlan& bus) {
     }
     next_levels_[i] = l;
   }
+  // Compact the leaving set first, dropping every entry a new input just reclaimed above, before
+  // adding any newly-leaving members below: start_leaving() can shift the set's indices when it
+  // is already full, and matched_leaving[] was computed against the set's layout as it stood just
+  // above, before any such shift. Doing this compaction after start_leaving() (as before) let the
+  // shift desync the flags from the entries, so the wrong entry got dropped (or kept).
+  size_t w = 0;
+  for (size_t j = 0; j < st.leaving_count; ++j)
+    if (!matched_leaving[j]) st.leaving[w++] = st.leaving[j];  // claimed ones leave the set; the rest compact down
+  st.leaving_count = w;
+
   for (size_t j = 0; j < st.count; ++j) {
     if (matched_level[j]) continue;
     Level l = st.levels[j];
@@ -83,10 +98,6 @@ void Mixer::follow_plan(State& st, const MixBusPlan& bus) {
     l.left = l.gain == 0.0 ? 0 : kMixRampFrames;
     if (l.audible()) start_leaving(st, st.inputs[j], l);  // already silent: nothing to fade, just drop it
   }
-  size_t w = 0;
-  for (size_t j = 0; j < st.leaving_count; ++j)
-    if (!matched_leaving[j]) st.leaving[w++] = st.leaving[j];  // claimed ones leave the set; the rest compact down
-  st.leaving_count = w;
 
   std::copy_n(next_levels_.begin(), n, st.levels.begin());
   std::copy_n(bus.inputs.begin(), n, st.inputs.begin());
@@ -187,7 +198,13 @@ void Mixer::process(uint64_t now_s, uint64_t generation) {
     }
     follow_plan(st, bus);
     const uint64_t limit = now_s > bus.max_delay ? now_s - bus.max_delay : 0;
-    if (!st.started || st.mixed_upto + kRestartFrames < limit || st.mixed_upto > limit + kRestartFrames) {
+    // A plan change that moves the bus's max_delay (its slowest member joining or leaving) shifts
+    // "limit" by the same amount on its own, with nothing actually late: restart the bus's timing
+    // like a fresh start instead of counting it against late_. Consumers re-anchor on a max_delay
+    // change regardless (D_mix = max_delay + kMixMarginFrames moves too), so this is the same kind
+    // of clean restart a brand new bus or a clock step gets, not a sign of the mixer falling behind.
+    const bool delay_changed = st.started && bus.max_delay != st.max_delay;
+    if (!st.started || delay_changed || st.mixed_upto + kRestartFrames < limit || st.mixed_upto > limit + kRestartFrames) {
       // Members are complete up to limit and consumers read D_mix = max_delay + kMixMarginFrames
       // behind "now": starting the margin back gives them mixed audio from their very first read.
       st.mixed_upto = limit > kMixMarginFrames ? limit - kMixMarginFrames : 0;
@@ -195,6 +212,7 @@ void Mixer::process(uint64_t now_s, uint64_t generation) {
     } else if (limit > st.mixed_upto + kMixMarginFrames) {
       late_.fetch_add(1, std::memory_order_relaxed);  // consumers may already have read unmixed frames
     }
+    st.max_delay = bus.max_delay;
     // Local non-const copies: ChannelRing::write() is non-const (it mutates the pointed-to ring
     // storage, not the ChannelRing object itself), but *plan is a const vector, so bus is const.
     ChannelRing out_left = bus.out_left;

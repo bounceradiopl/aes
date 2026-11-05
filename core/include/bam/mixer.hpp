@@ -53,6 +53,9 @@ class Mixer {
   Mixer();
   void set_plan(std::vector<MixBusPlan> plan);
   void process(uint64_t now_s, uint64_t generation);
+  // Clears every bus's state (levels, leaving set) and the generation, as if freshly constructed,
+  // so whatever plan comes next starts clean with no audio or timing left over from before.
+  void reset();
   uint64_t late() const { return late_.load(std::memory_order_relaxed); }
   float peak_db(int bus, int side) const;
 
@@ -80,6 +83,7 @@ class Mixer {
     bool started = false;
     uint64_t mixed_upto = 0;
     uint64_t owner = 0;
+    uint32_t max_delay = 0;  // the bus's max_delay as of the last pass; a change restarts the timing
     size_t count = 0;  // members in `levels`/`inputs`, in the order of the plan's inputs
     std::array<Level, kMaxInputs> levels{};
     std::array<MixInput, kMaxInputs> inputs{};  // this bus's current members' rings, parallel to `levels`

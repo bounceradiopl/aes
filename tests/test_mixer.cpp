@@ -297,7 +297,8 @@ TEST_CASE("mixer fades a bus to 0 when its only member leaves the plan") {
     if (down[i] > down[i - 1]) monotonic = false;
   }
   CHECK(monotonic);
-  CHECK(max_step <= kMaxStep);
+  constexpr int64_t kStep = 0x10000000LL / bam::kMixRampFrames + 1;  // the one member's own scale over the ramp, plus 1 LSB
+  CHECK(max_step <= kStep);
   CHECK(down.front() == 0x10000000);
   CHECK(span(ol, removed_at + 1000, 15000) == std::vector<int32_t>(15000 - removed_at - 1000, 0));
 }
@@ -341,6 +342,65 @@ TEST_CASE("mixer: a member rejoining mid-fade continues its level without a jump
 
   CHECK(span(ol, removed_at + 1500, removed_at + 2000) ==
         std::vector<int32_t>(500, 0x10000000 + 0x08000000));  // B recovers to full strength, bit-exact
+}
+
+TEST_CASE("mixer: a member rejoining while the leaving set is already full does not scramble it") {
+  // Regression for: start_leaving() shifts st.leaving[] down when the set is already full
+  // (kMaxInputs members mid-fade), but follow_plan() computes matched_leaving[] against the set's
+  // layout *before* that shift. When a plan both reclaims a leaving member and pushes the set to
+  // overflow in the same pass, the old code dropped unmatched_leaving entries (the compaction)
+  // *after* start_leaving() had already shifted the array: the flags no longer lined up with the
+  // entries, so the reclaimed member survived in the leaving set (plays twice, as "live" and as a
+  // stale fade) while an unrelated, innocent leaving member was dropped at once instead of fading.
+  //
+  // Reviewer repro: kMaxInputs (16) members X, swapped for 16 other (silent) members Y in one
+  // block, then one block later a plan of {X[1], Y[1..15]} (X[1] rejoins, Y[0] leaves) — with the
+  // leaving set already full of all 16 X's at that point.
+  constexpr size_t kN = 16;  // kMaxInputs == bam::kMaxMixSources (core/include/bam/config.hpp)
+  constexpr int32_t kSmall = 0x00010000;
+  constexpr int32_t kBig = 0x01000000;  // X[1] alone is loud: a double-count shows up as overshoot
+  std::vector<Ring> xl(kN), xr(kN), yl(kN), yr(kN);
+  Ring ol, orr;
+  std::vector<int32_t> small_v(60000, kSmall), big_v(60000, kBig), silent_v(60000, 0);
+  for (size_t i = 0; i < kN; ++i) {
+    const auto& v = (i == 1) ? big_v : small_v;
+    xl[i].ring().write(0, v.data(), v.size());
+    xr[i].ring().write(0, v.data(), v.size());
+    yl[i].ring().write(0, silent_v.data(), silent_v.size());  // Y is silent: audio in this window is purely X
+    yr[i].ring().write(0, silent_v.data(), silent_v.size());
+  }
+  bam::Mixer mixer;
+  bam::MixBusPlan p;
+  p.out_left = ol.ring();
+  p.out_right = orr.ring();
+  for (size_t i = 0; i < kN; ++i) p.inputs.push_back({xl[i].ring(), xr[i].ring(), 1.0, 0});
+  mixer.set_plan({p});
+  uint64_t now = 1000;
+  for (; now <= 8000; now += 48) mixer.process(now, 1);  // let all 16 X members settle at full gain
+
+  p.inputs.clear();
+  for (size_t i = 0; i < kN; ++i) p.inputs.push_back({yl[i].ring(), yr[i].ring(), 1.0, 0});
+  mixer.set_plan({p});  // all 16 X fall out of the plan at once: the leaving set fills to capacity
+  mixer.process(now, 1);
+  now += 48;
+  const uint64_t swapped_at = now;
+
+  p.inputs.clear();
+  p.inputs.push_back({xl[1].ring(), xr[1].ring(), 1.0, 0});                                // X[1] rejoins...
+  for (size_t i = 1; i < kN; ++i) p.inputs.push_back({yl[i].ring(), yr[i].ring(), 1.0, 0});  // ...Y[0] leaves
+  mixer.set_plan({p});  // one block later: the leaving set is already full when a member is reclaimed
+  for (; now <= swapped_at + 4000; now += 48) mixer.process(now, 1);
+
+  auto got = span(ol, swapped_at - 242, swapped_at + 958);
+  int64_t max_step = 0;
+  for (size_t i = 1; i < got.size(); ++i)
+    max_step = std::max<int64_t>(max_step, std::abs(static_cast<int64_t>(got[i]) - got[i - 1]));
+  const int32_t peak = *std::max_element(got.begin(), got.end());
+  constexpr int32_t kEnvelope = kBig + 15 * kSmall;  // at most X[1] plus every other X member, each <= 0 dB
+  constexpr int64_t kStepBound = static_cast<int64_t>(kEnvelope) / bam::kMixRampFrames + 1;  // full envelope over the ramp, plus 1 LSB
+  MESSAGE("peak=" << peak << " (envelope " << kEnvelope << "), max_step=" << max_step << " (bound " << kStepBound << ")");
+  CHECK(max_step <= kStepBound);  // no leaving member is cut hard: every change ramps over kMixRampFrames
+  CHECK(peak <= kEnvelope);       // no member plays twice (once live, once still "leaving")
 }
 
 TEST_CASE("mixer: a bus dropped from the plan during a generation change still drops its leaving member") {
@@ -419,6 +479,38 @@ TEST_CASE("mixer: a bus taken over by another destination starts clean") {
   CHECK(got.back() == 0x20000000);
 }
 
+TEST_CASE("mixer: a plan that drops the bus's slowest member restarts its timing instead of counting late") {
+  // Regression for: process() computes "limit" from bus.max_delay every pass; when the slowest
+  // member leaves (or a new, slower one joins), max_delay changes and limit jumps by the same
+  // amount even though nothing is actually late. The old code only ever restarted a bus's timing
+  // on a fresh start, a generation (clock) step, or an owner change — a max_delay change on its
+  // own fell through to the "late" branch and was miscounted.
+  Ring al, ar, bl, br, ol, orr;
+  std::vector<int32_t> aval(60000, 0x10000000), bval(60000, 0x08000000);
+  al.ring().write(0, aval.data(), aval.size());
+  ar.ring().write(0, aval.data(), aval.size());
+  bl.ring().write(0, bval.data(), bval.size());
+  br.ring().write(0, bval.data(), bval.size());
+  bam::Mixer mixer;
+  bam::MixBusPlan p;
+  p.out_left = ol.ring();
+  p.out_right = orr.ring();
+  constexpr uint32_t kSlowDelay = 960;  // 20 ms: B is the bus's slowest member
+  p.inputs = {{al.ring(), ar.ring(), 1.0, 0}, {bl.ring(), br.ring(), 1.0, kSlowDelay}};
+  p.max_delay = kSlowDelay;
+  mixer.set_plan({p});
+  uint64_t now = 2000;
+  for (; now <= 10000; now += 48) mixer.process(now, 1);  // caught up, comfortably ahead of the margin
+  CHECK(mixer.late() == 0);
+
+  p.inputs = {{al.ring(), ar.ring(), 1.0, 0}};  // B, the slowest member, leaves the mix
+  p.max_delay = 0;
+  mixer.set_plan({p});
+  now += 48;
+  mixer.process(now, 1);
+  CHECK(mixer.late() == 0);  // the bus restarts its timing at the new max_delay instead of counting late
+}
+
 // The real mix_loop (engine/src/stream_workers.cpp) wakes process() on a fixed 1 ms schedule, but
 // under OS scheduling jitter the wake can land late; process() then drains every outstanding
 // block at once, so the mixer itself always catches up. The danger is the consumer: it never
@@ -475,4 +567,68 @@ TEST_CASE("mixer stays ahead of the margin through a jittered mixer-thread wake-
   MESSAGE(checks << " consumer reads at the margin, " << bad_reads << " not yet mixed; late() = " << mixer.late());
   CHECK(bad_reads == 0);
   CHECK(mixer.late() == 0);
+}
+
+TEST_CASE("mixer: reset() leaves no audio of previous members on the next plan") {
+  // Regression for: Engine::stop() cleared the plan (set_plan({})) but never cleared the mixer's
+  // own per-bus state, so a leaving member kept fading in state_ even with no plan at all. A later
+  // Engine::start() reuses the same bus/owner assignment (it is stable across a restart), so the
+  // old leaving member would still be there to bleed into whatever plays next.
+  Ring al, ar, bl, br, ol, orr;
+  std::vector<int32_t> aval(40000, 0x10000000), bval(40000, 0x08000000);
+  al.ring().write(0, aval.data(), aval.size());
+  ar.ring().write(0, aval.data(), aval.size());
+  bl.ring().write(0, bval.data(), bval.size());
+  br.ring().write(0, bval.data(), bval.size());
+  bam::Mixer mixer;
+  bam::MixBusPlan p;
+  p.bus = 0;
+  p.owner = 1;
+  p.out_left = ol.ring();
+  p.out_right = orr.ring();
+  p.inputs = {{al.ring(), ar.ring(), 1.0, 0}};
+  mixer.set_plan({p});
+  uint64_t now = 1000;
+  for (; now <= 8000; now += 48) mixer.process(now, 1);  // A playing, steady
+
+  p.inputs.clear();  // A leaves: bus 0 now has count == 0, leaving_count == 1 (A mid-fade)
+  mixer.set_plan({p});
+  now += 48;
+  mixer.process(now, 1);  // one block into the fade: A is still audible (not yet silent)
+
+  mixer.set_plan({});  // like Engine::stop(): drop every bus from the plan...
+  mixer.reset();       // ...and also clear every bus's own state
+
+  // A later start reuses bus 0 under the same owner: without reset(), process()'s owner-change
+  // check (bus.owner != st.owner) would not fire either, so A's leaving member would still be
+  // sitting in state_, mid-fade (192 of its 240 ramp frames left, at gain 0.8), and would mix into
+  // this unrelated plan alongside B.
+  bam::MixBusPlan p2;
+  p2.bus = 0;
+  p2.owner = 1;
+  p2.out_left = ol.ring();
+  p2.out_right = orr.ring();
+  p2.inputs = {{bl.ring(), br.ring(), 1.0, 0}};
+  mixer.set_plan({p2});
+  now += 48;
+  mixer.process(now, 1);  // first block under the new plan
+  const uint64_t b_started_at = now;
+  // run far enough past the "steady" window below plus the margin, so that whole span is actually
+  // mixed (mixed_upto trails "now" by kMixMarginFrames once caught up)
+  for (; now <= b_started_at + 3000 + bam::kMixMarginFrames; now += 48) mixer.process(now, 1);
+
+  // B alone, fading in from silence, never exceeds its own full-scale value; A's stale leaving
+  // member (gain 0.8, decaying) would push well past it if reset() had not cleared it out. The
+  // window starts right at the fresh restart's own margin: anything earlier was never written
+  // under this plan and is not part of what this test is checking (see the "rejoining mid-fade"
+  // and "dropped during a generation change" tests for that kind of history-boundary care).
+  auto transition = span(ol, b_started_at - bam::kMixMarginFrames + 1, b_started_at + 500);
+  int32_t peak = *std::max_element(transition.begin(), transition.end());
+  CHECK(peak <= 0x08000000);
+
+  // Further out, once B's own join fade-in is done, it plays bit-exact: nothing of A left at all.
+  auto steady = span(ol, b_started_at + 1000, b_started_at + 3000);
+  int bad = 0;
+  for (int32_t v : steady) bad += v != 0x08000000;
+  CHECK(bad == 0);
 }
