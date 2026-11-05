@@ -3,7 +3,7 @@
 // included), PUT or SOURCE handshake, then the queue as a continuous body. Every network wait
 // is sliced into short polls that check stopping_, so stop() never waits for a timeout; the one
 // call that cannot be sliced, TcpStream::connect() (getaddrinfo + connect), runs on a detached
-// helper thread that the client thread merely waits for.
+// helper thread that the client thread waits for, up to an overall deadline.
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -23,7 +23,9 @@ using Clock = std::chrono::steady_clock;
 using std::chrono::milliseconds;
 
 constexpr int kConnectTimeoutMs = 5000;    // TCP connect (after the name is resolved)
+constexpr int kConnectDeadlineMs = kConnectTimeoutMs + 5000;  // name lookup + connect, overall
 constexpr int kHandshakeTimeoutMs = 5000;  // request sent and response head received
+constexpr int kRetryResetMs = 10000;       // streaming this long starts the retry schedule over
 constexpr int kSendStallMs = 10000;        // no byte accepted by the socket: the server is dead
 constexpr int kSliceMs = 50;               // longest wait before stopping_ is checked again
 constexpr size_t kMaxResponseHead = 8192;
@@ -38,7 +40,15 @@ constexpr const char* kErrStalled = "serwer nie odbiera danych";
 
 std::mutex g_schedule_m;
 std::vector<int> g_schedule_override;  // test hook; empty = the default schedule
-std::atomic<int> g_connect_delay_ms{0};  // test hook
+std::atomic<int> g_connect_delay_ms{0};  // test hooks (0 = off / the default)
+std::atomic<int> g_connect_deadline_ms{0};
+std::atomic<int> g_handshake_timeout_ms{0};
+std::atomic<int> g_retry_reset_ms{0};
+
+int hook_or(const std::atomic<int>& hook, int fallback) {
+  const int v = hook.load();
+  return v > 0 ? v : fallback;
+}
 
 std::vector<int> retry_schedule() {
   std::lock_guard lk(g_schedule_m);
@@ -140,7 +150,8 @@ int ms_left(Clock::time_point deadline) {
 // set on failure, or -1 when stopped.
 int handshake(platform::TcpStream& s, const std::string& request, const std::atomic<bool>& stopping,
               std::string& error) {
-  const auto deadline = Clock::now() + milliseconds(kHandshakeTimeoutMs);
+  // One deadline for the whole exchange: a server trickling its reply byte by byte times out too.
+  const auto deadline = Clock::now() + milliseconds(hook_or(g_handshake_timeout_ms, kHandshakeTimeoutMs));
   const auto* req = reinterpret_cast<const uint8_t*>(request.data());
   size_t sent = 0;
   while (sent < request.size()) {
@@ -186,6 +197,7 @@ struct ConnectJob {
   std::mutex m;
   std::condition_variable cv;
   bool done = false;
+  bool abandoned = false;  // the client stopped waiting (stop() or the deadline)
   std::optional<platform::TcpStream> stream;
   std::string error;
 };
@@ -200,6 +212,9 @@ void set_icecast_retry_schedule_ms(std::vector<int> schedule) {
   g_schedule_override = std::move(schedule);
 }
 void set_icecast_connect_delay_ms(int ms) { g_connect_delay_ms = ms; }
+void set_icecast_connect_deadline_ms(int ms) { g_connect_deadline_ms = ms; }
+void set_icecast_handshake_timeout_ms(int ms) { g_handshake_timeout_ms = ms; }
+void set_icecast_retry_reset_ms(int ms) { g_retry_reset_ms = ms; }
 std::string base64(std::string_view data) { return base64_encode(data); }
 }  // namespace testing
 
@@ -211,30 +226,43 @@ IcecastClient::IcecastClient(IcecastTarget t, size_t queue_limit_bytes)
 
 IcecastClient::~IcecastClient() { stop(); }
 
-void IcecastClient::push(std::span<const uint8_t> data) {
+void IcecastClient::push(std::span<const uint8_t> data, bool stream_start) {
   if (data.empty()) return;
   std::vector<uint8_t> piece(data.begin(), data.end());  // allocated outside the lock
   {
     std::lock_guard lk(m_);
-    if (stopping_) return;
-    if (piece.size() > queue_limit_) {
-      status_.dropped_bytes += piece.size();
-      return;
+    // Not connected: nobody waits for the data and the next connection needs a new stream
+    // anyway, so this is not an overflow and is not counted.
+    if (stopping_ || status_.state != IcecastState::Streaming) return;
+    if (need_start_) {
+      if (!stream_start) return;  // the rest of the old stream: the server waits for a new start
+      need_start_ = false;
     }
-    while (!queue_.empty() && queued_bytes_ + piece.size() > queue_limit_) {
-      status_.dropped_bytes += queue_.front().size();
-      queued_bytes_ -= queue_.front().size();
-      queue_.pop_front();
+    if (queued_bytes_ + piece.size() > queue_limit_) {
+      // The server cannot keep up: whatever is cut out, the stream after the gap would not
+      // decode (an Ogg page sequence or a FLAC stream breaks), so drop everything and restart.
+      status_.dropped_bytes += queued_bytes_ + piece.size();
+      queue_.clear();
+      queued_bytes_ = 0;
+      need_start_ = true;
+      restart_pending_ = true;
+    } else {
+      queued_bytes_ += piece.size();
+      queue_.push_back(std::move(piece));
     }
-    queued_bytes_ += piece.size();
-    queue_.push_back(std::move(piece));
   }
   cv_.notify_all();
 }
 
 void IcecastClient::on_reconnect(std::function<void()> cb) {
-  std::lock_guard lk(m_);
-  on_reconnect_ = std::move(cb);
+  {
+    std::lock_guard lk(m_);
+    on_reconnect_ = std::move(cb);
+    // A restart still waiting for its start piece (e.g. the first connection came up before
+    // this registration) is announced to the new callback as well.
+    if (status_.state == IcecastState::Streaming && need_start_) restart_pending_ = true;
+  }
+  cv_.notify_all();
 }
 
 IcecastStatus IcecastClient::status() const {
@@ -262,7 +290,17 @@ void IcecastClient::set_state(IcecastState state, std::string error) {
   std::lock_guard lk(m_);
   status_.state = state;
   status_.error = std::move(error);
-  if (state != IcecastState::Streaming) status_.kbps = 0;
+  if (state == IcecastState::Streaming) {
+    // A new connection needs a new stream: drop what an old one left, wait for a start piece
+    // and let the producer restart (on_reconnect, fired by stream()).
+    need_start_ = true;
+    restart_pending_ = true;
+  } else {
+    status_.kbps = 0;
+    restart_pending_ = false;
+  }
+  queue_.clear();  // not counted as dropped: no connection to send it on
+  queued_bytes_ = 0;
 }
 
 bool IcecastClient::wait_retry(int delay_ms) {
@@ -270,16 +308,25 @@ bool IcecastClient::wait_retry(int delay_ms) {
   return !cv_.wait_for(lk, milliseconds(delay_ms), [this] { return stopping_.load(); });
 }
 
-void IcecastClient::discard_queue() {
-  std::lock_guard lk(m_);
-  queue_.clear();
-  queued_bytes_ = 0;
+void IcecastClient::fire_restart_if_pending() {
+  std::function<void()> cb;
+  {
+    std::lock_guard lk(m_);
+    if (!restart_pending_) return;
+    restart_pending_ = false;
+    cb = on_reconnect_;
+  }
+  if (cb) cb();
 }
 
 bool IcecastClient::connect(platform::TcpStream& out, std::string& error) {
   auto job = std::make_shared<ConnectJob>();
   auto work = [job, host = target_.host, port = target_.port, delay = g_connect_delay_ms.load()] {
-    if (delay > 0) std::this_thread::sleep_for(milliseconds(delay));
+    if (delay > 0) {
+      // the test hook's slow lookup; a connect the client gave up on never reaches the server
+      std::unique_lock lk(job->m);
+      if (job->cv.wait_for(lk, milliseconds(delay), [&] { return job->abandoned; })) return;
+    }
     std::string err;
     auto s = platform::TcpStream::connect(host, port, kConnectTimeoutMs, &err);
     std::lock_guard lk(job->m);
@@ -295,10 +342,20 @@ bool IcecastClient::connect(platform::TcpStream& out, std::string& error) {
   } catch (const std::system_error&) {
     work();  // no thread available: connect here (stop() then waits for the timeout at worst)
   }
+  const auto deadline = Clock::now() + milliseconds(hook_or(g_connect_deadline_ms, kConnectDeadlineMs));
   std::unique_lock lk(job->m);
   while (!job->done) {
-    if (stopping_) return false;
-    job->cv.wait_for(lk, milliseconds(kSliceMs));
+    // Stopped, or the name lookup hangs (getaddrinfo has no timeout of its own): give up on
+    // the helper, which then finishes on its own.
+    const bool timed_out = Clock::now() >= deadline;
+    if (stopping_ || timed_out) {
+      job->abandoned = true;
+      job->cv.notify_all();
+      if (timed_out) error = std::string(kIcecastErrUnreachable);
+      return false;
+    }
+    job->cv.wait_for(lk, std::min(milliseconds(kSliceMs), std::chrono::duration_cast<milliseconds>(
+                                                              deadline - Clock::now() + milliseconds(1))));
   }
   if (!job->stream) {
     // TcpStream::connect reports a failed name lookup with this prefix (platform/tcp_*.cpp)
@@ -330,8 +387,9 @@ bool IcecastClient::open_connection(platform::TcpStream& out, std::string& error
 }
 
 void IcecastClient::run() {
-  bool first_attempt = true;
-  size_t retry = 0;  // schedule entry for the next wait; back to 0 after a successful connection
+  // Schedule entry for the next wait. It only goes back to 0 after a connection streamed for a
+  // while, so a server that accepts and hangs up at once is retried on the full schedule.
+  size_t retry = 0;
   while (!stopping_) {
     {
       std::lock_guard lk(m_);
@@ -343,23 +401,11 @@ void IcecastClient::run() {
     const bool connected = open_connection(conn, error);
     if (stopping_) break;
     if (connected) {
-      if (!first_attempt) {
-        // The server expects a new stream: drop what the old one left queued and let the
-        // producer restart (new header) before anything goes out on this connection.
-        discard_queue();
-        std::function<void()> cb;
-        {
-          std::lock_guard lk(m_);
-          cb = on_reconnect_;
-        }
-        if (cb) cb();
-      }
-      first_attempt = false;
-      retry = 0;
-      set_state(IcecastState::Streaming, {});
+      set_state(IcecastState::Streaming, {});  // new stream: on_reconnect fires in stream()
+      const auto started = Clock::now();
       if (!stream(conn, error)) break;  // stopped
+      if (Clock::now() - started >= milliseconds(hook_or(g_retry_reset_ms, kRetryResetMs))) retry = 0;
     }
-    first_attempt = false;
     conn.close();
     set_state(IcecastState::Error, error);
     const std::vector<int> schedule = retry_schedule();
@@ -380,6 +426,9 @@ bool IcecastClient::stream(platform::TcpStream& s, std::string& error) {
   uint64_t rate_bytes = 0;
   for (;;) {
     if (stopping_) return false;
+    // A new connection or a queue overflow: the producer restarts its stream. Whatever piece
+    // is half sent is finished first, so the byte stream stays aligned to whole pieces.
+    fire_restart_if_pending();
     const auto now = Clock::now();
     if (now - rate_start >= milliseconds(1000)) {
       const double secs = std::chrono::duration<double>(now - rate_start).count();
@@ -390,7 +439,8 @@ bool IcecastClient::stream(platform::TcpStream& s, std::string& error) {
     }
     if (off == piece.size()) {
       std::unique_lock lk(m_);
-      cv_.wait_for(lk, milliseconds(kSliceMs), [this] { return stopping_.load() || !queue_.empty(); });
+      cv_.wait_for(lk, milliseconds(kSliceMs),
+                   [this] { return stopping_.load() || !queue_.empty() || restart_pending_; });
       if (stopping_) return false;
       if (!queue_.empty()) {
         piece = std::move(queue_.front());
@@ -400,6 +450,7 @@ bool IcecastClient::stream(platform::TcpStream& s, std::string& error) {
         last_progress = Clock::now();
         continue;
       }
+      if (restart_pending_) continue;
       lk.unlock();
       // Nothing to send: check whether the server hung up (anything it sends is ignored).
       if (s.recv_some(scratch, 0) < 0) {

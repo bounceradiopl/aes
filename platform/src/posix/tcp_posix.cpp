@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstring>
 
 #include "bam/platform/tcp.hpp"
@@ -174,7 +175,9 @@ int TcpStream::send_some(std::span<const uint8_t> data, int timeout_ms) {
 #else
     const int flags = 0;
 #endif
-    const ssize_t n = ::send(static_cast<int>(fd_), data.data(), data.size(), flags);
+    // At most 1 GiB per call so the byte count always fits the int result (as on Windows).
+    const size_t len = std::min<size_t>(data.size(), size_t(1) << 30);
+    const ssize_t n = ::send(static_cast<int>(fd_), data.data(), len, flags);
     if (n > 0) return static_cast<int>(n);
     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
       if (monotonic_ns() >= deadline) return 0;
@@ -195,7 +198,8 @@ int TcpStream::recv_some(std::span<uint8_t> buf, int timeout_ms) {
     if (pr == 0) return 0;
     if (!(p.revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL))) return 0;
     // POLLHUP/POLLERR without POLLIN still goes through recv(): it reports EOF or the error.
-    const ssize_t n = ::recv(static_cast<int>(fd_), buf.data(), buf.size(), 0);
+    const size_t len = std::min<size_t>(buf.size(), size_t(1) << 30);  // fits the int result
+    const ssize_t n = ::recv(static_cast<int>(fd_), buf.data(), len, 0);
     if (n > 0) return static_cast<int>(n);
     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
       if (monotonic_ns() >= deadline) return 0;
