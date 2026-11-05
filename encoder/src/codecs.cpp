@@ -203,8 +203,7 @@ std::vector<std::string> library_candidates(const std::vector<std::string>& dirs
     const bool has_sep = d.back() == '/' || d.back() == '\\';
     for (const auto& n : names) out.push_back(has_sep ? d + n : d + sep + n);
   }
-  out.insert(out.end(), names.begin(), names.end());
-  return out;
+  return out;  // no bare names: a codec library found elsewhere must not enable the codec
 }
 
 bool check_open_settings(Codec encoder_codec, const EncoderSettings& s, std::string* error) {
@@ -228,3 +227,10 @@ const char* codec_label(Codec c) {
 }  // namespace detail
 
 }  // namespace bam::encoder
+
+namespace bam::encoder::testing {
+
+void fail_next_encode(AudioEncoder& e) { e.inject_failure_ = true; }
+size_t buffered_bytes(const AudioEncoder& e) { return e.buffered_bytes(); }
+
+}  // namespace bam::encoder::testing

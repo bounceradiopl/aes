@@ -29,10 +29,28 @@ void DynamicLibrary::close() {
   }
 }
 
+namespace {
+
+bool is_absolute(const std::wstring& p) {
+  const bool drive = p.size() >= 3 && p[1] == L':' && (p[2] == L'\\' || p[2] == L'/');
+  const bool unc = p.size() >= 2 && (p[0] == L'\\' || p[0] == L'/') && (p[1] == L'\\' || p[1] == L'/');
+  return drive || unc;
+}
+
+HMODULE load(const std::string& candidate) {
+  std::wstring path = widen(candidate);
+  if (!is_absolute(path)) return LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+  for (auto& ch : path)
+    if (ch == L'/') ch = L'\\';  // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR needs a fully qualified path
+  return LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+}
+
+}  // namespace
+
 std::optional<DynamicLibrary> DynamicLibrary::open(const std::vector<std::string>& candidates, std::string* error) {
   std::string last_error;
   for (const auto& c : candidates) {
-    HMODULE h = LoadLibraryW(widen(c).c_str());
+    HMODULE h = load(c);
     if (h) {
       DynamicLibrary lib;
       lib.handle_ = h;

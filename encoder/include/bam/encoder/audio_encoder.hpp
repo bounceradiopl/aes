@@ -41,6 +41,14 @@ struct EncoderSettings {
 // - AAC-LC at most 12 bits per sample period in stereo (288 kb/s at 24 kHz, 264 at 22.05 kHz).
 bool validate_encoder_settings(const EncoderSettings&, std::string* error);
 
+class AudioEncoder;
+namespace testing {
+// Test hook: the encoder's next call into its codec library reports an error.
+void fail_next_encode(AudioEncoder&);
+// Test hook: PCM/bytes the encoder holds between calls (must stay bounded).
+size_t buffered_bytes(const AudioEncoder&);
+}  // namespace testing
+
 class AudioEncoder {
  public:
   virtual ~AudioEncoder() = default;
@@ -52,13 +60,36 @@ class AudioEncoder {
   // Ends the stream and appends the remaining bytes; open() again to start a new one.
   virtual void flush(std::vector<uint8_t>& out) = 0;
   virtual const char* content_type() const = 0;
+
+  // An encode error from the codec library: the encoder drops what it buffered, closes and
+  // outputs nothing more until the next successful open(). error() is Polish user text.
+  bool failed() const { return !error_.empty(); }
+  const std::string& error() const { return error_; }
+
+ protected:
+  void set_failed(std::string message) { error_ = std::move(message); }
+  void clear_failed() { error_.clear(); }
+  bool take_injected_failure() {
+    const bool f = inject_failure_;
+    inject_failure_ = false;
+    return f;
+  }
+  virtual size_t buffered_bytes() const { return 0; }
+
+ private:
+  friend void testing::fail_next_encode(AudioEncoder&);
+  friend size_t testing::buffered_bytes(const AudioEncoder&);
+  std::string error_;
+  bool inject_failure_ = false;
 };
 
 std::unique_ptr<AudioEncoder> make_encoder(Codec);  // nullptr when the codec library is not available
 bool codec_available(Codec);
 
-// Directories searched first for the run-time codec libraries (libmp3lame, libfdk-aac);
-// default: the directory of the executable. The plain library name (system search) comes last.
+// The only directories (absolute paths) the run-time codec libraries (libmp3lame, libfdk-aac)
+// are loaded from; empty = the default, the directory of the executable. There is no fallback
+// to the system search path: without the bundled library next to the program the codec is
+// unavailable (spec §5.3), and nothing can be planted elsewhere on the search path.
 void set_codec_library_dirs(std::vector<std::string> dirs);
 
 }  // namespace bam::encoder

@@ -28,6 +28,7 @@ class FlacEncoder final : public AudioEncoder {
 
   bool open(const EncoderSettings& s, std::string* error) override {
     close();
+    clear_failed();
     if (!check_open_settings(Codec::Flac, s, error)) return false;
     FLAC__StreamEncoder* enc = FLAC__stream_encoder_new();
     if (!enc) {
@@ -60,13 +61,14 @@ class FlacEncoder final : public AudioEncoder {
     if (!enc_) return;
     pcm32_.resize(frames * size_t(channels_));
     for (size_t i = 0; i < pcm32_.size(); ++i) pcm32_[i] = float_to_pcm16(pcm[i]);
-    if (frames > 0) FLAC__stream_encoder_process_interleaved(enc_, pcm32_.data(), unsigned(frames));
+    if (frames > 0 && !FLAC__stream_encoder_process_interleaved(enc_, pcm32_.data(), unsigned(frames)))
+      return fail_encode();
     take(out);
   }
 
   void flush(std::vector<uint8_t>& out) override {
     if (!enc_) return;
-    FLAC__stream_encoder_finish(enc_);  // last frame and the end-of-stream page
+    if (!FLAC__stream_encoder_finish(enc_)) return fail_encode();  // last frame and the end-of-stream page
     take(out);
     close();
   }
@@ -77,9 +79,19 @@ class FlacEncoder final : public AudioEncoder {
   static FLAC__StreamEncoderWriteStatus write_cb(const FLAC__StreamEncoder*, const FLAC__byte buffer[], size_t bytes,
                                                  uint32_t, uint32_t, void* client) {
     auto* self = static_cast<FlacEncoder*>(client);
+    if (self->take_injected_failure()) return FLAC__STREAM_ENCODER_WRITE_STATUS_FATAL_ERROR;
     self->pending_.insert(self->pending_.end(), buffer, buffer + bytes);
     return FLAC__STREAM_ENCODER_WRITE_STATUS_OK;
   }
+
+  // Drops the pending bytes and the encoder; failed() until the next open().
+  void fail_encode() {
+    const std::string state = FLAC__StreamEncoderStateString[FLAC__stream_encoder_get_state(enc_)];
+    close();
+    set_failed("błąd kodowania FLAC (" + state + ")");
+  }
+
+  size_t buffered_bytes() const override { return pending_.size(); }
 
   // Bytes written by libFLAC (the headers already during open) go out with the next call.
   void take(std::vector<uint8_t>& out) {

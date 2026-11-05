@@ -49,6 +49,7 @@ class LameEncoder final : public AudioEncoder {
 
   bool open(const EncoderSettings& s, std::string* error) override {
     close();
+    clear_failed();
     if (!check_open_settings(Codec::Mp3, s, error)) return false;
     lame_t gf = api_->init();
     if (!gf) {
@@ -85,8 +86,11 @@ class LameEncoder final : public AudioEncoder {
       for (size_t i = 0; i < clipped_.size(); ++i)
         clipped_[i] = pcm[i] != pcm[i] ? 0.0f : std::clamp(pcm[i], -1.0f, 1.0f);  // NaN -> silence
       mp3_.resize(n * 5 / 4 + 7200);  // worst case from lame.h
-      const int got = api_->encode_interleaved(gf_, clipped_.data(), int(n), mp3_.data(), int(mp3_.size()));
-      if (got > 0) out.insert(out.end(), mp3_.begin(), mp3_.begin() + got);
+      const int got = take_injected_failure()
+                          ? -1
+                          : api_->encode_interleaved(gf_, clipped_.data(), int(n), mp3_.data(), int(mp3_.size()));
+      if (got < 0) return fail_encode(got);
+      out.insert(out.end(), mp3_.begin(), mp3_.begin() + got);
       pcm += n * 2;
       frames -= n;
     }
@@ -95,14 +99,20 @@ class LameEncoder final : public AudioEncoder {
   void flush(std::vector<uint8_t>& out) override {
     if (!gf_) return;
     mp3_.resize(7200);
-    const int got = api_->flush(gf_, mp3_.data(), int(mp3_.size()));
-    if (got > 0) out.insert(out.end(), mp3_.begin(), mp3_.begin() + got);
+    const int got = take_injected_failure() ? -1 : api_->flush(gf_, mp3_.data(), int(mp3_.size()));
+    if (got < 0) return fail_encode(got);
+    out.insert(out.end(), mp3_.begin(), mp3_.begin() + got);
     close();
   }
 
   const char* content_type() const override { return codec_content_type(Codec::Mp3); }
 
  private:
+  void fail_encode(int code) {
+    close();
+    set_failed("błąd kodowania MP3 (LAME, kod " + std::to_string(code) + ")");
+  }
+
   void close() {
     if (gf_) api_->close(gf_);
     gf_ = nullptr;

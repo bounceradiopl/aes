@@ -45,6 +45,7 @@ class FdkEncoder final : public AudioEncoder {
 
   bool open(const EncoderSettings& s, std::string* error) override {
     close();
+    clear_failed();
     if (!check_open_settings(codec_, s, error)) return false;
     const std::string label = codec_label(codec_);
     HANDLE_AACENCODER h = nullptr;
@@ -132,14 +133,25 @@ class FdkEncoder final : public AudioEncoder {
       AACENC_BufDesc out_desc{1, &out_ptr, &out_id, &out_size, &out_el};
       AACENC_InArgs in_args{eof ? -1 : INT(remaining), 0};
       AACENC_OutArgs out_args{};
-      const AACENC_ERROR e = api_->encode(h_, &in_desc, &out_desc, &in_args, &out_args);
-      if (e != AACENC_OK) break;  // AACENC_ENCODE_EOF after a flush, or an encoder error
+      const AACENC_ERROR e = take_injected_failure() ? AACENC_ENCODE_ERROR
+                                                     : api_->encode(h_, &in_desc, &out_desc, &in_args, &out_args);
+      if (eof && e == AACENC_ENCODE_EOF) break;  // drained
+      if (e != AACENC_OK) return fail_encode("kod " + hex(unsigned(e)));
       offset += size_t(out_args.numInSamples);
       if (out_args.numOutBytes > 0) out.insert(out.end(), out_buf_.begin(), out_buf_.begin() + out_args.numOutBytes);
-      if (!eof && out_args.numInSamples == 0 && out_args.numOutBytes == 0) break;  // no progress
+      if (!eof && out_args.numInSamples == 0 && out_args.numOutBytes == 0)
+        return fail_encode("koder nie przyjmuje danych");  // would otherwise buffer without bound
     }
     pcm_.erase(pcm_.begin(), pcm_.begin() + std::ptrdiff_t(offset));
   }
+
+  // Drops the buffered PCM and the encoder; failed() until the next open().
+  void fail_encode(const std::string& detail) {
+    close();
+    set_failed("błąd kodowania " + std::string(codec_label(codec_)) + " (fdk-aac, " + detail + ")");
+  }
+
+  size_t buffered_bytes() const override { return pcm_.size() * sizeof(INT_PCM); }
 
   void close() {
     if (h_) api_->close(&h_);

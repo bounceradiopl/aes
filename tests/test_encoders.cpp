@@ -461,12 +461,71 @@ TEST_CASE("encoders: the run-time codec libraries next to the test binary are fo
     REQUIRE(enc);
     CHECK(std::string(enc->content_type()) == be::codec_content_type(c));
   }
-  // nothing to find in a directory without the libraries, but the plain name may still
-  // resolve through the system search path, so only check this does not crash
+}
+
+TEST_CASE("encoders: codec libraries load only from the configured dirs, never the search path") {
+  struct RestoreDefault {
+    ~RestoreDefault() { be::set_codec_library_dirs({}); }  // back to the executable directory
+  } restore;
+  // no libraries there: MP3 and AAC must be unavailable even if a system copy exists elsewhere
   be::set_codec_library_dirs({"/this/directory/does/not/exist"});
-  (void)be::codec_available(be::Codec::Mp3);
-  be::set_codec_library_dirs({});  // back to the default (executable directory)
+  CHECK_FALSE(be::codec_available(be::Codec::Mp3));
+  CHECK_FALSE(be::codec_available(be::Codec::AacLc));
+  CHECK_FALSE(be::codec_available(be::Codec::HeAac));
+  CHECK_FALSE(be::codec_available(be::Codec::HeAacV2));
+  CHECK(be::make_encoder(be::Codec::Mp3) == nullptr);
+  CHECK(be::make_encoder(be::Codec::AacLc) == nullptr);
+  CHECK(be::codec_available(be::Codec::Flac));  // linked in
+  CHECK(be::make_encoder(be::Codec::Flac) != nullptr);
+  be::set_codec_library_dirs({});
   CHECK(be::codec_available(be::Codec::Mp3));
+  CHECK(be::codec_available(be::Codec::AacLc));
+}
+
+TEST_CASE("encoders: an encode error is reported, drops the buffered audio, open() recovers") {
+  for (auto c : {be::Codec::Mp3, be::Codec::AacLc, be::Codec::HeAac, be::Codec::HeAacV2, be::Codec::Flac}) {
+    if (!be::codec_available(c)) continue;
+    const std::string codec = be::codec_name(c);
+    CAPTURE(codec);
+    const uint32_t kbps = c == be::Codec::HeAacV2 ? 32 : 64;
+    const auto pcm = stereo_sine(48000, 1.0, 1000.0, 1500.0, 0.5);
+    auto enc = be::make_encoder(c);
+    REQUIRE(enc);
+    std::string err;
+    REQUIRE_MESSAGE(enc->open({c, kbps, 48000}, &err), err);
+    CHECK_FALSE(enc->failed());
+    // healthy: what the encoder holds between calls stays below a couple of frames
+    std::vector<uint8_t> out;
+    for (size_t pos = 0; pos + 480 <= pcm.size() / 2; pos += 480) {
+      enc->encode(pcm.data() + pos * 2, 480, out);
+      CHECK(be::testing::buffered_bytes(*enc) <= 2 * 2048 * 2 * 2);
+    }
+    CHECK_FALSE(out.empty());
+    CHECK_FALSE(enc->failed());
+
+    be::testing::fail_next_encode(*enc);
+    enc->encode(pcm.data(), pcm.size() / 2, out);
+    CHECK(enc->failed());
+    CHECK_MESSAGE(enc->error().find("błąd kodowania") != std::string::npos, enc->error());
+    CHECK(be::testing::buffered_bytes(*enc) == 0);
+    // sticky: nothing more is taken or produced, nothing piles up
+    const size_t before = out.size();
+    for (int i = 0; i < 10; ++i) enc->encode(pcm.data(), pcm.size() / 2, out);
+    enc->flush(out);
+    CHECK(out.size() == before);
+    CHECK(be::testing::buffered_bytes(*enc) == 0);
+    CHECK(enc->failed());
+
+    // reopen (what the stream worker does) clears the failure and encodes again
+    REQUIRE_MESSAGE(enc->open({c, kbps, 48000}, &err), err);
+    CHECK_FALSE(enc->failed());
+    CHECK(enc->error().empty());
+    std::vector<uint8_t> again;
+    enc->encode(pcm.data(), pcm.size() / 2, again);
+    enc->flush(again);
+    CHECK_FALSE(again.empty());
+    CHECK_FALSE(enc->failed());
+  }
 }
 
 TEST_CASE("encoders: open rejects settings outside the table with a Polish error") {
@@ -635,6 +694,7 @@ TEST_CASE("encoders: MP3 128 kb/s at 44.1 kHz, CBR frames, decoded sine level an
   const uint32_t rate = 44100;
   const auto input = stereo_sine(rate, 3.0, 1000.0, 1500.0, 0.5);
   auto enc = be::make_encoder(be::Codec::Mp3);
+  REQUIRE(enc);
   std::string err;
   REQUIRE_MESSAGE(enc->open({be::Codec::Mp3, 128, rate}, &err), err);
   const auto bytes = encode_all(*enc, input, 2);

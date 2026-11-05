@@ -14,7 +14,7 @@ namespace bam::encoder::detail {
 struct LameApi;  // codec_lame.cpp
 struct FdkApi;   // codec_fdk.cpp
 
-// Full paths in `dirs` first, then the plain names (system search path).
+// Full paths in `dirs` only; never the bare names (no system search path, spec §5.3).
 std::vector<std::string> library_candidates(const std::vector<std::string>& dirs,
                                             const std::vector<std::string>& names);
 
