@@ -20,6 +20,23 @@ void set_nonblocking(SOCKET s) {
   ioctlsocket(s, FIONBIO, &nb);
 }
 
+// Maps a WSA connect() error to user text; a handful of common cases get a specific message, the
+// rest fall back to the raw WSA code.
+std::string connect_error_text(int wsa_err) {
+  switch (wsa_err) {
+    case WSAECONNREFUSED:
+      return "connect: połączenie odrzucone (WSA " + std::to_string(wsa_err) + ")";
+    case WSAETIMEDOUT:
+      return "connect: upłynął limit czasu (WSA " + std::to_string(wsa_err) + ")";
+    case WSAENETUNREACH:
+      return "connect: sieć nieosiągalna (WSA " + std::to_string(wsa_err) + ")";
+    case WSAEHOSTUNREACH:
+      return "connect: host nieosiągalny (WSA " + std::to_string(wsa_err) + ")";
+    default:
+      return "connect: (WSA " + std::to_string(wsa_err) + ")";
+  }
+}
+
 // Remaining time until `deadline_ns`, clamped to >= 0; monotonic_ns() comes from platform/time.
 int remaining_ms(int64_t deadline_ns) {
   const int64_t left = deadline_ns - monotonic_ns();
@@ -73,13 +90,23 @@ std::optional<TcpStream> TcpStream::connect(const std::string& host, uint16_t po
       return TcpStream(static_cast<intptr_t>(s));
     }
     if (WSAGetLastError() != WSAEWOULDBLOCK) {
-      last_error = wsa_error("connect");
+      last_error = connect_error_text(WSAGetLastError());
       closesocket(s);
       continue;
     }
-    WSAPOLLFD p{s, POLLWRNORM, 0};
-    const int pr = WSAPoll(&p, 1, remaining_ms(deadline));
-    if (pr <= 0) {
+    // WSAPoll does not reliably report a failed non-blocking connect (e.g. a refused connection)
+    // via POLLWRNORM -- it can take the full timeout to notice. select() with the socket in both
+    // writefds (success) and exceptfds (failure) reports a refusal promptly; the real error then
+    // comes from SO_ERROR.
+    fd_set wfds, efds;
+    FD_ZERO(&wfds);
+    FD_ZERO(&efds);
+    FD_SET(s, &wfds);
+    FD_SET(s, &efds);
+    const int wait_ms = remaining_ms(deadline);
+    timeval tv{wait_ms / 1000, (wait_ms % 1000) * 1000};
+    const int sr = ::select(0, nullptr, &wfds, &efds, &tv);  // nfds is ignored by Winsock
+    if (sr <= 0) {
       last_error = "connect: upłynął limit czasu";
       closesocket(s);
       continue;
@@ -87,8 +114,8 @@ std::optional<TcpStream> TcpStream::connect(const std::string& host, uint16_t po
     int soerr = 0;
     int len = sizeof(soerr);
     getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soerr), &len);
-    if (soerr != 0) {
-      last_error = "connect: (WSA " + std::to_string(soerr) + ")";
+    if (FD_ISSET(s, &efds) || soerr != 0) {
+      last_error = connect_error_text(soerr != 0 ? soerr : WSAGetLastError());
       closesocket(s);
       continue;
     }

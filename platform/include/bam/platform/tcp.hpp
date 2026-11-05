@@ -24,6 +24,7 @@ class TcpStream {
   int recv(std::span<uint8_t> buf, int timeout_ms);              // bytes, 0 = closed, -1 = timeout/error
   void close();
   bool valid() const { return fd_ != kInvalid; }
+  intptr_t native() const { return fd_; }
 
  private:
   friend class TcpListener;

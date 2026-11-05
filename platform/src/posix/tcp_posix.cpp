@@ -4,7 +4,6 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -19,10 +18,35 @@ namespace bam::platform {
 namespace {
 void set_nonblocking(int fd) { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK); }
 
+// A send() on a socket whose peer already reset the connection raises SIGPIPE by default and
+// kills the process. Linux has MSG_NOSIGNAL per-call (used in send_all() below); macOS/BSD have
+// neither MSG_NOSIGNAL nor a way to ignore SIGPIPE just for one send(), only this per-socket flag,
+// so every TcpStream fd (connect()-created and accept()-returned) gets it where it exists.
+void set_no_sigpipe(int fd) {
+#ifdef SO_NOSIGPIPE
+  const int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#else
+  (void)fd;
+#endif
+}
+
 // Remaining time until `deadline_ns`, clamped to >= 0; monotonic_ns() comes from platform/time.
 int remaining_ms(int64_t deadline_ns) {
   const int64_t left = deadline_ns - monotonic_ns();
   return left > 0 ? static_cast<int>(left / 1'000'000) : 0;
+}
+
+// poll() a single fd, retrying when interrupted by a signal, until `deadline_ns` (monotonic).
+// Otherwise behaves exactly like a plain ::poll() call: callers still check the return value and
+// p.revents themselves.
+int poll_fd(pollfd& p, int64_t deadline_ns) {
+  for (;;) {
+    p.revents = 0;
+    const int pr = ::poll(&p, 1, remaining_ms(deadline_ns));
+    if (pr < 0 && errno == EINTR && monotonic_ns() < deadline_ns) continue;
+    return pr;
+  }
 }
 }  // namespace
 
@@ -65,6 +89,7 @@ std::optional<TcpStream> TcpStream::connect(const std::string& host, uint16_t po
       continue;
     }
     set_nonblocking(fd);
+    set_no_sigpipe(fd);
     const int cr = ::connect(fd, a->ai_addr, a->ai_addrlen);
     if (cr == 0) {
       freeaddrinfo(res);
@@ -76,7 +101,7 @@ std::optional<TcpStream> TcpStream::connect(const std::string& host, uint16_t po
       continue;
     }
     pollfd p{fd, POLLOUT, 0};
-    const int pr = ::poll(&p, 1, remaining_ms(deadline));
+    const int pr = poll_fd(p, deadline);
     if (pr <= 0) {
       last_error = "connect: upłynął limit czasu";
       ::close(fd);
@@ -103,10 +128,8 @@ bool TcpStream::send_all(std::span<const uint8_t> data, int timeout_ms) {
   size_t sent = 0;
   const int64_t deadline = monotonic_ns() + int64_t(timeout_ms) * 1'000'000;
   while (sent < data.size()) {
-    const int wait_ms = remaining_ms(deadline);
-    if (wait_ms <= 0 && monotonic_ns() >= deadline) return false;
     pollfd p{static_cast<int>(fd_), POLLOUT, 0};
-    const int pr = ::poll(&p, 1, wait_ms);
+    const int pr = poll_fd(p, deadline);
     if (pr <= 0 || !(p.revents & POLLOUT)) return false;
 #ifdef MSG_NOSIGNAL
     const int flags = MSG_NOSIGNAL;
@@ -126,8 +149,9 @@ bool TcpStream::send_all(std::span<const uint8_t> data, int timeout_ms) {
 
 int TcpStream::recv(std::span<uint8_t> buf, int timeout_ms) {
   if (fd_ == kInvalid) return -1;
+  const int64_t deadline = monotonic_ns() + int64_t(timeout_ms) * 1'000'000;
   pollfd p{static_cast<int>(fd_), POLLIN, 0};
-  const int pr = ::poll(&p, 1, timeout_ms);
+  const int pr = poll_fd(p, deadline);
   if (pr <= 0 || !(p.revents & POLLIN)) return -1;
   const ssize_t n = ::recv(static_cast<int>(fd_), buf.data(), buf.size(), 0);
   if (n < 0) return -1;
@@ -187,12 +211,14 @@ std::optional<TcpListener> TcpListener::listen(const std::string& ip, uint16_t p
 }
 
 std::optional<TcpStream> TcpListener::accept(int timeout_ms) {
+  const int64_t deadline = monotonic_ns() + int64_t(timeout_ms) * 1'000'000;
   pollfd p{static_cast<int>(fd_), POLLIN, 0};
-  const int pr = ::poll(&p, 1, timeout_ms);
+  const int pr = poll_fd(p, deadline);
   if (pr <= 0 || !(p.revents & POLLIN)) return std::nullopt;
   const int cfd = ::accept(static_cast<int>(fd_), nullptr, nullptr);
   if (cfd < 0) return std::nullopt;
   set_nonblocking(cfd);
+  set_no_sigpipe(cfd);
   return TcpStream(cfd);
 }
 

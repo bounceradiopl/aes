@@ -4,6 +4,12 @@
 #include <cstdint>
 #include <thread>
 #include <vector>
+#ifndef _WIN32
+#include <cerrno>
+#include <cstring>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 #include "bam/platform/tcp.hpp"
 #include "bam/platform/time.hpp"
@@ -112,3 +118,75 @@ TEST_CASE("TCP: connect to an unresolvable name fails") {
   CHECK_FALSE(client);
   CHECK_FALSE(err.empty());
 }
+
+TEST_CASE("TCP: send_all survives a reset peer instead of raising SIGPIPE") {
+  std::string err;
+  auto listener = bp::TcpListener::listen("127.0.0.1", 0, &err);
+  REQUIRE_MESSAGE(listener, err);
+
+  // The server reads a single, modest chunk and then lets its stream go out of scope (close()).
+  // It does *not* drain everything the client sends, so unread data is still queued when it
+  // closes: the kernel resets the connection (RST) instead of a graceful FIN, exactly like a
+  // crashed/killed Icecast server would mid-upload.
+  bool server_accepted = false;
+  std::thread server([&] {
+    auto s = listener->accept(2000);
+    server_accepted = static_cast<bool>(s);
+    if (!s) return;
+    std::vector<uint8_t> buf(65536);
+    s->recv(buf, 2000);
+  });
+
+  auto client = bp::TcpStream::connect("127.0.0.1", listener->port(), 2000, &err);
+  REQUIRE_MESSAGE(client, err);
+
+  // Keep writing ~1 MB chunks right away, without waiting for the server thread: the whole point
+  // is to have several MB in flight when the reset happens, matching a continuous Icecast upload.
+  // Note: send_all()'s own poll-before-send gate already shields *this* pattern on loopback (its
+  // internal poll() reliably observes POLLHUP before the next send(), since there is no real
+  // network latency for the RST to race against) -- this is a non-regression/sanity net, not the
+  // test that actually pins the SIGPIPE fix. See the next test case for that.
+  std::vector<uint8_t> chunk(1 << 20);
+  int failures = 0;
+  const int64_t deadline = bp::monotonic_ns() + 10'000'000'000LL;
+  while (bp::monotonic_ns() < deadline && failures < 5) {
+    if (!client->send_all(chunk, 200)) ++failures;
+  }
+  server.join();
+  CHECK(server_accepted);
+  CHECK(failures > 0);
+}
+
+#ifndef _WIN32
+// POSIX only: SIGPIPE on a broken-pipe write is a POSIX-only hazard (no equivalent on Windows).
+// This test bypasses TcpStream::send_all()'s own poll-before-send guard (which, as the previous
+// test shows, already shields the common case on loopback) and writes directly to the raw fd via
+// native(), exactly like send_all() does internally once poll() has said "writable" -- the one
+// thing SO_NOSIGPIPE actually has to protect against. A forced abortive close (SO_LINGER{1,0}) on
+// the peer -- raw sockets, since TcpStream intentionally doesn't expose linger control -- gives a
+// deterministic "connection already reset" state before any write is attempted.
+TEST_CASE("TCP: a reset peer does not raise SIGPIPE when written to directly") {
+  std::string err;
+  auto listener = bp::TcpListener::listen("127.0.0.1", 0, &err);
+  REQUIRE_MESSAGE(listener, err);
+  auto client = bp::TcpStream::connect("127.0.0.1", listener->port(), 2000, &err);
+  REQUIRE_MESSAGE(client, err);
+  auto server = listener->accept(2000);
+  REQUIRE(server);
+
+  const int server_fd = static_cast<int>(server->native());
+  const linger l{1, 0};
+  setsockopt(server_fd, SOL_SOCKET, SO_LINGER, &l, sizeof(l));
+  server->close();  // abortive close: the client's connection is reset (RST), not gracefully closed
+  bp::sleep_until_ns(bp::monotonic_ns() + 200'000'000);  // let the RST be processed locally
+
+  const int client_fd = static_cast<int>(client->native());
+  std::vector<uint8_t> chunk(4096, 'x');
+  int failures = 0;
+  for (int i = 0; i < 5; ++i) {
+    const ssize_t n = ::send(client_fd, chunk.data(), chunk.size(), 0);
+    if (n < 0) ++failures;
+  }
+  CHECK(failures > 0);  // the test process must still be alive to reach this line
+}
+#endif
