@@ -14,6 +14,7 @@ SERVICE_STATUS_HANDLE g_handle = nullptr;
 SERVICE_STATUS g_status{};
 std::atomic<bool>* g_stop = nullptr;
 std::function<int(std::atomic<bool>&)> g_body;
+std::wstring g_name = kServiceName;
 
 void report(DWORD state, DWORD exit_code = NO_ERROR, DWORD wait_hint = 0) {
   static DWORD checkpoint = 1;
@@ -41,7 +42,7 @@ DWORD WINAPI control_handler(DWORD control, DWORD, LPVOID, LPVOID) {
 }
 
 void WINAPI service_main(DWORD, LPWSTR*) {
-  g_handle = RegisterServiceCtrlHandlerExW(kServiceName, control_handler, nullptr);
+  g_handle = RegisterServiceCtrlHandlerExW(g_name.c_str(), control_handler, nullptr);
   if (!g_handle) return;
   report(SERVICE_START_PENDING, NO_ERROR, 10000);
   std::atomic<bool> stop{false};
@@ -53,15 +54,16 @@ void WINAPI service_main(DWORD, LPWSTR*) {
 }
 }  // namespace
 
-bool run_as_windows_service(std::function<int(std::atomic<bool>& stop)> body) {
+bool run_as_windows_service(std::function<int(std::atomic<bool>& stop)> body, const wchar_t* service_name) {
   g_body = std::move(body);
-  SERVICE_TABLE_ENTRYW table[] = {{const_cast<LPWSTR>(kServiceName), service_main}, {nullptr, nullptr}};
+  g_name = service_name;
+  SERVICE_TABLE_ENTRYW table[] = {{g_name.data(), service_main}, {nullptr, nullptr}};
   if (StartServiceCtrlDispatcherW(table)) return true;
   return GetLastError() != ERROR_FAILED_SERVICE_CONTROLLER_CONNECT;
 }
 
-void install_event_log_sink() {
-  HANDLE source = RegisterEventSourceW(nullptr, L"BounceAES Master");
+void install_event_log_sink(const wchar_t* source_name) {
+  HANDLE source = RegisterEventSourceW(nullptr, source_name);
   if (!source) return;
   Logger::instance().add_sink([source](const LogEntry& e) {
     if (e.level == LogLevel::Info) return;
