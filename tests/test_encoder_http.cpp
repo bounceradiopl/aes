@@ -510,6 +510,18 @@ TEST_CASE("encoder HTTP: status of stations, inputs, streams and PTP") {
   CHECK(h["streams_streaming"] == 0);
   CHECK(h["ptp"] == "disabled");
 
+  // the live feed: the status document as server-sent events
+  std::string live;
+  f.client->Get("/api/live", f.auth, [&](const char* data, size_t len) {
+    live.append(data, len);
+    return live.find("\n\n") == std::string::npos;  // one event is enough
+  });
+  REQUIRE(live.rfind("event: status\ndata: ", 0) == 0);
+  const json ev = json::parse(live.substr(20, live.find("\n\n") - 20));
+  CHECK(ev["stations"][0]["id"] == "s1");
+  CHECK(live.find("zrodlo123") == std::string::npos);
+  CHECK(f.client->Get("/api/live")->status == 401);
+
   // logs and network interfaces for the panel
   CHECK(f.get("/api/logs").is_array());
   CHECK(f.get("/api/interfaces").is_array());
