@@ -12,6 +12,8 @@
 
 namespace bam {
 
+struct SdpStream;
+
 inline constexpr int kConfigVersion = 2;
 inline constexpr int kMaxWindowsRoutes = 16;  // Windows sources and Windows destinations, each
 inline constexpr int kMaxMixes = 32;
@@ -83,6 +85,12 @@ std::vector<std::string> normalize_config(Config& c);
 
 const char* ptp_role_name(PtpRole r);
 std::optional<PtpRole> parse_ptp_role(std::string_view s);
+// Receive latency of an AoIP subscription: 1–1000 ms and at least the source ptime + 1 ms
+// (shared with Bounce Encoder inputs).
+inline constexpr uint32_t kMinRxLatencyUs = 1000;
+inline constexpr uint32_t kMaxRxLatencyUs = 1'000'000;
+uint32_t min_rx_latency_us(const SdpStream& source);
+
 uint32_t ptime_us_to_frames(uint32_t us);
 double gain_to_app(const Config& c);
 double gain_to_network(const Config& c);
