@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -29,9 +30,20 @@ int32_t ramp_value(uint64_t n, int ch) { return static_cast<int32_t>(((n * 3 + c
 
 // What a 0 dB mix of two ramp channels carries: their sum, saturated like the mixer does.
 // The ramps span the whole int32 range, so about half of the ramp cycle clips.
-int32_t mix_sum(uint64_t n, int ch_a, int ch_b) {
+// (Kept for potential future use; currently superseded by mix_sum_with_gain.)
+[[maybe_unused]] int32_t mix_sum(uint64_t n, int ch_a, int ch_b) {
   const int64_t s = static_cast<int64_t>(ramp_value(n, ch_a)) + ramp_value(n, ch_b);
   return static_cast<int32_t>(std::clamp<int64_t>(s, INT32_MIN, INT32_MAX));
+}
+
+// What a gain-adjusted mix of two ramp channels carries, matching Mixer::mix_block arithmetic:
+// accumulate in double with linear gain, then round and saturate.
+int32_t mix_sum_with_gain(uint64_t n, int ch_a, int ch_b, int gain_db) {
+  const double linear_gain = std::pow(10.0, gain_db / 20.0);
+  const double acc = static_cast<double>(ramp_value(n, ch_a)) * linear_gain +
+                     static_cast<double>(ramp_value(n, ch_b)) * linear_gain;
+  const int64_t rounded = std::llround(acc);
+  return static_cast<int32_t>(std::clamp<int64_t>(rounded, INT32_MIN, INT32_MAX));
 }
 
 // A sample after an AES67 L24 hop: the low byte is gone.
@@ -554,21 +566,21 @@ TEST_CASE("engine mixes two ASIO pairs onto an AoIP output and onto an ASIO inpu
   TestEngine t;
   t.start();
   t.set_output(1, "239.69.206.1");
-  REQUIRE(t.engine->set_mix("net-out:1", true, bam::MixConfig{{{"asio-out:1", 0, false}, {"asio-out:2", 0, false}}}, std::nullopt).ok);
+  REQUIRE(t.engine->set_mix("net-out:1", true, bam::MixConfig{{{"asio-out:1", -12, false}, {"asio-out:2", -12, false}}}, std::nullopt).ok);
   REQUIRE(t.subscribe_to_output(1) == 1);
-  REQUIRE(t.engine->set_mix("asio-in:4", true, bam::MixConfig{{{"asio-out:1", 0, false}, {"asio-out:2", 0, false}}}, std::nullopt).ok);
+  REQUIRE(t.engine->set_mix("asio-in:4", true, bam::MixConfig{{{"asio-out:1", -12, false}, {"asio-out:2", -12, false}}}, std::nullopt).ok);
   FakeAsioHost host(t);
   host.run(1'500'000'000);
-  // the subscription carries ramp(pair 1) + ramp(pair 2), D_mix (kMixMarginFrames) behind
+  // the subscription carries ramp(pair 1) + ramp(pair 2) at -12 dB each, D_mix (kMixMarginFrames) behind
   const uint64_t from = host.last_start - 30000;
   std::vector<int32_t> l(10000);
   host.view->net_in(0).read(from, l.data(), l.size());
   int bad = 0;
-  for (size_t i = 0; i < l.size(); ++i) bad += l[i] != l24(mix_sum(from + i - bam::kMixMarginFrames, 0, 2));
+  for (size_t i = 0; i < l.size(); ++i) bad += l[i] != l24(mix_sum_with_gain(from + i - bam::kMixMarginFrames, 0, 2, -12));
   CHECK(bad == 0);
   auto rec = host.asio_input(3, 0);
   bad = 0;
-  for (uint32_t i = 0; i < 128; ++i) bad += rec[i] != mix_sum(host.last_start - 128 - bam::kMixMarginFrames + i, 0, 2);
+  for (uint32_t i = 0; i < 128; ++i) bad += rec[i] != mix_sum_with_gain(host.last_start - 128 - bam::kMixMarginFrames + i, 0, 2, -12);
   CHECK(bad == 0);
   CHECK(t.engine->status().mixer_late == 0);
   auto v = t.engine->routing();
