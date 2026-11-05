@@ -343,6 +343,50 @@ TEST_CASE("mixer: a member rejoining mid-fade continues its level without a jump
         std::vector<int32_t>(500, 0x10000000 + 0x08000000));  // B recovers to full strength, bit-exact
 }
 
+TEST_CASE("mixer: a bus dropped from the plan during a generation change still drops its leaving member") {
+  // Regression for: the "a bus that left the plan starts clean" reset only checked `started` and
+  // `count`, so a bus with nothing but a leaving member (count == 0, leaving_count != 0) survived
+  // a generation change that also dropped it from the plan — `started` is cleared for every bus on
+  // a generation change, so the old (started || count != 0) test missed exactly this case.
+  Ring al, ar, ol, orr;
+  std::vector<int32_t> aval(40000, 0x10000000);
+  al.ring().write(0, aval.data(), aval.size());
+  ar.ring().write(0, aval.data(), aval.size());
+  bam::Mixer mixer;
+  bam::MixBusPlan p;
+  p.bus = 0;
+  p.owner = 1;
+  p.out_left = ol.ring();
+  p.out_right = orr.ring();
+  p.inputs = {{al.ring(), ar.ring(), 1.0, 0}};
+  mixer.set_plan({p});
+  uint64_t now = 1000;
+  for (; now <= 8000; now += 48) mixer.process(now, 1);  // steady, bus 0 playing A
+
+  p.inputs.clear();  // A leaves: bus 0 now has count == 0, leaving_count == 1 (A mid-fade)
+  mixer.set_plan({p});
+  now += 48;
+  mixer.process(now, 1);  // one block into the fade: the leaving member is audible (gain 0.8)
+
+  // A clock step (generation 1 -> 2) in the same call that drops bus 0 from the plan entirely.
+  mixer.set_plan({});
+  now += 48;
+  mixer.process(now, 2);
+  const uint64_t reintroduced_at = now;  // where bus 0 is about to come back
+
+  // Bus 0 comes back under the SAME owner (no owner-change reset) with no members at all: any
+  // audio here can only be the stale leaving member resuming its frozen fade.
+  p.inputs.clear();
+  mixer.set_plan({p});
+  for (; now <= reintroduced_at + 1000; now += 48) mixer.process(now, 2);
+
+  // The window from exactly kMixMarginFrames before the reintroduction on: anything earlier is
+  // simply A's legitimate pre-removal playback (still on the ring, untouched history) and is not
+  // part of what this test is checking.
+  auto got = span(ol, reintroduced_at - bam::kMixMarginFrames, reintroduced_at + 500);
+  CHECK(got == std::vector<int32_t>(got.size(), 0));  // silent: the old member must not resume
+}
+
 TEST_CASE("mixer: a bus taken over by another destination starts clean") {
   Ring al, ar, bl, br, ol, orr;
   std::vector<int32_t> neg(40000, -0x10000000), pos(40000, 0x20000000);

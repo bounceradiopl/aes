@@ -216,9 +216,12 @@ void Mixer::process(uint64_t now_s, uint64_t generation) {
         peak_[bus.bus * 2 + c].store(peak[c] > 1e-6f ? 20.0f * std::log10(peak[c]) : -120.0f, std::memory_order_relaxed);
     }
   }
-  // a bus that left the plan starts clean when it is used again
+  // a bus that left the plan starts clean when it is used again; `started` alone is not enough
+  // here because a generation change (above) resets it on every bus, including one with no live
+  // members but a frozen leaving member (count == 0, leaving_count != 0) still owed a reset
   for (int b = 0; b < kMixBuses; ++b)
-    if (!in_plan[b] && (state_[b].started || state_[b].count != 0)) state_[b] = State{};
+    if (!in_plan[b] && (state_[b].started || state_[b].count != 0 || state_[b].leaving_count != 0))
+      state_[b] = State{};
 }
 
 }  // namespace bam
