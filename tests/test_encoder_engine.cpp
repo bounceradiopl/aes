@@ -185,17 +185,29 @@ struct AesSender {
 
 // ---- a fake Icecast server on 127.0.0.1: accepts any number of source connections ----
 
+// With refuse_busy, like a real Icecast it answers 403 to a source for a mountpoint another
+// source still holds. "Still holds" is decided when the new connection is accepted, by looking
+// at the older connections' sockets themselves (a close sent before the new connect is always
+// seen), so the check does not depend on thread timing.
 struct FakeIcecast {
   struct Conn {
     int id = 0;
+    bp::TcpStream s;
+    std::mutex io;  // around every read of `s` (the serving thread and the busy check)
+    std::atomic<bool> peek_wanted{false};  // the busy check waits for `io`: the serving thread steps aside
     std::string mount;
     std::mutex m;
     std::vector<uint8_t> body;
     std::atomic<size_t> bytes{0};
     std::atomic<bool> open{true};
+    bool refused = false;
+    std::atomic<bool> holds_mount{false};  // answered 200: a source on its mountpoint
+    int64_t accepted_ns = 0;
   };
 
   bp::TcpListener listener;
+  std::atomic<bool> refuse_busy{false};
+  std::atomic<int> refused{0};
   std::atomic<bool> stop{false};
   std::mutex m;
   std::vector<std::shared_ptr<Conn>> conns;
@@ -217,6 +229,27 @@ struct FakeIcecast {
   }
   uint16_t port() const { return listener.port(); }
 
+  // True when the peer closed c (checked on its socket now, not when its thread gets to it).
+  bool closed_now(Conn& c) {
+    if (!c.open) return true;
+    c.peek_wanted = true;
+    std::lock_guard lock(c.io);
+    c.peek_wanted = false;
+    if (!c.open) return true;
+    std::vector<uint8_t> buf(65536);
+    for (;;) {
+      const int n = c.s.recv_some(buf, 0);
+      if (n < 0) {
+        c.open = false;
+        return true;
+      }
+      if (n == 0) return false;
+      std::lock_guard l2(c.m);
+      c.body.insert(c.body.end(), buf.begin(), buf.begin() + n);
+      c.bytes = c.body.size();
+    }
+  }
+
   void accept_loop() {
     int next_id = 1;
     while (!stop) {
@@ -224,20 +257,32 @@ struct FakeIcecast {
       if (!s) continue;
       auto c = std::make_shared<Conn>();
       c->id = next_id++;
+      c->accepted_ns = bp::monotonic_ns();
+      c->s = std::move(*s);
+      std::vector<std::shared_ptr<Conn>> busy;  // sources holding a mount at this moment
       {
         std::lock_guard lock(m);
+        // only sources already on their mountpoint (a connection still sending its request
+        // holds none, and its request must not be read here)
+        for (const auto& o : conns)
+          if (o->holds_mount && !closed_now(*o)) busy.push_back(o);
         conns.push_back(c);
       }
-      serving.emplace_back([this, c, s = std::move(*s)]() mutable { serve(*c, s); });
+      serving.emplace_back([this, c, busy] { serve(*c, busy); });
     }
   }
 
-  void serve(Conn& c, bp::TcpStream& s) {
+  void serve(Conn& c, const std::vector<std::shared_ptr<Conn>>& busy) {
     std::string head;
     std::vector<uint8_t> chunk(65536);
     size_t end = std::string::npos;
     while (!stop && end == std::string::npos) {
-      const int n = s.recv_some(chunk, 50);
+      int n;
+      while (c.peek_wanted) std::this_thread::yield();
+      {
+        std::lock_guard lock(c.io);
+        n = c.s.recv_some(chunk, 2);
+      }
       if (n < 0) {
         c.open = false;
         return;
@@ -246,22 +291,48 @@ struct FakeIcecast {
       end = head.find("\r\n\r\n");
     }
     if (end == std::string::npos) return;
+    // "PUT /mount HTTP/1.1"
+    const size_t a = head.find(' '), b = head.find(' ', a + 1);
+    const std::string mount = head.substr(a + 1, b - a - 1);
+    bool taken = false;
+    for (const auto& o : busy) {
+      std::lock_guard lock(o->m);
+      taken = taken || o->mount == mount;
+    }
+    if (refuse_busy && taken) {
+      {
+        std::lock_guard lock(c.m);
+        c.mount = mount;
+        c.refused = true;
+      }
+      ++refused;
+      const std::string no = "HTTP/1.1 403 Forbidden\r\n\r\n";
+      c.s.send_all(std::span(reinterpret_cast<const uint8_t*>(no.data()), no.size()), 2000);
+      c.s.close();
+      c.open = false;
+      return;
+    }
     {
-      // "PUT /mount HTTP/1.1"
-      const size_t a = head.find(' '), b = head.find(' ', a + 1);
       std::lock_guard lock(c.m);
-      c.mount = head.substr(a + 1, b - a - 1);
+      c.mount = mount;
       c.body.assign(head.begin() + std::ptrdiff_t(end + 4), head.end());
       c.bytes = c.body.size();
     }
     const std::string ok = "HTTP/1.1 200 OK\r\n\r\n";
-    if (!s.send_all(std::span(reinterpret_cast<const uint8_t*>(ok.data()), ok.size()), 2000)) {
+    if (!c.s.send_all(std::span(reinterpret_cast<const uint8_t*>(ok.data()), ok.size()), 2000)) {
       c.open = false;
       return;
     }
-    while (!stop) {
-      const int n = s.recv_some(chunk, 50);
+    c.holds_mount = true;
+    while (!stop && c.open) {
+      int n;
+      while (c.peek_wanted) std::this_thread::yield();
+      {
+        std::lock_guard lock(c.io);
+        n = c.open ? c.s.recv_some(chunk, 2) : -1;
+      }
       if (n < 0) break;
+      if (n == 0) continue;
       std::lock_guard lock(c.m);
       c.body.insert(c.body.end(), chunk.begin(), chunk.begin() + n);
       c.bytes = c.body.size();
@@ -269,12 +340,12 @@ struct FakeIcecast {
     c.open = false;
   }
 
-  // The newest connection to `mount`, or nullptr.
+  // The newest accepted (not refused) connection to `mount`, or nullptr.
   std::shared_ptr<Conn> latest(const std::string& mount) {
     std::lock_guard lock(m);
     for (auto it = conns.rbegin(); it != conns.rend(); ++it) {
       std::lock_guard l2((*it)->m);
-      if ((*it)->mount == mount) return *it;
+      if ((*it)->mount == mount && !(*it)->refused) return *it;
     }
     return nullptr;
   }
@@ -382,6 +453,38 @@ be::EncoderEngineOptions no_ptp() {
   o.enable_ptp = false;
   return o;
 }
+
+using SampleFn = std::function<int32_t(uint64_t, int)>;
+
+uint64_t media_now(const be::EncoderEngine& e) { return e.media_clock().sample_at(bp::monotonic_ns()); }
+
+// The FLAC stream a server connection carries, decoded.
+Decoded decode_conn(FakeIcecast& server, FakeIcecast::Conn& c) {
+  const auto ogg = last_ogg_stream(server.body(c));
+  REQUIRE(!ogg.empty());
+  Decoded d = decode_ogg_flac(ogg);
+  CHECK_FALSE(d.error);
+  return d;
+}
+
+bool frame_is(const Decoded& d, size_t n, uint64_t t, const SampleFn& fn) {
+  return d.samples[n * 2] == fn(t, 0) && d.samples[n * 2 + 1] == fn(t, 1);
+}
+
+// The media sample at which decoded frames [n0, n0 + len) start, when they equal fn bit for bit
+// there; candidates [lo, hi) (the noise in the signals makes a match unique).
+std::optional<uint64_t> find_start(const Decoded& d, size_t n0, size_t len, const SampleFn& fn, uint64_t lo, uint64_t hi) {
+  REQUIRE(d.samples.size() / 2 >= n0 + len);
+  for (uint64_t c = lo; c < hi; ++c) {
+    if (!frame_is(d, n0, c, fn)) continue;
+    bool all = true;
+    for (size_t i = 1; i < len && all; ++i) all = frame_is(d, n0 + i, c + i, fn);
+    if (all) return c;
+  }
+  return std::nullopt;
+}
+
+int32_t sig_dc(uint64_t, int) { return 1 << 30; }  // +0.5 full scale: 16384 in 16 bit
 
 }  // namespace
 
@@ -496,12 +599,12 @@ TEST_CASE("encoder engine: editing one stream restarts only that stream") {
     return;
   }
   FakeIcecast server;
+  server.refuse_busy = true;  // like Icecast: 403 for a second source on a mountpoint in use
   be::EncoderConfig cfg = be::default_encoder_config();
   cfg.interface_ip = kLoopback;
   be::StationConfig st;
   st.id = "s1";
   st.name = "Radio Test";
-  // a signal on the input (Ogg FLAC sends digital silence only in pages of ~20 s)
   be::InputConfig in;
   in.sdp = make_sdp("Szum", "239.69.221.1", 15221);
   in.latency_us = 20000;
@@ -515,12 +618,16 @@ TEST_CASE("encoder engine: editing one stream restarts only that stream") {
   std::string err;
   REQUIRE_MESSAGE(engine.start(cfg, &err), err);
   AesSender sender(engine, "239.69.221.1", 15221, sig_a);
-  auto streaming = [&](const std::string& id) {
+  auto stream_status = [&](const std::string& id) -> std::optional<be::StreamStatus> {
     const be::EncoderStatus now = engine.status();
-    if (now.stations.empty()) return false;
+    if (now.stations.empty()) return std::nullopt;
     for (const auto& s : now.stations[0].streams)
-      if (s.id == id) return s.icecast.state == be::IcecastState::Streaming && s.icecast.bytes_sent > 0;
-    return false;
+      if (s.id == id) return s;
+    return std::nullopt;
+  };
+  auto streaming = [&](const std::string& id) {
+    const auto s = stream_status(id);
+    return s && s->icecast.state == be::IcecastState::Streaming && s->icecast.bytes_sent > 0;
   };
   REQUIRE(wait_for([&] { return streaming("str1") && streaming("str2"); }, 10000));
   auto a1 = server.latest("/a.mp3");
@@ -529,6 +636,8 @@ TEST_CASE("encoder engine: editing one stream restarts only that stream") {
   REQUIRE(b1);
   REQUIRE_MESSAGE(wait_for([&] { return a1->bytes > 1000 && b1->bytes > 1000; }, 10000),
                   "a: " << a1->bytes.load() << " bytes, b: " << b1->bytes.load() << " bytes");
+  REQUIRE(wait_for([&] { return sender.first_ts != 0; }, 5000));
+  const uint64_t inputs_from = sender.first_ts;
   const be::EncoderStatus before = engine.status();
   CHECK_FALSE(before.stations[0].streams[0].codec_library.empty());  // libmp3lame's path
   CHECK(before.stations[0].streams[1].codec_library.empty());        // FLAC is built in
@@ -538,13 +647,37 @@ TEST_CASE("encoder engine: editing one stream restarts only that stream") {
   cfg.stations[0].streams[1].gain_db = -3.0;
   cfg.stations[0].inputs[0].gain_db = -10.0;
   cfg.stations[0].inputs[0].delay_s = 0.5;
-  engine.apply_config(ready(cfg));
+  // the same save also adds a station with three inputs (3 x 23 MB of delay lines to build):
+  // the edited stream must not reconnect while its old source still holds the mountpoint
+  be::StationConfig s2;
+  s2.id = "s2";
+  s2.name = "Radio Druga";
+  for (int i = 0; i < 3; ++i) {
+    be::InputConfig x;
+    x.sdp = make_sdp("Druga " + std::to_string(i), "239.69.226." + std::to_string(i + 1), 15226);
+    s2.inputs.push_back(x);
+  }
+  cfg.stations.push_back(s2);
+  const be::EncoderConfig next = ready(cfg);
+  const int64_t apply_from = bp::monotonic_ns();
+  engine.apply_config(next);
+  const int64_t apply_to = bp::monotonic_ns();
+  const uint64_t changed_at = media_now(engine);
 
+  // str1 comes back on a new connection without ever being refused (the old source went first)
+  bool saw_error = false;
   REQUIRE(wait_for([&] {
+    const auto s1 = stream_status("str1");
+    saw_error = saw_error || (s1 && s1->icecast.state == be::IcecastState::Error);
     auto a2 = server.latest("/a.mp3");
     return a2 && a2->id != a1->id && a2->bytes > 1000;
   }, 10000));
-  CHECK(wait_for([&] { return !a1->open; }, 5000));  // the old str1 connection was closed
+  MESSAGE("apply took " << (apply_to - apply_from) / 1000 << " us; str1's new connection accepted "
+          << (server.latest("/a.mp3")->accepted_ns - apply_from) / 1000 << " us after the apply began; refused " << server.refused.load());
+  CHECK(server.refused == 0);
+  CHECK_FALSE(saw_error);
+  CHECK(stream_status("str1")->icecast.error.empty());
+  CHECK(!a1->open);  // the old str1 connection was closed
   const size_t b_bytes = b1->bytes;
   CHECK(wait_for([&] { return b1->bytes > b_bytes + 1000; }, 5000));  // str2 keeps sending
   CHECK(b1->open);
@@ -554,20 +687,211 @@ TEST_CASE("encoder engine: editing one stream restarts only that stream") {
   CHECK(after.stations[0].streams[1].started_ns == before.stations[0].streams[1].started_ns);  // str2 neither
   CHECK(after.stations[0].streams[0].started_ns != before.stations[0].streams[0].started_ns);
   CHECK(after.stations[0].streams[0].bitrate_kbps == 192);
-  CHECK(after.stations[0].streams[1].icecast.reconnects == 0);
-  // the input kept its socket and RxStream: its counters went on
+  CHECK_MESSAGE(after.stations[0].streams[1].icecast.reconnects == 0, "str2: " << after.stations[0].streams[1].icecast.error);
+  // the input kept its socket and RxStream
+  CHECK(after.stations[0].inputs[0].receiver_id == before.stations[0].inputs[0].receiver_id);
   CHECK(after.stations[0].inputs[0].rx.packets > before.stations[0].inputs[0].rx.packets);
-  CHECK(after.stations[0].inputs[0].gain_db == -10.0);
-  CHECK(after.stations[0].inputs[0].delay_s == 0.5);
+
+  // the changes took effect: str2 now carries the input 0.5 s later at -10 dB, times -3 dB
+  REQUIRE(wait_for([&] { return media_now(engine) > changed_at + 2 * 48000 + 24000; }, 10000));
+  const Decoded dec = decode_conn(server, *b1);
+  const size_t frames = dec.samples.size() / 2;
+  REQUIRE(frames > 48000 * 2);
+  const float g_in = float(std::pow(10.0, -10.0 / 20.0)), g_str = float(std::pow(10.0, -3.0 / 20.0));
+  const SampleFn changed = [&](uint64_t t, int ch) { return pcm16(to_float(sig_a(t - 24000, ch)) * g_in * g_str); };
+  const auto start = find_start(dec, frames - 48000, 48000, changed, inputs_from, media_now(engine));
+  REQUIRE_MESSAGE(start, "the last second of str2 is not the input delayed 0.5 s at -13 dB");
+  CHECK(*start >= changed_at);
 
   // disabling the station closes both connections
   cfg.stations[0].enabled = false;
   engine.apply_config(ready(cfg));
   CHECK(wait_for([&] { return !b1->open && !server.latest("/a.mp3")->open; }, 5000));
   const be::EncoderStatus off = engine.status();
-  REQUIRE(off.stations.size() == 1);
+  REQUIRE(off.stations.size() == 2);
   CHECK_FALSE(off.stations[0].running);
+  CHECK(off.stations[1].running);
   CHECK(off.stations[0].streams[0].icecast.state == be::IcecastState::Idle);
+}
+
+TEST_CASE("encoder engine: deleting the first of two inputs leaves the second one as it was") {
+  FakeIcecast server;
+  const uint16_t port = 15223;
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  be::StationConfig st;
+  st.id = "s1";
+  st.name = "Radio Test";
+  be::InputConfig a;
+  a.sdp = make_sdp("A", "239.69.223.1", port);
+  a.delay_s = 1.0;
+  a.latency_us = 20000;
+  be::InputConfig b;
+  b.sdp = make_sdp("B", "239.69.223.2", port);
+  b.latency_us = 20000;
+  st.inputs = {a, b};
+  st.streams = {stream("str1", be::Codec::Flac, 0, 48000, server.port(), "/d.ogg")};
+  cfg.stations = {st};
+  cfg = ready(cfg);
+
+  const int base_rx = be::detail::testing::live_input_receivers();
+  const int base_lines = be::detail::testing::live_delay_lines();
+  be::EncoderEngine engine(no_ptp());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  AesSender send_a(engine, "239.69.223.1", port, sig_a);
+  AesSender send_b(engine, "239.69.223.2", port, sig_b);
+  REQUIRE(wait_for([&] { return send_a.first_ts != 0 && send_b.first_ts != 0; }, 5000));
+  const uint64_t inputs_from = std::max(send_a.first_ts.load(), send_b.first_ts.load());
+  REQUIRE(wait_for([&] {
+    auto c = server.latest("/d.ogg");
+    return c && c->bytes > 200'000 && media_now(engine) > inputs_from + 3 * 48000;
+  }, 30000));
+  auto conn = server.latest("/d.ogg");
+  CHECK(be::detail::testing::live_input_receivers() == base_rx + 2);
+  CHECK(be::detail::testing::live_delay_lines() == base_lines + 2);
+  const be::EncoderStatus st0 = engine.status();
+  const uint64_t b_receiver = st0.stations[0].inputs[1].receiver_id;
+  const size_t frames_before = decode_conn(server, *conn).samples.size() / 2;
+  REQUIRE(frames_before > 48000);
+
+  cfg.stations[0].inputs.erase(cfg.stations[0].inputs.begin());  // delete A
+  engine.apply_config(ready(cfg));
+  const uint64_t changed_at = media_now(engine);
+  // without any further API call, A's socket and its 23 MB delay line go within about a second
+  CHECK(wait_for([&] {
+    return be::detail::testing::live_input_receivers() == base_rx + 1 && be::detail::testing::live_delay_lines() == base_lines + 1;
+  }, 2000));
+
+  REQUIRE(wait_for([&] { return media_now(engine) > changed_at + 2 * 48000; }, 10000));
+  const be::EncoderStatus st1 = engine.status();
+  REQUIRE(st1.stations[0].inputs.size() == 1);
+  CHECK(st1.stations[0].inputs[0].receiver_id == b_receiver);  // B kept its socket and RxStream
+  CHECK(st1.stations[0].inputs[0].signal);
+  CHECK(server.latest("/d.ogg")->id == conn->id);
+  const Decoded dec = decode_conn(server, *conn);
+  const size_t frames = dec.samples.size() / 2;
+
+  const SampleFn both = [](uint64_t t, int ch) { return pcm16(to_float(sig_a(t - 48000, ch)) + to_float(sig_b(t, ch))); };
+  const SampleFn only_b = [](uint64_t t, int ch) { return pcm16(to_float(sig_b(t, ch))); };
+  const size_t n0 = frames_before - 24000;  // before the change: A (delayed 1 s) + B
+  const auto t0 = find_start(dec, n0, 4800, both, inputs_from, changed_at);
+  REQUIRE_MESSAGE(t0, "no window of A + B before the change");
+  CHECK(*t0 >= inputs_from + 48000 + 4800);
+  auto t = [&](size_t n) { return *t0 + (n - n0); };
+  size_t n = n0;
+  while (n < frames && frame_is(dec, n, t(n), both)) ++n;
+  const size_t ab_end = n;
+  CHECK(ab_end - n0 >= 4800);
+  // then A fades out (at most 240 frames) and B goes on alone, bit for bit, with no gap
+  size_t b_from = ab_end;
+  for (size_t run = 0; b_from + run < frames && run < 16;) {
+    if (frame_is(dec, b_from + run, t(b_from + run), only_b)) {
+      ++run;
+    } else {
+      b_from += run + 1;
+      run = 0;
+    }
+  }
+  MESSAGE("A + B until frame " << ab_end << ", fade " << (b_from - ab_end) << " frames, B alone for " << (frames - b_from));
+  CHECK(b_from - ab_end <= 240);
+  size_t wrong = 0;
+  for (size_t m = b_from; m < frames; ++m) wrong += !frame_is(dec, m, t(m), only_b);
+  CHECK(wrong == 0);
+  CHECK(frames - b_from >= 48000);
+}
+
+TEST_CASE("encoder engine: a new SDP on an input fades the old source out") {
+  FakeIcecast server;
+  const uint16_t port = 15224;
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  be::StationConfig st;
+  st.id = "s1";
+  st.name = "Radio Test";
+  be::InputConfig a;
+  a.sdp = make_sdp("DC", "239.69.224.1", port);
+  a.delay_s = 0.5;
+  a.latency_us = 20000;
+  st.inputs = {a};
+  st.streams = {stream("str1", be::Codec::Flac, 0, 48000, server.port(), "/e.ogg")};
+  cfg.stations = {st};
+  cfg = ready(cfg);
+
+  be::EncoderEngine engine(no_ptp());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  AesSender dc(engine, "239.69.224.1", port, sig_dc);
+  REQUIRE(wait_for([&] { return dc.first_ts != 0; }, 5000));
+  REQUIRE(wait_for([&] {
+    auto c = server.latest("/e.ogg");
+    return c && media_now(engine) > dc.first_ts + 3 * 48000;
+  }, 30000));
+  auto conn = server.latest("/e.ogg");
+  const uint64_t receiver = engine.status().stations[0].inputs[0].receiver_id;
+
+  cfg.stations[0].inputs[0].sdp = make_sdp("Cisza", "239.69.224.2", port);  // nobody sends there
+  engine.apply_config(ready(cfg));
+  const uint64_t changed_at = media_now(engine);
+  REQUIRE(wait_for([&] { return media_now(engine) > changed_at + 2 * 48000; }, 10000));
+  CHECK(engine.status().stations[0].inputs[0].receiver_id != receiver);  // a new socket for the new SDP
+  CHECK(server.latest("/e.ogg")->id == conn->id);
+
+  const Decoded dec = decode_conn(server, *conn);
+  const int32_t* d = dec.samples.data();
+  const size_t frames = dec.samples.size() / 2;
+  // the steady DC (after the 0.5 s delay filled), then the switch, then silence
+  size_t steady = 0;
+  for (size_t n = 0, run = 0; n < frames && !steady; ++n) {
+    run = (d[n * 2] == 16384 && d[n * 2 + 1] == 16384) ? run + 1 : 0;
+    if (run == 24000) steady = n + 1 - run;
+  }
+  REQUIRE_MESSAGE(steady, "no steady DC in the stream");
+  int max_step = 0;
+  size_t last_dc = steady;
+  for (size_t n = steady + 1; n < frames; ++n) {
+    for (int ch = 0; ch < 2; ++ch) max_step = std::max(max_step, std::abs(d[n * 2 + ch] - d[(n - 1) * 2 + ch]));
+    if (d[n * 2] == 16384) last_dc = n;
+  }
+  size_t zeros = 0;
+  for (size_t n = frames; n > 0 && d[(n - 1) * 2] == 0 && d[(n - 1) * 2 + 1] == 0; --n) ++zeros;
+  MESSAGE("largest step after the DC settled: " << max_step << " LSB; silence at the end: " << zeros << " frames");
+  CHECK(max_step <= 32768 / 240 + 1);  // a 5 ms ramp, never a cut
+  CHECK(zeros >= 48000);               // nothing of the old source (or its delay line) afterwards
+  CHECK(frames - zeros - last_dc <= 241);
+}
+
+TEST_CASE("encoder engine: an input whose socket failed is tried again") {
+  struct Restore {
+    ~Restore() {
+      be::detail::testing::fail_next_input_opens(0);
+      be::detail::testing::set_input_retry_ms(0);
+    }
+  } restore;
+  be::detail::testing::fail_next_input_opens(1);
+  be::detail::testing::set_input_retry_ms(300);
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  be::StationConfig st;
+  st.id = "s1";
+  st.name = "Radio Test";
+  be::InputConfig in;
+  in.sdp = make_sdp("Szum", "239.69.225.1", 15225);
+  in.latency_us = 20000;
+  st.inputs = {in};
+  cfg.stations = {st};
+  be::EncoderEngine engine(no_ptp());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(ready(cfg), &err), err);
+  const be::InputStatus first = engine.status().stations.at(0).inputs.at(0);
+  CHECK(first.error.find("gniazdo odbiorcze") != std::string::npos);
+  CHECK_FALSE(first.signal);
+  AesSender sender(engine, "239.69.225.1", 15225, sig_a);
+  CHECK(wait_for([&] {
+    const auto in = engine.status().stations.at(0).inputs.at(0);
+    return in.error.empty() && in.signal;
+  }, 5000));
+  CHECK(engine.status().stations[0].inputs[0].receiver_id != first.receiver_id);
 }
 
 TEST_CASE("encoder engine: a stream whose codec library is missing says so and runs nothing") {
@@ -701,6 +1025,7 @@ TEST_CASE("encoder engine: the PTP slave follows a master on loopback") {
   CHECK(st.ptp.domain == kDomain);
   CHECK(st.ptp.grandmaster == master.engine->status().ptp.grandmaster);
   CHECK(std::llabs(st.ptp.offset_ns) < 1'000'000);
+  CHECK_FALSE(st.ptp_free_run);  // free-run: not locked to a master right now
   // the media clock now follows the master's (10 s away before): "now" is the same sample within 1 ms
   const bam::MediaClock mine = engine.media_clock();
   std::optional<bp::SharedMemory> shm = bp::SharedMemory::open(master.opts.shm_name, bam::ShmLayout::total_bytes(), &err);

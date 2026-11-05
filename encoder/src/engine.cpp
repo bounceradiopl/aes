@@ -4,6 +4,7 @@
 #include "bam/encoder/engine.hpp"
 
 #include <algorithm>
+#include <condition_variable>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -28,9 +29,13 @@ namespace {
 
 constexpr int64_t kTaiOffsetNs = 37LL * 1'000'000'000;  // PTP timescale is TAI
 constexpr uint32_t kDefaultLatencyFrames = 240;         // a station without inputs: 5 ms
+constexpr int64_t kHousekeepingNs = 100'000'000;        // housekeeping thread period
+// A removed input keeps receiving this long, so the station can fade it out on real audio.
+constexpr int64_t kLingerNs = 500'000'000;
 
 // Stops the workers side by side: each IcecastClient::stop() may take a few hundred ms.
 void stop_workers(std::vector<std::shared_ptr<StreamWorker>> workers) {
+  if (workers.empty()) return;
   if (workers.size() == 1) {
     workers[0]->stop();
     return;
@@ -43,19 +48,29 @@ void stop_workers(std::vector<std::shared_ptr<StreamWorker>> workers) {
 
 }  // namespace
 
-// The running part of one enabled station, by input index and stream id.
+// One enabled input of a station. Its identity is its key (SDP | latency | interface): the
+// receiver and the delay line live as long as an input with that key stays in the station, at
+// whatever position; another key is another input (the old one fades out, the new one in).
+struct InputEntry {
+  std::string key;
+  InputConfig cfg;
+  std::shared_ptr<InputRx> rx;
+  std::shared_ptr<DelayLine> delay;
+  std::shared_ptr<const StationPlan::Input> plan_input;
+};
+
+// The running part of one enabled station.
 struct StationRuntime {
   StationConfig cfg;
-  std::array<std::shared_ptr<InputRx>, kStationInputs> rx;
-  std::array<std::shared_ptr<DelayLine>, kStationInputs> delays;
-  std::array<std::shared_ptr<const StationPlan::Input>, kStationInputs> plan_inputs;
-  std::map<std::string, std::shared_ptr<StreamWorker>> streams;
+  std::vector<std::shared_ptr<InputEntry>> inputs;  // per configured input; null when disabled
+  std::map<std::string, std::shared_ptr<StreamWorker>> streams;  // by stream id
   std::unique_ptr<Station> station;
 };
 
 struct EncoderEngine::Impl {
   EncoderEngineOptions opts;
-  mutable std::mutex m;  // everything below; held by every public method
+  std::mutex lifecycle;  // serializes start() and stop()
+  mutable std::mutex m;  // everything below; held by every public method and the housekeeper
   EncoderConfig config;
   bool running = false;
   std::string iface;
@@ -64,6 +79,12 @@ struct EncoderEngine::Impl {
   std::unique_ptr<PtpClient> ptp;
   std::unique_ptr<RxThread> rx;
   std::map<std::string, std::unique_ptr<StationRuntime>> stations;  // enabled stations by id
+  std::vector<std::pair<std::shared_ptr<InputRx>, int64_t>> lingering;  // removed inputs, since when
+
+  std::mutex hk_m;
+  std::condition_variable hk_cv;
+  bool hk_stop = false;
+  std::thread housekeeper;
 
   explicit Impl(EncoderEngineOptions o) : opts(o) { set_free_run(); }
 
@@ -74,9 +95,94 @@ struct EncoderEngine::Impl {
   }
 
   void apply(const EncoderConfig& next);
+  void update_inputs(StationRuntime& rt, const StationConfig& sc);
+  void publish(StationRuntime& rt);
+  void update_rx_set();
+  void housekeeping_loop();
+  void housekeeping();
   void shutdown();
   StationStatus station_status(const StationConfig& sc) const;
 };
+
+// The workers of the current runtime that `next` does not keep exactly as they are.
+static bool keeps_worker(const EncoderConfig& next, const std::string& station_id, const StreamWorker& w) {
+  for (const StationConfig& sc : next.stations) {
+    if (sc.id != station_id) continue;
+    if (!sc.enabled) return false;
+    for (const StreamConfig& s : sc.streams)
+      if (s.id == w.config().id) return s.enabled && detail::stream_key(s, sc.name) == w.key();
+    return false;
+  }
+  return false;
+}
+
+void EncoderEngine::Impl::update_inputs(StationRuntime& rt, const StationConfig& sc) {
+  const int64_t now = platform::monotonic_ns();
+  std::vector<std::shared_ptr<InputEntry>> old = std::move(rt.inputs);
+  rt.inputs.assign(sc.inputs.size(), nullptr);
+  for (size_t i = 0; i < sc.inputs.size(); ++i) {
+    const InputConfig& in = sc.inputs[i];
+    if (!in.enabled) continue;
+    const std::string key = detail::input_key(in, iface);
+    // the same input by key: at the same position first, else wherever it was
+    std::shared_ptr<InputEntry>* found = nullptr;
+    if (i < old.size() && old[i] && old[i]->key == key) found = &old[i];
+    for (size_t j = 0; j < old.size() && !found; ++j)
+      if (old[j] && old[j]->key == key) found = &old[j];
+    std::shared_ptr<InputEntry> e;
+    if (found) {
+      e = std::move(*found);
+    } else {
+      // a new input: socket, rings and its own 23 MB delay line, built here (not on the station thread)
+      e = std::make_shared<InputEntry>();
+      e->key = key;
+      e->rx = detail::make_input_rx(in, iface);
+      e->delay = detail::make_delay_line();
+      if (!e->rx->error.empty())
+        log_warning("Stacja \"" + sc.name + "\", wejście " + std::to_string(i + 1) + ": odbiór nieaktywny: " + e->rx->error);
+    }
+    e->cfg = in;
+    const double gain = db_to_gain(in.gain_db);
+    const auto& pi = e->plan_input;
+    if (!pi || pi->rx != e->rx || pi->gain != gain || pi->delay_s != in.delay_s)
+      e->plan_input = std::make_shared<const StationPlan::Input>(StationPlan::Input{e->rx, e->delay, gain, in.delay_s});
+    rt.inputs[i] = std::move(e);
+  }
+  // inputs no longer there: the station fades them out; they keep receiving meanwhile
+  for (auto& e : old)
+    if (e) lingering.emplace_back(e->rx, now);
+}
+
+void EncoderEngine::Impl::publish(StationRuntime& rt) {
+  auto plan = std::make_shared<StationPlan>();
+  uint32_t latency = 0;
+  size_t n = 0;
+  for (const auto& e : rt.inputs) {
+    if (!e || n == plan->inputs.size()) continue;
+    plan->inputs[n++] = e->plan_input;
+    latency = std::max(latency, e->rx->latency_frames);
+  }
+  plan->latency_frames = latency ? latency : kDefaultLatencyFrames;
+  for (const StreamConfig& s : rt.cfg.streams) {
+    auto it = rt.streams.find(s.id);
+    if (it != rt.streams.end() && it->second->active()) plan->streams.push_back(it->second);
+  }
+  if (rt.station) {
+    rt.station->publish(std::move(plan));
+  } else {
+    rt.station = std::make_unique<Station>(clock, std::move(plan));
+    log_info("Stacja \"" + rt.cfg.name + "\" uruchomiona");
+  }
+}
+
+void EncoderEngine::Impl::update_rx_set() {
+  auto set = std::make_shared<detail::RxSet>();
+  for (const auto& [id, rt] : stations)
+    for (const auto& e : rt->inputs)
+      if (e) set->push_back(e->rx);
+  for (const auto& [in, since] : lingering) set->push_back(in);
+  if (rx) rx->set_inputs(std::move(set));
+}
 
 void EncoderEngine::Impl::apply(const EncoderConfig& next) {
   const std::string next_iface = next.interface_ip.empty() ? platform::default_interface_ip() : next.interface_ip;
@@ -88,9 +194,25 @@ void EncoderEngine::Impl::apply(const EncoderConfig& next) {
     ptp = std::make_unique<PtpClient>(clock, next.ptp_domain, iface);
   }
 
+  // Every stream that goes away or changes is stopped first, before any replacement connects:
+  // Icecast refuses (403) a second source on a mountpoint whose old source is still connected.
+  // Until its station takes the new plan, the mix still goes into the stopped worker's queue.
+  {
+    std::vector<std::shared_ptr<StreamWorker>> retired;
+    for (auto& [id, rt] : stations) {
+      for (auto it = rt->streams.begin(); it != rt->streams.end();) {
+        if (keeps_worker(next, id, *it->second)) {
+          ++it;
+        } else {
+          retired.push_back(it->second);
+          it = rt->streams.erase(it);
+        }
+      }
+    }
+    stop_workers(std::move(retired));
+  }
+
   std::map<std::string, std::unique_ptr<StationRuntime>> kept;
-  std::vector<std::unique_ptr<StationRuntime>> gone;
-  std::vector<std::shared_ptr<StreamWorker>> retired;
   for (const StationConfig& sc : next.stations) {
     if (!sc.enabled) continue;
     std::unique_ptr<StationRuntime> rt;
@@ -100,83 +222,78 @@ void EncoderEngine::Impl::apply(const EncoderConfig& next) {
     } else {
       rt = std::make_unique<StationRuntime>();
     }
-    auto plan = std::make_shared<StationPlan>();
-
-    // inputs: a new socket only for a new SDP, latency or interface; delay lines (23 MB) are
-    // made here, never on the station thread, and kept while the input stays enabled
-    uint32_t latency = 0;
-    for (int i = 0; i < kStationInputs; ++i) {
-      const InputConfig* in = size_t(i) < sc.inputs.size() && sc.inputs[i].enabled ? &sc.inputs[i] : nullptr;
-      if (!in) {
-        rt->rx[i].reset();
-        rt->delays[i].reset();
-        rt->plan_inputs[i].reset();
-        continue;
-      }
-      if (!rt->rx[i] || rt->rx[i]->key != detail::input_key(*in, iface)) {
-        rt->rx[i] = detail::make_input_rx(*in, iface);
-        if (!rt->rx[i]->error.empty())
-          log_warning("Stacja \"" + sc.name + "\", wejście " + std::to_string(i + 1) + ": odbiór nieaktywny: " + rt->rx[i]->error);
-      }
-      if (!rt->delays[i]) rt->delays[i] = std::make_shared<DelayLine>();
-      const double gain = db_to_gain(in->gain_db);
-      auto& pi = rt->plan_inputs[i];
-      if (!pi || pi->rx != rt->rx[i] || pi->delay != rt->delays[i] || pi->gain != gain || pi->delay_s != in->delay_s)
-        pi = std::make_shared<const StationPlan::Input>(StationPlan::Input{rt->rx[i], rt->delays[i], gain, in->delay_s});
-      plan->inputs[i] = pi;
-      latency = std::max(latency, rt->rx[i]->latency_frames);
-    }
-    plan->latency_frames = latency ? latency : kDefaultLatencyFrames;
-
-    // streams: an edited stream is rebuilt alone; a gain change is applied live
-    std::map<std::string, std::shared_ptr<StreamWorker>> workers;
+    rt->cfg = sc;
+    update_inputs(*rt, sc);
     for (const StreamConfig& s : sc.streams) {
       if (!s.enabled) continue;
-      auto it = rt->streams.find(s.id);
-      if (it != rt->streams.end() && it->second->key() == detail::stream_key(s, sc.name)) {
-        if (it->second->gain_db() != s.gain_db) it->second->set_gain_db(s.gain_db);
-        workers[s.id] = it->second;
-        rt->streams.erase(it);
-      } else {
-        auto w = std::make_shared<StreamWorker>(s, sc.name);
-        if (w->active()) {
-          log_info("Stacja \"" + sc.name + "\": strumień " + s.mount + " uruchomiony");
-        } else {
-          log_warning("Stacja \"" + sc.name + "\": strumień " + s.mount + " nieaktywny: " + w->status().encoder_error);
-        }
-        workers[s.id] = std::move(w);
+      if (auto it = rt->streams.find(s.id); it != rt->streams.end()) {
+        if (it->second->gain_db() != s.gain_db) it->second->set_gain_db(s.gain_db);  // live, ramped
+        continue;
       }
-      if (workers[s.id]->active()) plan->streams.push_back(workers[s.id]);
+      auto w = std::make_shared<StreamWorker>(s, sc.name);
+      if (w->active()) {
+        log_info("Stacja \"" + sc.name + "\": strumień " + s.mount + " uruchomiony");
+      } else {
+        log_warning("Stacja \"" + sc.name + "\": strumień " + s.mount + " nieaktywny: " + w->status().encoder_error);
+      }
+      rt->streams[s.id] = std::move(w);
     }
-    for (auto& [id, w] : rt->streams) retired.push_back(w);
-    rt->streams = std::move(workers);
-    rt->cfg = sc;
-
-    if (rt->station) {
-      rt->station->publish(std::move(plan));
-    } else {
-      rt->station = std::make_unique<Station>(clock, std::move(plan));
-      log_info("Stacja \"" + sc.name + "\" uruchomiona");
-    }
+    publish(*rt);
     kept[sc.id] = std::move(rt);
   }
-  for (auto& [id, rt] : stations) gone.push_back(std::move(rt));  // removed or disabled
-  stations = std::move(kept);
-
-  auto set = std::make_shared<detail::RxSet>();
-  for (const auto& [id, rt] : stations)
-    for (const auto& in : rt->rx)
-      if (in) set->push_back(in);
-  if (rx) rx->set_inputs(std::move(set));
-
-  // what is gone stops only now, after the stations were handed plans without it
-  for (auto& rt : gone) {
+  // stations removed or disabled (their streams were stopped above)
+  for (auto& [id, rt] : stations) {
     rt->station->stop();
     log_info("Stacja \"" + rt->cfg.name + "\" zatrzymana");
-    for (auto& [id, w] : rt->streams) retired.push_back(w);
   }
-  if (!retired.empty()) stop_workers(std::move(retired));
+  stations = std::move(kept);
+  update_rx_set();
   config = next;
+}
+
+// Every kHousekeepingNs, off the audio threads: releases what the stations let go of (old
+// plans, faded-out inputs with their sockets and delay lines), lets removed inputs stop
+// receiving once faded, and retries inputs whose socket could not be opened or joined.
+void EncoderEngine::Impl::housekeeping_loop() {
+  std::unique_lock hk(hk_m);
+  while (!hk_stop) {
+    hk_cv.wait_for(hk, std::chrono::nanoseconds(kHousekeepingNs));
+    if (hk_stop) break;
+    hk.unlock();
+    {
+      std::lock_guard lock(m);
+      if (running) housekeeping();
+    }
+    hk.lock();
+  }
+}
+
+void EncoderEngine::Impl::housekeeping() {
+  const int64_t now = platform::monotonic_ns();
+  bool rx_changed = false;
+  const size_t before = lingering.size();
+  std::erase_if(lingering, [&](const auto& l) { return now - l.second >= kLingerNs; });
+  rx_changed = lingering.size() != before;
+
+  for (auto& [id, rt] : stations) {
+    bool replan = false;
+    for (size_t i = 0; i < rt->inputs.size(); ++i) {
+      auto& e = rt->inputs[i];
+      if (!e || e->rx->stream || !e->rx->retryable || now - e->rx->attempted_ns < detail::input_retry_ns()) continue;
+      auto fresh = detail::make_input_rx(e->cfg, iface);
+      if (fresh->stream) log_info("Stacja \"" + rt->cfg.name + "\", wejście " + std::to_string(i + 1) + ": odbiór działa");
+      e->rx = std::move(fresh);  // same input: keeps its delay line
+      e->plan_input = std::make_shared<const StationPlan::Input>(
+          StationPlan::Input{e->rx, e->delay, db_to_gain(e->cfg.gain_db), e->cfg.delay_s});
+      replan = true;
+    }
+    if (replan) {
+      publish(*rt);
+      rx_changed = true;
+    }
+    rt->station->collect();
+  }
+  if (rx_changed) update_rx_set();
 }
 
 void EncoderEngine::Impl::shutdown() {
@@ -185,8 +302,9 @@ void EncoderEngine::Impl::shutdown() {
     rt->station->stop();
     for (auto& [sid, w] : rt->streams) workers.push_back(w);
   }
-  if (!workers.empty()) stop_workers(std::move(workers));
+  stop_workers(std::move(workers));
   stations.clear();
+  lingering.clear();
   rx.reset();
   ptp.reset();
 }
@@ -197,6 +315,7 @@ EncoderEngine::~EncoderEngine() { stop(); }
 
 bool EncoderEngine::start(const EncoderConfig& config, std::string* error) {
   auto& m = *impl_;
+  std::lock_guard life(m.lifecycle);
   std::lock_guard lock(m.m);
   if (m.running) {
     if (error) *error = "silnik enkodera już działa";
@@ -209,12 +328,24 @@ bool EncoderEngine::start(const EncoderConfig& config, std::string* error) {
   m.rx = std::make_unique<RxThread>(m.clock);
   m.running = true;
   m.apply(config);
+  {
+    std::lock_guard hk(m.hk_m);
+    m.hk_stop = false;
+  }
+  m.housekeeper = std::thread([&m] { m.housekeeping_loop(); });
   log_info("Bounce Encoder: silnik uruchomiony, stacji: " + std::to_string(m.stations.size()));
   return true;
 }
 
 void EncoderEngine::stop() {
   auto& m = *impl_;
+  std::lock_guard life(m.lifecycle);
+  {
+    std::lock_guard hk(m.hk_m);
+    m.hk_stop = true;
+  }
+  m.hk_cv.notify_all();
+  if (m.housekeeper.joinable()) m.housekeeper.join();  // before taking m: it takes m itself
   std::lock_guard lock(m.m);
   if (!m.running) return;
   m.running = false;
@@ -247,14 +378,11 @@ StationStatus EncoderEngine::Impl::station_status(const StationConfig& sc) const
   const StationRuntime* rt = nullptr;
   if (auto it = stations.find(sc.id); running && it != stations.end()) rt = it->second.get();
   st.running = rt != nullptr;
-  std::array<std::array<float, 2>, kStationInputs> input_peaks{};
   if (rt) {
-    rt->station->collect();
     st.started_ns = rt->station->started_ns();
     const auto mix = rt->station->mix_peak();
     for (int s = 0; s < 2; ++s) st.peak_db[s] = detail::level_db(mix[s]);
     st.skipped_frames = rt->station->skipped_frames();
-    input_peaks = rt->station->input_peaks();
   }
   const int64_t now = platform::monotonic_ns();
   for (size_t i = 0; i < sc.inputs.size(); ++i) {
@@ -266,16 +394,19 @@ StationStatus EncoderEngine::Impl::station_status(const StationConfig& sc) const
     is.latency_us = in.latency_us;
     is.gain_db = in.gain_db;
     is.delay_s = in.delay_s;
-    const InputRx* rx = rt && i < size_t(kStationInputs) ? rt->rx[i].get() : nullptr;
-    if (rx) {
-      if (is.name.empty()) is.name = rx->name;
-      if (!rx->group.empty()) is.address = rx->group + ":" + std::to_string(rx->port);
-      is.error = rx->error;
-      if (rx->stream) {
-        is.rx = rx->stream->stats();
-        is.signal = rx->stream->has_signal(now);
+    const InputEntry* e = rt && i < rt->inputs.size() ? rt->inputs[i].get() : nullptr;
+    if (e) {
+      const InputRx& rx = *e->rx;
+      if (is.name.empty()) is.name = rx.name;
+      if (!rx.group.empty()) is.address = rx.group + ":" + std::to_string(rx.port);
+      is.error = rx.error;
+      is.receiver_id = rx.id;
+      if (rx.stream) {
+        is.rx = rx.stream->stats();
+        is.signal = rx.stream->has_signal(now);
       }
-      for (int s = 0; s < 2; ++s) is.peak_db[s] = detail::level_db(input_peaks[i][s]);
+      if (const auto peak = rt->station->input_peak(e->delay.get()))
+        for (int s = 0; s < 2; ++s) is.peak_db[s] = detail::level_db((*peak)[s]);
     } else if (auto parsed = parse_sdp(in.sdp); parsed.stream) {
       if (is.name.empty()) is.name = parsed.stream->session_name;
       is.address = parsed.stream->multicast_address + ":" + std::to_string(parsed.stream->port);
@@ -316,8 +447,8 @@ EncoderStatus EncoderEngine::status() const {
   if (m.ptp) {
     s.ptp = m.ptp->status();
     s.ptp_error = m.ptp->error();
-    s.ptp_free_run = !m.ptp->ever_stepped();
   }
+  s.ptp_free_run = !m.ptp || s.ptp.state != PtpState::Locked;
   if (m.running) s.uptime_s = (platform::monotonic_ns() - m.started_ns) / 1'000'000'000;
   for (const StationConfig& sc : m.config.stations) s.stations.push_back(m.station_status(sc));
   return s;

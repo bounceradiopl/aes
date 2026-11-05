@@ -123,10 +123,7 @@ void PtpClient::run() {
 
       const PtpStatus st = port.status();
       const bool stepped = port.consume_step();
-      if (st.steps > 0) {
-        clock_.set(port.clock(), stepped);
-        ever_stepped_ = true;
-      }
+      if (st.steps > 0) clock_.set(port.clock(), stepped);
       if (stepped) log_info("PTP: korekta skokowa zegara (" + std::to_string(st.steps) + ")");
       {
         std::lock_guard lock(m_);

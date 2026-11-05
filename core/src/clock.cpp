@@ -46,11 +46,15 @@ MediaClock ClockSource::get() const {
   return clock_;
 }
 
+MediaClock ClockSource::get(uint64_t* step_generation) const {
+  std::lock_guard lock(mutex_);
+  if (step_generation) *step_generation = generation_.load(std::memory_order_acquire);
+  return clock_;
+}
+
 void ClockSource::set(const MediaClock& c, bool stepped) {
-  {
-    std::lock_guard lock(mutex_);
-    clock_ = c;
-  }
+  std::lock_guard lock(mutex_);  // the generation changes together with the mapping
+  clock_ = c;
   if (stepped) generation_.fetch_add(1, std::memory_order_acq_rel);
 }
 

@@ -50,6 +50,7 @@ struct InputStatus {
   double delay_s = 0;
   RxStats rx;
   float peak_db[2] = {-120, -120};  // before the input gain, over the last ~100 ms
+  uint64_t receiver_id = 0;  // changes only when the input's socket and RxStream are rebuilt
 };
 
 struct StreamStatus {
@@ -87,7 +88,9 @@ struct EncoderStatus {
   bool running = false;
   std::string interface_ip;
   bool ptp_enabled = true;
-  bool ptp_free_run = true;  // no PTP time yet: running on the local clock
+  // The media clock does not follow a PTP master right now: PTP is off or unavailable, no master
+  // was found yet, it is still being acquired, or it was lost (holdover coasts on the last rate).
+  bool ptp_free_run = true;
   std::string ptp_error;     // Polish: PTP sockets unavailable, else empty
   PtpStatus ptp;
   int64_t uptime_s = 0;
@@ -109,9 +112,13 @@ class EncoderEngine {
   void stop();
   // Applies a normalized, valid configuration (merge_passwords, normalize_config and
   // validate_config already done) while running, rebuilding only what changed: a station keeps
-  // running when only its streams or input settings change, an edited stream restarts alone, an
-  // input keeps its socket unless its SDP, latency or the interface changed. Gain and delay
-  // changes are applied without a restart. Before start() it only stores the configuration.
+  // running when only its streams or input settings change; an edited stream restarts alone,
+  // its old connection closed before the new one opens (Icecast refuses a busy mountpoint).
+  // Inputs are matched by SDP, latency and interface, not by position: an input keeps its
+  // socket and delay line while one with the same SDP stays in the station, wherever it moves;
+  // an input that goes (or gets another SDP) fades out over 5 ms and the new one fades in with
+  // an empty delay line. Gain and delay changes are applied live, ramped. Before start() it
+  // only stores the configuration.
   void apply_config(const EncoderConfig& config);
 
   EncoderConfig config() const;

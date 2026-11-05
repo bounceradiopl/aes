@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -34,6 +35,11 @@ float level_db(float linear);
 // the SDP has one), the RxStream and the ring pair it writes on the media clock. Immutable after
 // make_input_rx() except for the RxStream state, which only the network thread touches.
 struct InputRx {
+  InputRx();
+  ~InputRx();
+  InputRx(const InputRx&) = delete;
+  InputRx& operator=(const InputRx&) = delete;
+  const uint64_t id;  // unique per receiver built (status: receiver_id)
   std::string key;  // SDP | latency | interface: another key needs a new InputRx
   std::string name;
   std::string group;
@@ -41,6 +47,8 @@ struct InputRx {
   uint16_t port = 0;
   uint32_t latency_frames = 0;
   std::string error;  // Polish; set when the SDP or the socket failed (then stream is null)
+  bool retryable = false;    // the socket failed (not the SDP): worth another make_input_rx()
+  int64_t attempted_ns = 0;  // when the socket was tried
   platform::UdpSocket socket;
   std::array<std::vector<int32_t>, 2> samples;
   std::array<std::vector<uint32_t>, 2> tags;
@@ -53,6 +61,18 @@ std::string input_key(const InputConfig& in, const std::string& iface);
 std::shared_ptr<InputRx> make_input_rx(const InputConfig& in, const std::string& iface);
 
 using RxSet = std::vector<std::shared_ptr<InputRx>>;
+
+// A delay line counted by testing::live_delay_lines().
+std::shared_ptr<DelayLine> make_delay_line();
+// How long a receiver whose socket failed waits before the next attempt (5 s).
+int64_t input_retry_ns();
+
+namespace testing {
+int live_input_receivers();  // InputRx objects alive (sockets open or not)
+int live_delay_lines();      // delay lines alive (23 MB each)
+void fail_next_input_opens(int n);  // the next n socket opens fail (0 = off)
+void set_input_retry_ms(int ms);    // retry interval for failed sockets (0 = the default 5 s)
+}  // namespace testing
 
 // The network thread: receives every input of the current set (re-read every pass), dispatching
 // a datagram only to the input whose group (and source, when filtered) it was sent to.
@@ -84,7 +104,6 @@ class PtpClient {
   ~PtpClient();  // stop()
   void stop();
   PtpStatus status() const;
-  bool ever_stepped() const { return ever_stepped_.load(); }
   std::string error() const;
   int domain() const { return domain_; }
   const std::string& iface() const { return iface_; }
@@ -98,7 +117,6 @@ class PtpClient {
   mutable std::mutex m_;
   PtpStatus status_;
   std::string error_;
-  std::atomic<bool> ever_stepped_{false};
   std::atomic<bool> running_{true};
   std::thread thread_;
 };
@@ -189,7 +207,8 @@ struct StationPlan {
     double gain = 1.0;                 // linear
     double delay_s = 0;
   };
-  std::array<std::shared_ptr<const Input>, kStationInputs> inputs;  // null: no enabled input there
+  // The enabled inputs in any order; an input's identity is its delay line (see Station).
+  std::array<std::shared_ptr<const Input>, kStationInputs> inputs;
   std::vector<std::shared_ptr<StreamWorker>> streams;
   uint32_t latency_frames = 0;  // the station reads every input this far behind "now"
 };
@@ -212,7 +231,8 @@ class Station {
   void collect();
   void stop();
   int64_t started_ns() const { return started_ns_; }
-  std::array<std::array<float, 2>, kStationInputs> input_peaks() const;
+  // The peaks of the input with this delay line (its identity), if the station plays it now.
+  std::optional<std::array<float, 2>> input_peak(const DelayLine* input) const;
   std::array<float, 2> mix_peak() const;
   uint64_t skipped_frames() const { return skipped_.load(std::memory_order_relaxed); }
 
@@ -225,6 +245,8 @@ class Station {
   };
   void run();
   void take_plan();
+  void place_joins();  // gives plan inputs not playing yet a free slot (fade in)
+  void apply_settings(int slot, const StationPlan::Input& w);
   void retire(std::shared_ptr<const void> p);
   void process(uint64_t from, size_t frames);
   void publish_peaks();
@@ -250,6 +272,7 @@ class Station {
   uint64_t frames_since_peaks_ = 0;
 
   std::array<std::atomic<float>, kStationInputs * 2> input_peak_{};
+  std::array<std::atomic<const DelayLine*>, kStationInputs> owner_{};  // whose peaks a slot holds
   std::array<std::atomic<float>, 2> mix_peak_{};
   std::atomic<uint64_t> skipped_{0};
   std::atomic<bool> running_{true};

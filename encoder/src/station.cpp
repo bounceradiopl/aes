@@ -70,6 +70,26 @@ void Station::retire(std::shared_ptr<const void> p) {
   // else (more than kGraveyardSlots releases between two publishes): released here after all
 }
 
+// The plan input with the same identity (delay line) as `delay`, or nullptr.
+static const std::shared_ptr<const StationPlan::Input>* same_input(const StationPlan& plan, const DelayLine* delay) {
+  for (const auto& w : plan.inputs)
+    if (w && w->delay.get() == delay) return &w;
+  return nullptr;
+}
+
+void Station::apply_settings(int slot, const StationPlan::Input& w) {
+  // only changed values reach the delay line and the mixer (a repeated set would re-fade)
+  Active& a = active_[slot];
+  if (w.delay_s != a.delay_s) {
+    w.delay->set_delay_seconds(w.delay_s);
+    a.delay_s = w.delay_s;
+  }
+  if (w.gain != a.gain) {
+    mixer_.set_gain(slot, w.gain);
+    a.gain = w.gain;
+  }
+}
+
 void Station::take_plan() {
   std::shared_ptr<const StationPlan> next;
   {
@@ -78,38 +98,49 @@ void Station::take_plan() {
     has_pending_.store(false, std::memory_order_relaxed);
   }
   if (!next) return;
+  // An input is the same input as long as its delay line is (the engine keys it by its SDP):
+  // its settings change in place. One no longer in the plan leaves: it fades out over
+  // kRampFrames, still feeding its delay line, and frees its slot once inaudible.
   for (int i = 0; i < kStationInputs; ++i) {
-    const auto& want = next->inputs[i];
     Active& a = active_[i];
-    if (!want) {
-      // fade the input out, still feeding its delay line, until the mixer no longer hears it
-      if (a.input && !a.leaving) {
-        mixer_.set_enabled(i, false);
-        a.leaving = true;
+    if (!a.input) continue;
+    if (const auto* w = same_input(*next, a.input->delay.get())) {
+      apply_settings(i, **w);
+      if (a.input != *w) {
+        retire(std::move(a.input));
+        a.input = *w;  // e.g. the same input on a new socket (a retried receiver)
       }
-      continue;
+      if (a.leaving) {  // back before it had faded out
+        mixer_.set_enabled(i, true);
+        a.leaving = false;
+      }
+    } else if (!a.leaving) {
+      mixer_.set_enabled(i, false);
+      a.leaving = true;
     }
-    if (a.input && a.input->delay != want->delay) {
-      retire(std::move(a.input));  // another delay line (re-enabled within one tick): start over
-      a = Active{};
-    }
-    const bool joining = !a.input || a.leaving;
-    if (a.input != want) retire(std::move(a.input));
-    a.input = want;
-    a.leaving = false;
-    // only changed values reach the delay line and the mixer (a repeated set would re-fade)
-    if (want->delay_s != a.delay_s) {
-      want->delay->set_delay_seconds(want->delay_s);
-      a.delay_s = want->delay_s;
-    }
-    if (want->gain != a.gain) {
-      mixer_.set_gain(i, want->gain);
-      a.gain = want->gain;
-    }
-    if (joining) mixer_.set_enabled(i, true);
   }
   retire(std::move(plan_));
   plan_ = std::move(next);
+  place_joins();
+}
+
+void Station::place_joins() {
+  for (const auto& w : plan_->inputs) {
+    if (!w) continue;
+    bool placed = false;
+    for (const Active& a : active_) placed = placed || (a.input && a.input->delay == w->delay);
+    if (placed) continue;
+    int free = -1;
+    for (int i = 0; i < kStationInputs && free < 0; ++i)
+      if (!active_[i].input) free = i;
+    if (free < 0) return;  // every slot busy (one still fading out): joins after that fade
+    Active& a = active_[free];
+    a = Active{};
+    a.input = w;
+    owner_[free].store(w->delay.get(), std::memory_order_relaxed);
+    apply_settings(free, *w);
+    mixer_.set_enabled(free, true);  // fades in from silence (a fresh delay line)
+  }
 }
 
 void Station::run() {
@@ -124,8 +155,9 @@ void Station::run() {
     if (has_pending_.load(std::memory_order_acquire)) take_plan();
     if (!plan_) continue;
 
-    const uint64_t generation = clock_.step_generation();
-    const uint64_t now = clock_.get().sample_at(platform::monotonic_ns());
+    uint64_t generation = 0;
+    const MediaClock clock = clock_.get(&generation);  // the mapping and its generation together
+    const uint64_t now = clock.sample_at(platform::monotonic_ns());
     if (now < plan_->latency_frames) continue;
     const uint64_t end = now - plan_->latency_frames;
     if (!positioned_ || generation != step_generation_) {
@@ -173,13 +205,17 @@ void Station::process(uint64_t from, size_t frames) {
     inputs[i] = buf;
   }
   mixer_.mix(inputs, frames, mix_.data());
+  bool freed = false;
   for (int i = 0; i < kStationInputs; ++i) {
     Active& a = active_[i];
     if (a.leaving && !mixer_.audible(i)) {  // faded out: let go of it
       retire(std::move(a.input));
       a = Active{};
+      owner_[i].store(nullptr, std::memory_order_relaxed);
+      freed = true;
     }
   }
+  if (freed) place_joins();
   for (const auto& stream : plan_->streams) stream->push(mix_.data(), frames);
 
   frames_since_peaks_ += frames;
@@ -194,11 +230,12 @@ void Station::publish_peaks() {
   frames_since_peaks_ = 0;
 }
 
-std::array<std::array<float, 2>, kStationInputs> Station::input_peaks() const {
-  std::array<std::array<float, 2>, kStationInputs> out{};
+std::optional<std::array<float, 2>> Station::input_peak(const DelayLine* input) const {
   for (int i = 0; i < kStationInputs; ++i)
-    for (int s = 0; s < 2; ++s) out[i][s] = input_peak_[i * 2 + s].load(std::memory_order_relaxed);
-  return out;
+    if (input && owner_[i].load(std::memory_order_relaxed) == input)
+      return std::array<float, 2>{input_peak_[i * 2].load(std::memory_order_relaxed),
+                                  input_peak_[i * 2 + 1].load(std::memory_order_relaxed)};
+  return std::nullopt;
 }
 
 std::array<float, 2> Station::mix_peak() const {

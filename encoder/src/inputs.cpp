@@ -3,6 +3,7 @@
 // pair in process memory on the media clock (spec §4.1), and the network thread receiving them.
 #include <algorithm>
 #include <cmath>
+#include <optional>
 
 #include "bam/config.hpp"  // ptime_us_to_frames
 #include "bam/constants.hpp"
@@ -14,7 +15,37 @@ namespace bam::encoder::detail {
 
 namespace {
 constexpr int64_t kTickNs = 5'000'000;  // RxStream::on_tick (underrun counting)
+std::atomic<uint64_t> g_next_id{1};
+std::atomic<int> g_live_rx{0};
+std::atomic<int> g_live_lines{0};
+std::atomic<int> g_fail_opens{0};  // test hook
+std::atomic<int> g_retry_ms{0};    // test hook, 0 = kRetryNs
+constexpr int64_t kRetryNs = 5'000'000'000;
 }  // namespace
+
+int64_t input_retry_ns() {
+  const int ms = g_retry_ms.load();
+  return ms > 0 ? int64_t(ms) * 1'000'000 : kRetryNs;
+}
+
+InputRx::InputRx() : id(g_next_id.fetch_add(1)) { g_live_rx.fetch_add(1); }
+InputRx::~InputRx() { g_live_rx.fetch_sub(1); }
+
+std::shared_ptr<DelayLine> make_delay_line() {
+  auto* line = new DelayLine();
+  g_live_lines.fetch_add(1);
+  return std::shared_ptr<DelayLine>(line, [](DelayLine* d) {
+    delete d;
+    g_live_lines.fetch_sub(1);
+  });
+}
+
+namespace testing {
+int live_input_receivers() { return g_live_rx.load(); }
+int live_delay_lines() { return g_live_lines.load(); }
+void fail_next_input_opens(int n) { g_fail_opens.store(n); }
+void set_input_retry_ms(int ms) { g_retry_ms.store(ms); }
+}  // namespace testing
 
 float level_db(float linear) {
   if (!(linear > 0.0f)) return -120.0f;
@@ -44,8 +75,16 @@ std::shared_ptr<InputRx> make_input_rx(const InputConfig& in, const std::string&
     rx->tags[ch].assign(kBlocksPerRing, 0);
     rx->rings[ch] = ChannelRing(rx->samples[ch].data(), rx->tags[ch].data());
   }
+  // a socket that fails (port, interface not up yet, group refused) is tried again later
+  rx->retryable = true;
+  rx->attempted_ns = platform::monotonic_ns();
   std::string err;
-  auto sock = platform::UdpSocket::open(s.port, &err);
+  std::optional<platform::UdpSocket> sock;
+  if (int n = g_fail_opens.load(); n > 0 && g_fail_opens.compare_exchange_strong(n, n - 1)) {
+    err = "błąd testowy";
+  } else {
+    sock = platform::UdpSocket::open(s.port, &err);
+  }
   if (!sock) {
     rx->error = "gniazdo odbiorcze: " + err;
     return rx;
@@ -54,6 +93,7 @@ std::shared_ptr<InputRx> make_input_rx(const InputConfig& in, const std::string&
     rx->error = "dołączenie do grupy " + s.multicast_address + ": " + err;
     return rx;
   }
+  rx->retryable = false;
   rx->socket = std::move(*sock);
   rx->stream = std::make_unique<RxStream>(s, rx->rings[0], rx->rings[1], rx->latency_frames, 1.0);
   return rx;
