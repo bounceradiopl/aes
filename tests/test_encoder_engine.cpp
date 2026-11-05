@@ -861,6 +861,61 @@ TEST_CASE("encoder engine: a new SDP on an input fades the old source out") {
   CHECK(frames - zeros - last_dc <= 241);
 }
 
+TEST_CASE("encoder engine: a latency edit keeps the input and its 10 s of delay history") {
+  FakeIcecast server;
+  const uint16_t port = 15227;
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  be::StationConfig st;
+  st.id = "s1";
+  st.name = "Radio Test";
+  be::InputConfig a;
+  a.sdp = make_sdp("A", "239.69.227.1", port);
+  a.delay_s = 10.0;
+  a.latency_us = 5000;
+  st.inputs = {a};
+  st.streams = {stream("str1", be::Codec::Flac, 0, 48000, server.port(), "/f.ogg")};
+  cfg.stations = {st};
+  cfg = ready(cfg);
+
+  be::EncoderEngine engine(no_ptp());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  AesSender sender(engine, "239.69.227.1", port, sig_a);
+  REQUIRE(wait_for([&] { return sender.first_ts != 0; }, 5000));
+  const uint64_t inputs_from = sender.first_ts;
+  // until the 10 s delay has filled and the delayed input has been on air for a while
+  REQUIRE(wait_for([&] { return server.latest("/f.ogg") && media_now(engine) > inputs_from + 12 * 48000; }, 40000));
+  auto conn = server.latest("/f.ogg");
+  const uint64_t receiver = engine.status().stations[0].inputs[0].receiver_id;
+
+  cfg.stations[0].inputs[0].latency_us = 8000;  // 5 -> 8 ms
+  engine.apply_config(ready(cfg));
+  const uint64_t changed_at = media_now(engine);
+  REQUIRE(wait_for([&] { return media_now(engine) > changed_at + 48000 + 24000; }, 10000));
+  const be::EncoderStatus after = engine.status();
+  CHECK(after.stations[0].inputs[0].receiver_id == receiver);  // the same socket and RxStream
+  CHECK(after.stations[0].inputs[0].latency_us == 8000);
+  CHECK(server.latest("/f.ogg")->id == conn->id);
+
+  // the last 2 s of the stream, the edit in the middle: the input 10 s late, bit for bit,
+  // with no hole and no step
+  const Decoded dec = decode_conn(server, *conn);
+  const size_t frames = dec.samples.size() / 2;
+  REQUIRE(frames > 2 * 48000);
+  const SampleFn delayed = [](uint64_t t, int ch) { return pcm16(to_float(sig_a(t - 480000, ch))); };
+  const size_t n0 = frames - 2 * 48000;
+  const auto t0 = find_start(dec, n0, 4800, delayed, inputs_from, changed_at);
+  REQUIRE_MESSAGE(t0, "the stream 2 s before its end is not the input delayed by 10 s");
+  size_t wrong = 0, first_wrong = 0;
+  for (size_t n = n0; n < frames; ++n)
+    if (!frame_is(dec, n, *t0 + (n - n0), delayed) && wrong++ == 0) first_wrong = n;
+  if (wrong) MESSAGE("frames not matching around the latency edit: " << wrong << ", the first at window frame " << (first_wrong - n0));
+  CHECK(wrong == 0);
+  CHECK(*t0 < changed_at);                   // the window starts before the edit ...
+  CHECK(*t0 + (frames - n0) > changed_at + 24000);  // ... and ends well after it
+}
+
 TEST_CASE("encoder engine: an input whose socket failed is tried again") {
   struct Restore {
     ~Restore() {

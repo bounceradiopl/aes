@@ -40,12 +40,12 @@ struct InputRx {
   InputRx(const InputRx&) = delete;
   InputRx& operator=(const InputRx&) = delete;
   const uint64_t id;  // unique per receiver built (status: receiver_id)
-  std::string key;  // SDP | latency | interface: another key needs a new InputRx
+  std::string key;  // SDP | interface: the input's identity (another key is another input)
   std::string name;
   std::string group;
   std::string source;  // sender address from a=source-filter, may be empty
   uint16_t port = 0;
-  uint32_t latency_frames = 0;
+  uint32_t latency_frames = 0;  // engine (API/housekeeping) side copy; RxStream has its own
   std::string error;  // Polish; set when the SDP or the socket failed (then stream is null)
   bool retryable = false;    // the socket failed (not the SDP): worth another make_input_rx()
   int64_t attempted_ns = 0;  // when the socket was tried

@@ -32,13 +32,15 @@ class RxStream {
   RxStats stats() const;
   void reset_stats();
   bool has_signal(int64_t now_local_ns) const;
-  uint32_t latency_frames() const { return latency_; }
+  uint32_t latency_frames() const { return latency_.load(std::memory_order_relaxed); }
+  // Any thread, lock-free: the play-out deadline for the next packets and underrun checks.
+  void set_latency_frames(uint32_t frames) { latency_.store(frames, std::memory_order_relaxed); }
   const SdpStream& sdp() const { return sdp_; }
 
  private:
   SdpStream sdp_;
   ChannelRing left_, right_;
-  uint32_t latency_;
+  std::atomic<uint32_t> latency_;
   double gain_;
   size_t bytes_per_frame_;
 

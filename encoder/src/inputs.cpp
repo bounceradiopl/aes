@@ -52,9 +52,7 @@ float level_db(float linear) {
   return std::max(-120.0f, 20.0f * std::log10(linear));
 }
 
-std::string input_key(const InputConfig& in, const std::string& iface) {
-  return in.sdp + '|' + std::to_string(in.latency_us) + '|' + iface;
-}
+std::string input_key(const InputConfig& in, const std::string& iface) { return in.sdp + '|' + iface; }
 
 std::shared_ptr<InputRx> make_input_rx(const InputConfig& in, const std::string& iface) {
   auto rx = std::make_shared<InputRx>();

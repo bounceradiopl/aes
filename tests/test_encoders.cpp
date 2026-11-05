@@ -745,7 +745,8 @@ TEST_CASE("encoders: Ogg FLAC sends a page at least every 300 ms, also on digita
     REQUIRE(dec.samples.size() == fed * 2);
     CHECK(std::all_of(dec.samples.begin(), dec.samples.end(), [](int32_t v) { return v == 0; }));
   }
-  // a stream of whole 4096-frame blocks: flush() has no last frame left, the stream still ends
+  // a stream of whole 4096-frame blocks ends with an EOS page and decodes bit-exact (libFLAC
+  // keeps one sample back, so finish() still writes a last frame to mark)
   auto enc = be::make_encoder(be::Codec::Flac);
   std::string err;
   REQUIRE(enc->open({be::Codec::Flac, 0, 48000}, &err));
@@ -761,6 +762,26 @@ TEST_CASE("encoders: Ogg FLAC sends a page at least every 300 ms, also on digita
   CHECK_FALSE(dec.error);
   REQUIRE(dec.samples.size() == ref.size());
   CHECK(std::equal(ref.begin(), ref.end(), dec.samples.begin()));
+}
+
+TEST_CASE("encoders: Ogg FLAC opened and flushed without audio still ends its stream") {
+  SKIP_UNLESS_AVAILABLE(be::Codec::Flac);
+  // no frame at all for flush() to mark: the stream ends with an empty last packet (EOS)
+  auto enc = be::make_encoder(be::Codec::Flac);
+  REQUIRE(enc);
+  std::string err;
+  REQUIRE(enc->open({be::Codec::Flac, 0, 48000}, &err));
+  std::vector<uint8_t> out;
+  enc->flush(out);
+  CHECK_FALSE(enc->failed());
+  bool eos = false;
+  CHECK(complete_ogg_pages(out, &eos) >= 3);  // the two header pages and the last one
+  CHECK(eos);
+  const auto dec = decode_ogg_flac(out);
+  CHECK_FALSE(dec.error);
+  CHECK(dec.sample_rate == 48000);
+  CHECK(dec.channels == 2);
+  CHECK(dec.samples.empty());
 }
 
 TEST_CASE("encoders: MP3 128 kb/s at 44.1 kHz, CBR frames, decoded sine level and correlation") {

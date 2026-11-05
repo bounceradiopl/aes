@@ -9,6 +9,7 @@
 #include <mutex>
 #include <thread>
 
+#include "bam/config.hpp"  // ptime_us_to_frames
 #include "bam/gain.hpp"
 #include "bam/log.hpp"
 #include "bam/platform/time.hpp"
@@ -48,9 +49,10 @@ void stop_workers(std::vector<std::shared_ptr<StreamWorker>> workers) {
 
 }  // namespace
 
-// One enabled input of a station. Its identity is its key (SDP | latency | interface): the
-// receiver and the delay line live as long as an input with that key stays in the station, at
-// whatever position; another key is another input (the old one fades out, the new one in).
+// One enabled input of a station. Its identity is its key (SDP | interface): the receiver and
+// the delay line live as long as an input with that key stays in the station, at whatever
+// position, through gain, delay and latency edits; another key is another input (the old one
+// fades out, the new one fades in with an empty delay line).
 struct InputEntry {
   std::string key;
   InputConfig cfg;
@@ -140,6 +142,12 @@ void EncoderEngine::Impl::update_inputs(StationRuntime& rt, const StationConfig&
       e->delay = detail::make_delay_line();
       if (!e->rx->error.empty())
         log_warning("Stacja \"" + sc.name + "\", wejście " + std::to_string(i + 1) + ": odbiór nieaktywny: " + e->rx->error);
+    }
+    if (found && e->cfg.latency_us != in.latency_us) {
+      // in place: the socket, the ring and the delay history stay (the station reads all its
+      // inputs at the largest latency, so the timeline it mixes stays continuous)
+      e->rx->latency_frames = ptime_us_to_frames(in.latency_us);
+      if (e->rx->stream) e->rx->stream->set_latency_frames(e->rx->latency_frames);
     }
     e->cfg = in;
     const double gain = db_to_gain(in.gain_db);

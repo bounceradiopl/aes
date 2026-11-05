@@ -114,11 +114,11 @@ class EncoderEngine {
   // validate_config already done) while running, rebuilding only what changed: a station keeps
   // running when only its streams or input settings change; an edited stream restarts alone,
   // its old connection closed before the new one opens (Icecast refuses a busy mountpoint).
-  // Inputs are matched by SDP, latency and interface, not by position: an input keeps its
-  // socket and delay line while one with the same SDP stays in the station, wherever it moves;
-  // an input that goes (or gets another SDP) fades out over 5 ms and the new one fades in with
-  // an empty delay line. Gain and delay changes are applied live, ramped. Before start() it
-  // only stores the configuration.
+  // Inputs are matched by SDP and interface, not by position: an input keeps its socket and
+  // delay line (with its history) while one with the same SDP stays in the station, wherever
+  // it moves, through gain, delay and receive latency edits; an input that goes (or gets another
+  // SDP) fades out over 5 ms and the new one fades in with an empty delay line. Gain and delay
+  // changes are applied live, ramped. Before start() it only stores the configuration.
   void apply_config(const EncoderConfig& config);
 
   EncoderConfig config() const;
