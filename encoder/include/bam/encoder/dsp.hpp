@@ -17,6 +17,8 @@
 #include <memory>
 #include <vector>
 
+#include "bam/encoder/audio_encoder.hpp"  // kStreamRates
+
 namespace bam {
 class DriftResampler;
 }
@@ -26,7 +28,6 @@ namespace bam::encoder {
 inline constexpr uint32_t kStationRate = 48000;  // the station side of the signal path
 inline constexpr uint32_t kRampFrames = 240;     // 5 ms: every gain, mute, join, leave and delay change
 inline constexpr int kStationInputs = 3;
-inline constexpr std::array<uint32_t, 5> kStreamRates = {48000, 44100, 32000, 24000, 22050};  // spec §2
 
 // A gain that moves linearly, per frame, to each new target over kRampFrames; a new target set
 // mid-ramp starts from the level reached. Shared by the mixer inputs and the stream gain.
@@ -133,6 +134,12 @@ class StationMixer {
   std::array<std::atomic<float>, 2> mix_peaks_{};
 };
 
+class StreamConditioner;
+namespace testing {
+// Test hook: the conditioner's next resampler call fails inside libsamplerate (the block is lost).
+void fail_next_resample(StreamConditioner&);
+}  // namespace testing
+
 // Conditions the station mix for one stream (spec §4.4): the stream gain (linear, ramped over
 // kRampFrames at 48 kHz), then a fixed-ratio resampling 48000 -> out_rate (libsamplerate
 // SRC_SINC_MEDIUM_QUALITY). At 48000 the samples pass through unchanged (bit-exact at gain 1).
@@ -152,9 +159,11 @@ class StreamConditioner {
   // Output frames process() can write for in_frames input frames; size `out` for this.
   size_t max_out_frames(size_t in_frames) const;
   // Returns the number of stereo frames written to out (at most out_capacity). Input that does
-  // not fit (out_capacity below max_out_frames) is dropped and counted in dropped_frames().
+  // not fit (out_capacity below max_out_frames) is dropped and counted in dropped_frames(), as is
+  // a block the resampler fails on.
   size_t process(const float* in, size_t in_frames, float* out, size_t out_capacity);
-  uint64_t dropped_frames() const { return dropped_; }  // input frames, since construction
+  // Input frames lost since construction: not fitting `out`, or rejected by the resampler.
+  uint64_t dropped_frames() const { return dropped_; }
 
  private:
   static constexpr size_t kChunkFrames = 1024;
@@ -165,6 +174,8 @@ class StreamConditioner {
   std::vector<float> scratch_;                 // kChunkFrames stereo frames after the gain
   GainRamp gain_;
   uint64_t dropped_ = 0;
+  bool fail_next_ = false;
+  friend void testing::fail_next_resample(StreamConditioner&);
 };
 
 }  // namespace bam::encoder

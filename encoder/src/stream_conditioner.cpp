@@ -72,8 +72,17 @@ size_t StreamConditioner::process(const float* in, size_t in_frames, float* out,
       continue;
     }
     for (size_t consumed = 0; consumed < n;) {
+      float* dst = out + written * 2;
+      size_t room = out_capacity - written;
+      if (fail_next_) {  // test hook: output over the input, which libsamplerate refuses
+        fail_next_ = false;
+        dst = gained;
+        room = n;
+      }
       size_t used = 0;
-      const size_t got = resampler_->process(gained + consumed * 2, n - consumed, out + written * 2, out_capacity - written, 1.0, &used);
+      const uint64_t errors = resampler_->errors();
+      const size_t got = resampler_->process(gained + consumed * 2, n - consumed, dst, room, 1.0, &used);
+      if (resampler_->errors() != errors) dropped_ += used;  // rejected: reported consumed, nothing out
       written += got;
       consumed += used;
       if (got == 0 && used == 0) {  // `out` full after all (not expected within max_out_frames)
@@ -84,5 +93,9 @@ size_t StreamConditioner::process(const float* in, size_t in_frames, float* out,
   }
   return written;
 }
+
+namespace testing {
+void fail_next_resample(StreamConditioner& c) { c.fail_next_ = true; }
+}  // namespace testing
 
 }  // namespace bam::encoder

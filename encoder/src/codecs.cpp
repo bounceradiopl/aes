@@ -10,7 +10,7 @@ namespace bam::encoder {
 
 namespace {
 
-const std::vector<uint32_t> kFiveRates = {48000, 44100, 32000, 24000, 22050};
+const std::vector<uint32_t> kFiveRates(kStreamRates.begin(), kStreamRates.end());
 const std::vector<uint32_t> kThreeRates = {48000, 44100, 32000};
 
 // MPEG-1 (32/44.1/48 kHz) and MPEG-2 (16/22.05/24 kHz) Layer III bitrate steps, from 32 kb/s up

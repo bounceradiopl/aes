@@ -35,8 +35,10 @@ class DriftResampler {
   DriftResampler& operator=(const DriftResampler&) = delete;
 
   // Converts up to in_frames, writes at most out_capacity frames; returns frames written and
-  // reports how many input frames were consumed.
+  // reports how many input frames were consumed. If libsamplerate fails, the block is reported
+  // consumed with nothing written (dropped rather than stalling) and errors() counts it.
   size_t process(const float* in, size_t in_frames, float* out, size_t out_capacity, double ratio_multiplier, size_t* consumed);
+  uint64_t errors() const { return errors_; }
   void reset();
   double base_ratio() const { return base_; }
   int channels() const { return channels_; }
@@ -45,6 +47,7 @@ class DriftResampler {
   void* state_ = nullptr;
   double base_;
   int channels_;
+  uint64_t errors_ = 0;
 };
 
 // Left-aligned 24-in-32-bit samples <-> float in [-1, 1).

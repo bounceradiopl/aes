@@ -3,6 +3,7 @@
 // ADTS) and FLAC in Ogg (libFLAC + libogg). LAME and fdk-aac are shared libraries loaded at run
 // time (licences, spec §5.3); libFLAC and libogg are linked in.
 #pragma once
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -14,6 +15,9 @@
 namespace bam::encoder {
 
 enum class Codec { Mp3, AacLc, HeAac, HeAacV2, Flac };
+
+// Every stream sample rate (spec §5.2); each codec allows these or a subset (codec_limits).
+inline constexpr std::array<uint32_t, 5> kStreamRates = {48000, 44100, 32000, 24000, 22050};
 
 // Allowed settings per codec (spec §5.2). For a lossless codec the bitrate is not used.
 struct CodecLimits {

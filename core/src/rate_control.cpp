@@ -62,6 +62,7 @@ size_t DriftResampler::process(const float* in, size_t in_frames, float* out, si
   d.src_ratio = base_ * ratio_multiplier;
   d.end_of_input = 0;
   if (src_process(static_cast<SRC_STATE*>(state_), &d) != 0) {
+    ++errors_;
     if (consumed) *consumed = in_frames;  // drop the block rather than stall
     return 0;
   }

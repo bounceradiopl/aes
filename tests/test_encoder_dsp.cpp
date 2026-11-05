@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <iterator>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "bam/encoder/dsp.hpp"
@@ -81,6 +82,19 @@ double max_step(const std::vector<float>& out, int64_t from) {
   return worst;
 }
 
+// On full-scale DC: the 240 frames from `from` are the fade, level by level (down: 239/240 ... 0,
+// up: 1/240 ... 1), on both sides.
+void check_dc_fade(const std::vector<float>& out, int64_t from, bool down) {
+  int wrong = 0;
+  for (uint32_t k = 0; k < be::kRampFrames; ++k) {
+    const float want = static_cast<float>(down ? be::kRampFrames - 1 - k : k + 1) / static_cast<float>(be::kRampFrames);
+    const size_t at = static_cast<size_t>(from + k) * 2;
+    wrong += out[at] != want || out[at + 1] != want;
+  }
+  INFO(std::string(down ? "fade-out" : "fade-in") << " from frame " << from);
+  CHECK(wrong == 0);
+}
+
 }  // namespace
 
 TEST_CASE("delay line delays exactly to the sample") {
@@ -137,7 +151,11 @@ TEST_CASE("delay line change 1 s -> 3 s mid-stream fades, inserts silence, then 
     for (int64_t n = silence_from; n < silence_to; ++n) loud += out[n * 2] != 0.0f || out[n * 2 + 1] != 0.0f;
     CHECK(loud == 0);
     check_aligned(out, sig, silence_to + be::kRampFrames, pos, 3 * 48000);
-    if (sig == dc) CHECK(max_step(out, change - 1) <= kFadeStep);
+    if (sig == dc) {
+      CHECK(max_step(out, change - 1) <= kFadeStep);
+      check_dc_fade(out, change, true);
+      check_dc_fade(out, silence_to, false);
+    }
   }
 }
 
@@ -153,7 +171,11 @@ TEST_CASE("delay line change 3 s -> 1 s skips audio with a fade, then aligns exa
     run(line, sig, pos, 3 * 48000, out);
     check_aligned(out, sig, 3 * 48000, change, 3 * 48000);
     check_aligned(out, sig, change + 2 * be::kRampFrames, pos, 48000);
-    if (sig == dc) CHECK(max_step(out, change - 1) <= kFadeStep);
+    if (sig == dc) {  // the skip is hidden in the fade: on DC a hard cut would show no step at all
+      CHECK(max_step(out, change - 1) <= kFadeStep);
+      check_dc_fade(out, change, true);
+      check_dc_fade(out, change + be::kRampFrames, false);
+    }
   }
 }
 
@@ -425,6 +447,18 @@ TEST_CASE("stream conditioner counts what does not fit the output") {
   const size_t next = resampled.process(in.data(), kBlock, out.data(), resampled.max_out_frames(kBlock));
   CHECK(next <= static_cast<size_t>(std::ceil(kBlock * 44100.0 / 48000.0)) + 2);
   CHECK(resampled.dropped_frames() <= 380);
+}
+
+TEST_CASE("stream conditioner counts a block the resampler rejects") {
+  be::StreamConditioner cond(44100);
+  const size_t room = cond.max_out_frames(kBlock);
+  std::vector<float> in(kBlock * 2, 0.25f), out(room * 2);
+  REQUIRE(cond.process(in.data(), kBlock, out.data(), room) > 0);
+  be::testing::fail_next_resample(cond);
+  CHECK(cond.process(in.data(), kBlock, out.data(), room) == 0);
+  CHECK(cond.dropped_frames() == kBlock);
+  CHECK(cond.process(in.data(), kBlock, out.data(), room) > 0);  // the next block goes through
+  CHECK(cond.dropped_frames() == kBlock);
 }
 
 #endif  // BAM_WITH_CODECS
