@@ -178,6 +178,23 @@ bool codec_available(Codec c) {
   return false;
 }
 
+std::string codec_library_path(Codec c) {
+  switch (c) {
+    case Codec::Mp3: {
+      auto api = lame_api();
+      return api ? detail::library_path(*api) : std::string();
+    }
+    case Codec::AacLc:
+    case Codec::HeAac:
+    case Codec::HeAacV2: {
+      auto api = fdk_api();
+      return api ? detail::library_path(*api) : std::string();
+    }
+    case Codec::Flac: return {};
+  }
+  return {};
+}
+
 void set_codec_library_dirs(std::vector<std::string> dirs) {
   auto& c = cache();
   std::lock_guard<std::mutex> lock(c.mutex);

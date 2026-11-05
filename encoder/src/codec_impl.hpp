@@ -22,6 +22,10 @@ std::vector<std::string> library_candidates(const std::vector<std::string>& dirs
 std::shared_ptr<const LameApi> load_lame(const std::vector<std::string>& dirs);
 std::shared_ptr<const FdkApi> load_fdk(const std::vector<std::string>& dirs);
 
+// The path each library was loaded from.
+const std::string& library_path(const LameApi& api);
+const std::string& library_path(const FdkApi& api);
+
 std::unique_ptr<AudioEncoder> make_lame_encoder(std::shared_ptr<const LameApi> api);
 std::unique_ptr<AudioEncoder> make_fdk_encoder(Codec codec, std::shared_ptr<const FdkApi> api);
 std::unique_ptr<AudioEncoder> make_flac_encoder();

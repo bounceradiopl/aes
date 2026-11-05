@@ -90,6 +90,9 @@ class AudioEncoder {
 
 std::unique_ptr<AudioEncoder> make_encoder(Codec);  // nullptr when the codec library is not available
 bool codec_available(Codec);
+// The file the codec's run-time library was loaded from (for the status page); empty for FLAC
+// (linked in) and when the library is missing.
+std::string codec_library_path(Codec);
 
 // The only directories (absolute paths) the run-time codec libraries (libmp3lame, libfdk-aac)
 // are loaded from; empty = the default, the directory of the executable. There is no fallback

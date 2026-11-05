@@ -126,6 +126,8 @@ class LameEncoder final : public AudioEncoder {
 
 }  // namespace
 
+const std::string& library_path(const LameApi& api) { return api.lib.path(); }
+
 std::shared_ptr<const LameApi> load_lame(const std::vector<std::string>& dirs) {
 #if defined(_WIN32)
   const std::vector<std::string> names = {"libmp3lame.dll", "libmp3lame-0.dll"};

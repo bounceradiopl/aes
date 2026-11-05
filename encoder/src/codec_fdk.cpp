@@ -169,6 +169,8 @@ class FdkEncoder final : public AudioEncoder {
 
 }  // namespace
 
+const std::string& library_path(const FdkApi& api) { return api.lib.path(); }
+
 std::shared_ptr<const FdkApi> load_fdk(const std::vector<std::string>& dirs) {
 #if defined(_WIN32)
   const std::vector<std::string> names = {"libfdk-aac-2.dll"};
