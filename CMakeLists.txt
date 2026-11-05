@@ -12,6 +12,14 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 option(BAM_BUILD_TESTS "Build unit tests" ON)
 option(BAM_BUILD_TOOLS "Build test tools" ON)
+# Bounce Encoder codecs (LAME, fdk-aac, libogg, libFLAC from pinned tarballs, cmake/codecs.cmake).
+# The encoder ships 64-bit only, so a 32-bit build (the ASIO driver for 32-bit hosts) skips them.
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+  set(BAM_WITH_CODECS_DEFAULT ON)
+else()
+  set(BAM_WITH_CODECS_DEFAULT OFF)
+endif()
+option(BAM_WITH_CODECS "Fetch and build the Bounce Encoder codec libraries" ${BAM_WITH_CODECS_DEFAULT})
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /utf-8 /EHsc)
@@ -51,6 +59,11 @@ else()
   if(NOT WIN32)
     target_link_libraries(bam_samplerate PUBLIC m)
   endif()
+endif()
+
+# Bounce Encoder codecs: mp3lame, fdk-aac (shared, loaded at run time), ogg + FLAC (static)
+if(BAM_WITH_CODECS)
+  include(cmake/codecs.cmake)
 endif()
 
 # ---- core ----
@@ -159,5 +172,12 @@ if(BAM_BUILD_TESTS)
     target_link_libraries(bam_tests PRIVATE bam_core)
   endif()
   target_compile_definitions(bam_tests PRIVATE BAM_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
+  if(BAM_WITH_CODECS)
+    # the shared codecs are loaded at run time from where the build put them
+    target_compile_definitions(bam_tests PRIVATE BAM_WITH_CODECS
+      BAM_MP3LAME_PATH="$<TARGET_FILE:mp3lame>" BAM_FDKAAC_PATH="$<TARGET_FILE:fdk-aac>")
+    target_link_libraries(bam_tests PRIVATE FLAC::FLAC)
+    add_dependencies(bam_tests mp3lame fdk-aac)
+  endif()
   add_test(NAME bam_tests COMMAND bam_tests)
 endif()
