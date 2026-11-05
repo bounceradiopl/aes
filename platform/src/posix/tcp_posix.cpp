@@ -158,6 +158,53 @@ int TcpStream::recv(std::span<uint8_t> buf, int timeout_ms) {
   return static_cast<int>(n);
 }
 
+int TcpStream::send_some(std::span<const uint8_t> data, int timeout_ms) {
+  if (fd_ == kInvalid) return -1;
+  if (data.empty()) return 0;
+  const int64_t deadline = monotonic_ns() + int64_t(timeout_ms) * 1'000'000;
+  for (;;) {
+    pollfd p{static_cast<int>(fd_), POLLOUT, 0};
+    const int pr = poll_fd(p, deadline);
+    if (pr < 0) return -1;
+    if (pr == 0) return 0;
+    if (p.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
+    if (!(p.revents & POLLOUT)) return 0;
+#ifdef MSG_NOSIGNAL
+    const int flags = MSG_NOSIGNAL;
+#else
+    const int flags = 0;
+#endif
+    const ssize_t n = ::send(static_cast<int>(fd_), data.data(), data.size(), flags);
+    if (n > 0) return static_cast<int>(n);
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+      if (monotonic_ns() >= deadline) return 0;
+      continue;
+    }
+    return -1;
+  }
+}
+
+int TcpStream::recv_some(std::span<uint8_t> buf, int timeout_ms) {
+  if (fd_ == kInvalid) return -1;
+  if (buf.empty()) return 0;
+  const int64_t deadline = monotonic_ns() + int64_t(timeout_ms) * 1'000'000;
+  for (;;) {
+    pollfd p{static_cast<int>(fd_), POLLIN, 0};
+    const int pr = poll_fd(p, deadline);
+    if (pr < 0) return -1;
+    if (pr == 0) return 0;
+    if (!(p.revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL))) return 0;
+    // POLLHUP/POLLERR without POLLIN still goes through recv(): it reports EOF or the error.
+    const ssize_t n = ::recv(static_cast<int>(fd_), buf.data(), buf.size(), 0);
+    if (n > 0) return static_cast<int>(n);
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+      if (monotonic_ns() >= deadline) return 0;
+      continue;
+    }
+    return -1;  // 0 = closed by the peer, or an error
+  }
+}
+
 TcpListener::TcpListener(TcpListener&& o) noexcept : fd_(o.fd_), port_(o.port_) { o.fd_ = kInvalid; }
 
 TcpListener& TcpListener::operator=(TcpListener&& o) noexcept {

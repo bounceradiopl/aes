@@ -22,6 +22,11 @@ class TcpStream {
 
   bool send_all(std::span<const uint8_t> data, int timeout_ms);  // false on error/timeout
   int recv(std::span<uint8_t> buf, int timeout_ms);              // bytes, 0 = closed, -1 = timeout/error
+  // Partial I/O for callers that wait in short slices (to stay stoppable) and must know exactly
+  // how much went through: bytes moved (> 0), 0 = nothing within timeout_ms (0 = just check),
+  // -1 = error or connection closed by the peer.
+  int send_some(std::span<const uint8_t> data, int timeout_ms);
+  int recv_some(std::span<uint8_t> buf, int timeout_ms);
   void close();
   bool valid() const { return fd_ != kInvalid; }
   intptr_t native() const { return fd_; }

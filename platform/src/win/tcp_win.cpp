@@ -2,6 +2,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
+#include <algorithm>
 #include <cstring>
 
 #include "bam/platform/tcp.hpp"
@@ -157,6 +158,50 @@ int TcpStream::recv(std::span<uint8_t> buf, int timeout_ms) {
   const int n = ::recv(sock(fd_), reinterpret_cast<char*>(buf.data()), static_cast<int>(buf.size()), 0);
   if (n == SOCKET_ERROR) return -1;
   return n;
+}
+
+int TcpStream::send_some(std::span<const uint8_t> data, int timeout_ms) {
+  if (fd_ == kInvalid) return -1;
+  if (data.empty()) return 0;
+  const int64_t deadline = monotonic_ns() + int64_t(timeout_ms) * 1'000'000;
+  for (;;) {
+    WSAPOLLFD p{sock(fd_), POLLWRNORM, 0};
+    const int pr = WSAPoll(&p, 1, remaining_ms(deadline));
+    if (pr == SOCKET_ERROR) return -1;
+    if (pr == 0) return 0;
+    if (p.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
+    if (!(p.revents & POLLWRNORM)) return 0;
+    const int len = static_cast<int>(std::min<size_t>(data.size(), 1 << 30));
+    const int n = ::send(sock(fd_), reinterpret_cast<const char*>(data.data()), len, 0);
+    if (n > 0) return n;
+    if (n == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) {
+      if (monotonic_ns() >= deadline) return 0;
+      continue;
+    }
+    return -1;
+  }
+}
+
+int TcpStream::recv_some(std::span<uint8_t> buf, int timeout_ms) {
+  if (fd_ == kInvalid) return -1;
+  if (buf.empty()) return 0;
+  const int64_t deadline = monotonic_ns() + int64_t(timeout_ms) * 1'000'000;
+  for (;;) {
+    WSAPOLLFD p{sock(fd_), POLLRDNORM, 0};
+    const int pr = WSAPoll(&p, 1, remaining_ms(deadline));
+    if (pr == SOCKET_ERROR) return -1;
+    if (pr == 0) return 0;
+    if (!(p.revents & (POLLRDNORM | POLLERR | POLLHUP | POLLNVAL))) return 0;
+    // POLLHUP/POLLERR without POLLRDNORM still goes through recv(): it reports EOF or the error.
+    const int len = static_cast<int>(std::min<size_t>(buf.size(), 1 << 30));
+    const int n = ::recv(sock(fd_), reinterpret_cast<char*>(buf.data()), len, 0);
+    if (n > 0) return n;
+    if (n == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK) {
+      if (monotonic_ns() >= deadline) return 0;
+      continue;
+    }
+    return -1;  // 0 = closed by the peer, or an error
+  }
 }
 
 TcpListener::TcpListener(TcpListener&& o) noexcept : fd_(o.fd_), port_(o.port_) { o.fd_ = kInvalid; }

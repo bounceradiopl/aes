@@ -190,3 +190,48 @@ TEST_CASE("TCP: a reset peer does not raise SIGPIPE when written to directly") {
   CHECK(failures > 0);  // the test process must still be alive to reach this line
 }
 #endif
+
+TEST_CASE("TCP: send_some/recv_some report bytes, timeout (0) and a closed peer (-1)") {
+  std::string err;
+  auto listener = bp::TcpListener::listen("127.0.0.1", 0, &err);
+  REQUIRE_MESSAGE(listener, err);
+  auto client = bp::TcpStream::connect("127.0.0.1", listener->port(), 2000, &err);
+  REQUIRE_MESSAGE(client, err);
+  auto server = listener->accept(2000);
+  REQUIRE(server);
+
+  std::vector<uint8_t> buf(16);
+  CHECK(client->recv_some(buf, 0) == 0);   // nothing there yet: just a check
+  CHECK(client->recv_some(buf, 50) == 0);  // nothing within the timeout
+
+  const std::vector<uint8_t> hello = {'h', 'e', 'l', 'l', 'o'};
+  CHECK(server->send_some(hello, 1000) == 5);
+  std::vector<uint8_t> got;
+  const int64_t deadline = bp::monotonic_ns() + 2'000'000'000LL;
+  while (got.size() < hello.size() && bp::monotonic_ns() < deadline) {
+    const int n = client->recv_some(buf, 100);
+    REQUIRE(n >= 0);
+    got.insert(got.end(), buf.begin(), buf.begin() + n);
+  }
+  CHECK(got == hello);
+
+  // A peer that never reads: the socket buffers fill up and send_some times out with 0.
+  std::vector<uint8_t> chunk(1 << 16, 'x');
+  int last = 1;
+  size_t total = 0;
+  for (int i = 0; i < 100000 && last > 0; ++i) {
+    last = client->send_some(chunk, 20);
+    if (last > 0) total += static_cast<size_t>(last);
+  }
+  CHECK(last == 0);
+  CHECK(total > 0);
+
+  server->close();
+  int closed = 0;
+  const int64_t deadline2 = bp::monotonic_ns() + 2'000'000'000LL;
+  while (bp::monotonic_ns() < deadline2) {
+    closed = client->recv_some(buf, 100);
+    if (closed < 0) break;
+  }
+  CHECK(closed == -1);
+}
