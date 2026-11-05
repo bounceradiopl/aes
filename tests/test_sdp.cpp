@@ -122,3 +122,19 @@ TEST_CASE("generate round-trips") {
   REQUIRE(r2.stream);
   CHECK(r2.stream->frames_per_packet == 64);
 }
+
+TEST_CASE("rejects a ptime that is not finite or longer than 100 ms") {
+  std::string sdp = kMinimal;
+  sdp.erase(sdp.find("a=framecount:48\r\n"));
+  auto with = [&](const std::string& attr) { return bam::parse_sdp(sdp + attr + "\r\n"); };
+  for (const char* bad : {"a=ptime:inf", "a=ptime:1e400", "a=ptime:3000", "a=ptime:100.5", "a=framecount:4800048"}) {
+    CAPTURE(bad);
+    auto r = with(bad);
+    CHECK_FALSE(r.stream);
+    CHECK(r.error.find("ptime") != std::string::npos);
+  }
+  for (const char* good : {"a=ptime:100", "a=ptime:20", "a=ptime:0.125", "a=framecount:4800"}) {
+    CAPTURE(good);
+    CHECK(with(good).stream);
+  }
+}

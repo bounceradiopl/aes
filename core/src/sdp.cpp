@@ -222,6 +222,12 @@ SdpParseResult parse_sdp(std::string_view text) {
   } else {
     s.ptime_ms = 1.0;
   }
+  // AES67 packet times are 0.125–4 ms (some devices go up to 20 ms); 100 ms leaves room for any
+  // real sender and keeps "ptime + 1 ms" within the 1000 ms receive latency cap
+  if (!std::isfinite(s.ptime_ms) || s.ptime_ms > kMaxSdpPtimeMs) {
+    result.error = "nieprawidłowy ptime (najwyżej 100 ms)";
+    return result;
+  }
   s.frames_per_packet = static_cast<uint32_t>(std::lround(s.ptime_ms * s.sample_rate / 1000.0));
   if (s.frames_per_packet == 0) {
     result.error = "nieprawidłowy ptime";

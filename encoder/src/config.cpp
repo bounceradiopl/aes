@@ -5,13 +5,17 @@
 #include <cerrno>
 #include <cmath>
 #include <cstdio>
-#include <fstream>
 #include <limits>
 #include <map>
 #include <set>
 #include <stdexcept>
 #include <type_traits>
 #include <nlohmann/json.hpp>
+#ifdef _WIN32
+#include <io.h>  // _commit, _fileno
+#else
+#include <unistd.h>  // fsync, fileno
+#endif
 
 #include "bam/config.hpp"  // min_rx_latency_us, kMinRxLatencyUs, kMaxRxLatencyUs
 #include "bam/encoder/dsp.hpp"
@@ -29,6 +33,11 @@ using json = nlohmann::ordered_json;
 constexpr size_t kMaxNameBytes = 64;
 constexpr size_t kMaxIdChars = 32;
 constexpr size_t kMaxHostBytes = 253;
+constexpr size_t kMaxFieldBytes = 255;  // mount, user, password
+constexpr size_t kMaxSdpBytes = 64 * 1024;
+// config_from_json refuses arrays longer than 4x the limit (an API body could otherwise make
+// normalize_config work through thousands of entries); validate_config explains smaller overshoots.
+constexpr size_t kParseLimitFactor = 4;
 constexpr const char* kStationIdPrefix = "s";
 constexpr const char* kStreamIdPrefix = "str";
 
@@ -70,12 +79,29 @@ bool valid_id(std::string_view id) {
   return true;
 }
 
+// A host name (ASCII letters, digits, '.', '-', '_') or a dotted IPv4 address.
 bool valid_host(std::string_view h) {
-  if (h.empty() || h.size() > kMaxHostBytes) return false;
-  for (unsigned char ch : h)
-    if (ch <= 0x20 || ch == 0x7f || ch == '/' || ch == '\\' || ch == ':' || ch == '@' || ch == '?' || ch == '#')
-      return false;
+  if (h.empty()) return false;
+  for (char ch : h) {
+    const bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '.' ||
+                    ch == '-' || ch == '_';
+    if (!ok) return false;
+  }
   return true;
+}
+
+// Text taken from an SDP for a name field: no control characters, at most kMaxNameBytes,
+// cut on a whole UTF-8 character.
+std::string sanitize_name(std::string_view in) {
+  std::string out;
+  for (unsigned char ch : in)
+    if (ch >= 0x20 && ch != 0x7f) out += static_cast<char>(ch);
+  if (out.size() > kMaxNameBytes) {
+    size_t n = kMaxNameBytes;
+    while (n > 0 && (static_cast<unsigned char>(out[n]) & 0xC0) == 0x80) --n;
+    out.resize(n);
+  }
+  return out;
 }
 
 bool valid_mount(std::string_view m) {
@@ -97,11 +123,15 @@ bool in_gain_range(double db) { return db >= kGainMinDb && db <= kGainMaxDb; }
 
 double round_to(double v, double step) { return std::round(v / step) * step; }
 
-// The smallest "<prefix><n>" (n >= 1) not in `used`; it is added to `used`.
-std::string next_id(const char* prefix, std::set<std::string>& used) {
-  for (int n = 1;; ++n) {
-    std::string id = prefix + std::to_string(n);
-    if (used.insert(id).second) return id;
+// The smallest "<prefix><n>" with n >= from not in `used`; it is added to `used` and `from` moves
+// past it, so assigning k ids costs O((k + |used|) log |used|) in total, not a rescan from 1 each.
+std::string next_id(const char* prefix, std::set<std::string>& used, int& from) {
+  for (;; ++from) {
+    std::string id = prefix + std::to_string(from);
+    if (used.insert(id).second) {
+      ++from;
+      return id;
+    }
   }
 }
 
@@ -146,12 +176,16 @@ void read_field(const json& j, const char* key, T& out, const std::string& path)
   }
 }
 
-// Calls fn(index, element) for each element of j[key] when present (must be an array).
+// Calls fn(index, element) for each element of j[key] when present (must be an array of at most
+// max_items objects).
 template <typename Fn>
-void read_array(const json& j, const char* key, const std::string& path, Fn&& fn) {
+void read_array(const json& j, const char* key, const std::string& path, size_t max_items, Fn&& fn) {
   if (!j.contains(key)) return;
   const json& arr = j.at(key);
   if (!arr.is_array()) bad_field(path + key, "oczekiwano tablicy");
+  if (arr.size() > max_items)
+    throw std::runtime_error("pole " + path + key + ": za dużo elementów (jest " + std::to_string(arr.size()) +
+                             ", dopuszczalne najwyżej " + std::to_string(max_items) + ")");
   for (size_t i = 0; i < arr.size(); ++i) {
     if (!arr[i].is_object()) bad_field(path + key + "[" + std::to_string(i) + "]", "oczekiwano obiektu");
     fn(i, arr[i]);
@@ -216,6 +250,7 @@ std::optional<EncoderConfig> config_from_json(std::string_view text, std::string
     int version = kEncoderConfigVersion;
     read_field(j, "version", version, "");
     if (version > kEncoderConfigVersion) throw std::runtime_error("plik z nowszej wersji programu");
+    if (version < 1) throw std::runtime_error("pole version: nieprawidłowa wersja pliku " + std::to_string(version));
 
     EncoderConfig c = default_encoder_config();
     read_field(j, "interface_ip", c.interface_ip, "");
@@ -223,13 +258,13 @@ std::optional<EncoderConfig> config_from_json(std::string_view text, std::string
     read_field(j, "http_bind", c.http_bind, "");
     read_field(j, "http_port", c.http_port, "");
     read_field(j, "password_hash", c.password_hash, "");
-    read_array(j, "stations", "", [&](size_t i, const json& sj) {
+    read_array(j, "stations", "", kMaxStations * kParseLimitFactor, [&](size_t i, const json& sj) {
       StationConfig st;
       const std::string sp = station_path(i) + ".";
       read_field(sj, "id", st.id, sp);
       read_field(sj, "name", st.name, sp);
       read_field(sj, "enabled", st.enabled, sp);
-      read_array(sj, "inputs", sp, [&](size_t k, const json& ij) {
+      read_array(sj, "inputs", sp, kMaxInputsPerStation * kParseLimitFactor, [&](size_t k, const json& ij) {
         InputConfig in;
         const std::string ip = input_path(i, k) + ".";
         read_field(ij, "enabled", in.enabled, ip);
@@ -240,7 +275,7 @@ std::optional<EncoderConfig> config_from_json(std::string_view text, std::string
         read_field(ij, "latency_us", in.latency_us, ip);
         st.inputs.push_back(std::move(in));
       });
-      read_array(sj, "streams", sp, [&](size_t k, const json& tj) {
+      read_array(sj, "streams", sp, kMaxStreamsPerStation * kParseLimitFactor, [&](size_t k, const json& tj) {
         StreamConfig s;
         const std::string tp = stream_path(i, k) + ".";
         read_field(tj, "id", s.id, tp);
@@ -249,9 +284,11 @@ std::optional<EncoderConfig> config_from_json(std::string_view text, std::string
           std::string name;
           read_field(tj, "codec", name, tp);
           auto codec = parse_codec(name);
-          if (!codec)
-            throw std::runtime_error(stream_prefix(st, i, k) + "nieznany kodek „" + name +
-                                     "” (dozwolone: mp3, aac, he-aac, he-aac-v2, flac)");
+          if (!codec) {
+            std::string allowed;
+            for (Codec known : kCodecs) allowed += std::string(allowed.empty() ? "" : ", ") + codec_name(known);
+            throw std::runtime_error(stream_prefix(st, i, k) + "nieznany kodek „" + name + "” (dozwolone: " + allowed + ")");
+          }
           s.codec = *codec;
         }
         read_field(tj, "bitrate_kbps", s.bitrate_kbps, tp);
@@ -318,6 +355,10 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
       if (!(in.delay_s >= 0 && in.delay_s <= kMaxDelaySeconds)) add(f + "delay_s", p + "opóźnienie musi być w zakresie 0–60 s");
       const bool latency_in_range = in.latency_us >= kMinRxLatencyUs && in.latency_us <= kMaxRxLatencyUs;
       if (!latency_in_range) add(f + "latency_us", p + "opóźnienie odbioru musi być w zakresie 1–1000 ms");
+      if (in.sdp.size() > kMaxSdpBytes) {
+        add(f + "sdp", p + "SDP może mieć najwyżej 64 KB");
+        continue;
+      }
       if (!in.enabled) continue;
       if (in.sdp.empty()) {
         add(f + "sdp", p + "wejście wymaga SDP źródła");
@@ -346,18 +387,29 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
         add(f + "id", p + "identyfikator „" + s.id + "” jest już używany przez strumień " + std::to_string(it->second + 1));
       }
       if (!in_gain_range(s.gain_db)) add(f + "gain_db", p + "gain musi być w zakresie −60…+12 dB");
+      const bool host_short = s.host.size() <= kMaxHostBytes;
+      if (!host_short) add(f + "host", p + "nazwa serwera może mieć najwyżej 253 znaki");
+      const bool mount_short = s.mount.size() <= kMaxFieldBytes;
+      if (!mount_short) add(f + "mount", p + "mountpoint może mieć najwyżej 255 bajtów");
+      if (s.user.size() > kMaxFieldBytes) add(f + "user", p + "użytkownik może mieć najwyżej 255 bajtów");
+      if (s.password.size() > kMaxFieldBytes) add(f + "password", p + "hasło może mieć najwyżej 255 bajtów");
       if (!s.enabled) continue;
 
       std::string codec_error;
       if (!validate_encoder_settings({s.codec, s.bitrate_kbps, s.sample_rate, 2}, &codec_error))
         add(stream_path(i, k), p + codec_error);
-      const bool host_ok = valid_host(s.host);
-      if (s.host.empty()) add(f + "host", p + "podaj serwer Icecast (nazwę lub adres IP)");
-      else if (!host_ok) add(f + "host", p + "nieprawidłowy serwer „" + s.host + "” (sama nazwa lub adres IP, bez portu i ścieżki)");
+      const bool host_ok = host_short && valid_host(s.host);
+      if (s.host.empty())
+        add(f + "host", p + "podaj serwer Icecast (nazwę lub adres IP)");
+      else if (host_short && s.host.find(':') != std::string::npos)
+        add(f + "host", p + "nieprawidłowy serwer „" + s.host + "”: port wpisz w osobnym polu");
+      else if (host_short && !host_ok)
+        add(f + "host", p + "nieprawidłowy serwer „" + s.host + "” (nazwa z liter, cyfr, „.”, „-” i „_” albo adres IP, bez ścieżki)");
       const bool port_ok = s.port >= 1 && s.port <= 65535;
       if (!port_ok) add(f + "port", p + "port musi być w zakresie 1–65535");
-      const bool mount_ok = valid_mount(s.mount);
-      if (!mount_ok) add(f + "mount", p + "mountpoint musi zaczynać się od „/”, mieć nazwę i nie zawierać spacji (np. /radio.mp3)");
+      const bool mount_ok = mount_short && valid_mount(s.mount);
+      if (mount_short && !mount_ok)
+        add(f + "mount", p + "mountpoint musi zaczynać się od „/”, mieć nazwę i nie zawierać spacji, „?” ani „#” (np. /radio.mp3)");
       if (s.user.find(':') != std::string::npos || has_control(s.user))
         add(f + "user", p + "użytkownik nie może zawierać znaku „:” ani znaków sterujących");
       if (s.password.empty()) add(f + "password", p + "podaj hasło do serwera Icecast");
@@ -382,19 +434,20 @@ std::vector<std::string> normalize_config(EncoderConfig& c) {
   std::set<std::string> station_ids;
   for (const auto& st : c.stations)
     if (!st.id.empty()) station_ids.insert(st.id);
+  int next_station = 1;
 
   for (size_t i = 0; i < c.stations.size(); ++i) {
     auto& st = c.stations[i];
-    if (st.id.empty()) st.id = next_id(kStationIdPrefix, station_ids);
+    if (st.id.empty()) st.id = next_id(kStationIdPrefix, station_ids, next_station);
 
     for (size_t j = 0; j < st.inputs.size(); ++j) {
       auto& in = st.inputs[j];
       in.gain_db = round_to(in.gain_db, 0.5);
       in.delay_s = std::round(in.delay_s * 10.0) / 10.0;  // 0.1 s steps (dividing keeps e.g. 2.3 exact)
-      if (in.sdp.empty()) continue;
+      if (in.sdp.empty() || in.sdp.size() > kMaxSdpBytes) continue;  // validate_config reports an oversized SDP
       const auto r = parse_sdp(in.sdp);
       if (!r.stream) continue;
-      if (in.name.empty()) in.name = r.stream->session_name;
+      if (in.name.empty()) in.name = sanitize_name(r.stream->session_name);
       const uint32_t min = min_rx_latency_us(*r.stream);
       if (in.latency_us < min) {
         in.latency_us = min;
@@ -408,8 +461,9 @@ std::vector<std::string> normalize_config(EncoderConfig& c) {
     std::set<std::string> stream_ids;
     for (const auto& s : st.streams)
       if (!s.id.empty()) stream_ids.insert(s.id);
+    int next_stream = 1;
     for (auto& s : st.streams) {
-      if (s.id.empty()) s.id = next_id(kStreamIdPrefix, stream_ids);
+      if (s.id.empty()) s.id = next_id(kStreamIdPrefix, stream_ids, next_stream);
       s.gain_db = round_to(s.gain_db, 0.5);
     }
   }
@@ -480,24 +534,27 @@ bool save_config_file(const std::string& path, const EncoderConfig& c, std::stri
     platform::ensure_directory(dir);
   }
   const std::string tmp = path + ".tmp";
-  {
-    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-    if (!f) {
-      if (error) *error = "nie można zapisać " + tmp;
-      return false;
-    }
-    f << config_to_json(c);
-    f.flush();
-    if (!f.good()) {
-      if (error) *error = "błąd zapisu " + tmp;
-      return false;
-    }
-  }
-  if (!platform::replace_file(tmp, path)) {
-    std::remove(tmp.c_str());
-    if (error) *error = "nie można zastąpić " + path;
+  auto fail = [&](std::string message) {
+    std::remove(tmp.c_str());  // never leave a partial file behind
+    if (error) *error = std::move(message);
+    return false;
+  };
+  std::FILE* f = std::fopen(tmp.c_str(), "wb");
+  if (!f) {  // nothing was created, so nothing is removed (tmp may name something that is not ours)
+    if (error) *error = "nie można zapisać " + tmp;
     return false;
   }
+  const std::string text = config_to_json(c);
+  bool ok = std::fwrite(text.data(), 1, text.size(), f) == text.size() && std::fflush(f) == 0;
+  // on disk before the rename, so a power cut leaves the old or the new file, never an empty one
+#ifdef _WIN32
+  ok = ok && _commit(_fileno(f)) == 0;
+#else
+  ok = ok && fsync(fileno(f)) == 0;
+#endif
+  ok = std::fclose(f) == 0 && ok;
+  if (!ok) return fail("błąd zapisu " + tmp);
+  if (!platform::replace_file(tmp, path)) return fail("nie można zastąpić " + path);
   return true;
 }
 

@@ -5,6 +5,7 @@
 
 #ifdef BAM_WITH_CODECS
 
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <string>
@@ -65,6 +66,18 @@ std::string dump(const std::vector<be::EncoderConfigIssue>& issues) {
 }
 
 bool contains(const std::string& haystack, const std::string& needle) { return haystack.find(needle) != std::string::npos; }
+
+bool valid_utf8(const std::string& s) {
+  for (size_t i = 0; i < s.size();) {
+    const auto b = static_cast<unsigned char>(s[i]);
+    const size_t n = b < 0x80 ? 1 : (b >> 5) == 0x6 ? 2 : (b >> 4) == 0xE ? 3 : (b >> 3) == 0x1E ? 4 : 0;
+    if (n == 0 || i + n > s.size()) return false;
+    for (size_t k = 1; k < n; ++k)
+      if ((static_cast<unsigned char>(s[i + k]) & 0xC0) != 0x80) return false;
+    i += n;
+  }
+  return true;
+}
 
 }  // namespace
 
@@ -141,6 +154,10 @@ TEST_CASE("encoder config: parse errors are Polish and say where") {
   CHECK(contains(err, "nieprawidłowa konfiguracja"));
   CHECK_FALSE(be::config_from_json(R"({"version": 2})", &err));
   CHECK(contains(err, "nowszej wersji"));
+  CHECK_FALSE(be::config_from_json(R"({"version": 0})", &err));
+  CHECK(contains(err, "version"));
+  CHECK_FALSE(be::config_from_json(R"({"version": -1})", &err));
+  CHECK(contains(err, "version"));
 
   auto c = sample();
   c.stations[0].name = "Radio Bounce";
@@ -151,6 +168,7 @@ TEST_CASE("encoder config: parse errors are Polish and say where") {
   CHECK_FALSE(be::config_from_json(text, &err));
   CHECK_MESSAGE(contains(err, "Stacja „Radio Bounce”, strumień 2"), err);
   CHECK(contains(err, "opus"));
+  CHECK(contains(err, "(dozwolone: mp3, aac, he-aac, he-aac-v2, flac)"));
 
   CHECK_FALSE(be::config_from_json(R"({"version":1,"stations":[{"name":"A","streams":[{"port":"8000"}]}]})", &err));
   CHECK_MESSAGE(contains(err, "stations[0].streams[0].port"), err);
@@ -211,6 +229,8 @@ TEST_CASE("encoder config: input gain, delay, latency and SDP") {
   check([](be::InputConfig& in) { in.latency_us = 2000; }, "stations[0].inputs[0].latency_us", "ptime");
   check([](be::InputConfig& in) { in.sdp.clear(); }, "stations[0].inputs[0].sdp", "SDP");
   check([](be::InputConfig& in) { in.sdp = "v=0\r\ns=nic\r\n"; }, "stations[0].inputs[0].sdp", "SDP: brak sekcji m=audio");
+  check([](be::InputConfig& in) { in.sdp += std::string(64 * 1024, ' '); }, "stations[0].inputs[0].sdp", "64 KB");
+  check([](be::InputConfig& in) { in.enabled = false; in.sdp = std::string(64 * 1024 + 1, 'x'); }, "stations[0].inputs[0].sdp", "64 KB");
 
   // the limits themselves are allowed
   auto c = sample();
@@ -301,7 +321,19 @@ TEST_CASE("encoder config: stream target, gain and ids") {
   CHECK_FALSE(check([](be::StreamConfig& s) { s.mount = "radio.aac"; }, "stations[0].streams[1].mount", "/"));
   CHECK_FALSE(check([](be::StreamConfig& s) { s.mount = "/"; }, "stations[0].streams[1].mount", "/"));
   CHECK_FALSE(check([](be::StreamConfig& s) { s.mount = "/a b"; }, "stations[0].streams[1].mount", "/"));
+  CHECK_FALSE(check([](be::StreamConfig& s) { s.host = "radio.example:8000"; }, "stations[0].streams[1].host",
+                    "port wpisz w osobnym polu"));
+  CHECK_FALSE(check([](be::StreamConfig& s) { s.host = "radió.pl"; }, "stations[0].streams[1].host", "serwer"));
+  CHECK_FALSE(check([](be::StreamConfig& s) { s.host = "a/b"; }, "stations[0].streams[1].host", "serwer"));
+  CHECK_FALSE(check([](be::StreamConfig& s) { s.mount = "/radio?x=1"; }, "stations[0].streams[1].mount", "/"));
+  CHECK_FALSE(check([](be::StreamConfig& s) { s.mount = "/radio#x"; }, "stations[0].streams[1].mount", "/"));
   CHECK_FALSE(check([](be::StreamConfig& s) { s.user = "a:b"; }, "stations[0].streams[1].user", ":"));
+  CHECK_FALSE(check([](be::StreamConfig& s) { s.user = "ab\x01"; }, "stations[0].streams[1].user", "sterujących"));
+  // lengths are bounded whether the stream is enabled or not
+  CHECK(check([](be::StreamConfig& s) { s.mount = "/" + std::string(255, 'm'); }, "stations[0].streams[1].mount", "255"));
+  CHECK(check([](be::StreamConfig& s) { s.user = std::string(256, 'u'); }, "stations[0].streams[1].user", "255"));
+  CHECK(check([](be::StreamConfig& s) { s.password = std::string(256, 'p'); }, "stations[0].streams[1].password", "255"));
+  CHECK(check([](be::StreamConfig& s) { s.host = std::string(254, 'h'); }, "stations[0].streams[1].host", "253"));
   CHECK_FALSE(check([](be::StreamConfig& s) { s.password.clear(); }, "stations[0].streams[1].password", "hasło"));
   CHECK(check([](be::StreamConfig& s) { s.gain_db = -61; }, "stations[0].streams[1].gain_db", "−60…+12 dB"));
   CHECK(check([](be::StreamConfig& s) { s.gain_db = 13; }, "stations[0].streams[1].gain_db", "−60…+12 dB"));
@@ -313,7 +345,12 @@ TEST_CASE("encoder config: stream target, gain and ids") {
   c.stations[0].streams[0].port = 1;
   c.stations[0].streams[1].port = 65535;
   c.stations[0].streams[1].user.clear();
-  c.stations[0].streams[1].host = "stream.example.com";
+  c.stations[0].streams[1].host = "stream_1.example-radio.com";
+  c.stations[0].streams[0].mount = "/" + std::string(254, 'm');
+  c.stations[0].streams[0].user = std::string(255, 'u');
+  c.stations[0].streams[0].password = std::string(255, 'p');
+  CHECK_MESSAGE(be::validate_config(c).empty(), dump(be::validate_config(c)));
+  c.stations[0].streams[0].host = "10.0.0.5";
   CHECK_MESSAGE(be::validate_config(c).empty(), dump(be::validate_config(c)));
 }
 
@@ -347,10 +384,20 @@ TEST_CASE("encoder config: station ids, names and global settings") {
   dup.name = "Kopia";
   c.stations.push_back(dup);
   auto issues = be::validate_config(c);
-  const auto* i = find_issue(issues, "stations[1].id");
+  const be::EncoderConfigIssue* i = find_issue(issues, "stations[1].id");
   REQUIRE_MESSAGE(i, dump(issues));
   CHECK(contains(i->message, "Stacja „Kopia”"));
   CHECK(contains(i->message, "„Radio Bounce”"));
+
+  c = sample();
+  c.stations[0].id.clear();
+  issues = be::validate_config(c);
+  i = find_issue(issues, "stations[0].id");
+  REQUIRE_MESSAGE(i, dump(issues));
+  CHECK_MESSAGE(contains(i->message, "Stacja „Radio Bounce”: brak identyfikatora"), i->message);
+  be::normalize_config(c);
+  CHECK(c.stations[0].id == "s1");
+  CHECK(be::validate_config(c).empty());
 
   c = sample();
   c.stations[0].id = "s 1";
@@ -419,6 +466,89 @@ TEST_CASE("encoder config: normalize rounds steps, raises latency and assigns id
   CHECK(c.stations[0].streams[1].id == "str1");
   CHECK(c.stations[2].streams[0].id == "str1");
   CHECK_MESSAGE(be::validate_config(c).empty(), dump(be::validate_config(c)));
+
+  // gaps are filled first, then numbering continues past the highest id
+  c = be::default_encoder_config();
+  for (const char* id : {"s1", "", "s3", "", ""}) {
+    be::StationConfig st;
+    st.id = id;
+    for (const char* sid : {"", "str2", "", ""}) st.streams.push_back(stream(sid, be::Codec::Flac, 0, 48000, "/x"));
+    c.stations.push_back(st);
+  }
+  be::normalize_config(c);
+  std::vector<std::string> ids, stream_ids;
+  for (const auto& st : c.stations) ids.push_back(st.id);
+  for (const auto& s : c.stations[1].streams) stream_ids.push_back(s.id);
+  CHECK(ids == std::vector<std::string>{"s1", "s2", "s3", "s4", "s5"});
+  CHECK(stream_ids == std::vector<std::string>{"str1", "str2", "str3", "str4"});
+}
+
+TEST_CASE("encoder config: an input named after its SDP gets a valid name") {
+  // 80+ bytes of session name with a tab in it and two-byte characters across the 64-byte cut
+  std::string session = "Studio\tA ";
+  while (session.size() < 90) session += "żółć ";
+  std::string sdp = read_file(BAM_TEST_DATA "/orban.sdp");
+  const std::string orig = "s=Optimod_114969_2";
+  REQUIRE(contains(sdp, orig));
+  sdp.replace(sdp.find(orig), orig.size(), "s=" + session);
+  auto c = sample();
+  c.stations[0].inputs[0].sdp = sdp;
+  c.stations[0].inputs[0].name.clear();
+  be::normalize_config(c);
+  const std::string& name = c.stations[0].inputs[0].name;
+  CAPTURE(name);
+  CHECK(name.size() <= 64);
+  CHECK(name.size() >= 60);
+  CHECK(name.find('\t') == std::string::npos);
+  CHECK(name.rfind("StudioA ", 0) == 0);
+  CHECK(valid_utf8(name));  // cut on a whole character
+  CHECK_MESSAGE(be::validate_config(c).empty(), dump(be::validate_config(c)));
+}
+
+TEST_CASE("encoder config: oversized arrays are refused at parse time") {
+  auto json_with = [](int stations, int inputs, int streams) {
+    std::string t = R"({"version":1,"stations":[)";
+    for (int i = 0; i < stations; ++i) {
+      if (i) t += ",";
+      t += R"({"inputs":[)";
+      for (int k = 0; k < inputs; ++k) t += k ? ",{}" : "{}";
+      t += R"(],"streams":[)";
+      for (int k = 0; k < streams; ++k) t += k ? ",{}" : "{}";
+      t += "]}";
+    }
+    return t + "]}";
+  };
+  std::string err;
+  const auto t0 = std::chrono::steady_clock::now();
+  CHECK_FALSE(be::config_from_json(json_with(1, 0, 20000), &err));
+  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+  CHECK(ms < 1000);  // generous for a loaded machine: it takes ~1 ms
+  CHECK_MESSAGE(contains(err, "stations[0].streams"), err);
+  CHECK_MESSAGE(contains(err, "32"), err);
+  CHECK_FALSE(be::config_from_json(json_with(65, 0, 0), &err));
+  CHECK_MESSAGE(contains(err, "stations"), err);
+  CHECK_MESSAGE(contains(err, "64"), err);
+  CHECK_FALSE(be::config_from_json(json_with(1, 13, 0), &err));
+  CHECK_MESSAGE(contains(err, "stations[0].inputs"), err);
+  CHECK_MESSAGE(contains(err, "12"), err);
+
+  // a small overshoot parses, so validation can explain the real limit
+  auto c = be::config_from_json(json_with(17, 4, 9), &err);
+  REQUIRE_MESSAGE(c, err);
+  be::normalize_config(*c);
+  auto issues = be::validate_config(*c);
+  CHECK(find_issue(issues, "stations"));
+  CHECK(find_issue(issues, "stations[0].inputs"));
+  CHECK(find_issue(issues, "stations[0].streams"));
+  // the largest accepted input normalises quickly
+  c = be::config_from_json(json_with(64, 12, 32), &err);
+  REQUIRE_MESSAGE(c, err);
+  const auto t1 = std::chrono::steady_clock::now();
+  be::normalize_config(*c);
+  const auto ms2 = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t1).count();
+  CHECK(ms2 < 1000);
+  CHECK(c->stations[63].id == "s64");
+  CHECK(c->stations[63].streams[31].id == "str32");
 }
 
 TEST_CASE("encoder config: the API form carries no secrets") {
@@ -458,6 +588,20 @@ TEST_CASE("encoder config: merge_passwords keeps stored passwords by stream id")
     CHECK(next->stations[0].streams[1].password == "tajne-str2");
     CHECK(next->password_hash == prev.password_hash);
     CHECK(be::config_to_json(*next) == be::config_to_json(prev));
+  }
+  SUBCASE("a password_hash sent by the client is replaced by the stored one") {
+    auto prev = previous;
+    prev.password_hash = "pbkdf2-sha256$1$aa$bb";
+    std::string err;
+    auto next = be::config_from_json(R"({"version":1,"password_hash":"pbkdf2-sha256$1$00$11","stations":[]})", &err);
+    REQUIRE_MESSAGE(next, err);
+    CHECK(next->password_hash == "pbkdf2-sha256$1$00$11");
+    be::merge_passwords(*next, prev);
+    CHECK(next->password_hash == prev.password_hash);
+    auto empty = be::default_encoder_config();
+    empty.password_hash = "x";
+    be::merge_passwords(empty, be::default_encoder_config());
+    CHECK(empty.password_hash.empty());  // no hash stored: none can be set this way
   }
   SUBCASE("a new password replaces the stored one") {
     auto next = be::mask_passwords(previous);
@@ -562,6 +706,19 @@ TEST_CASE("encoder config: file save and load") {
   CHECK_FALSE(be::load_config_file(path, &err, &missing));
   CHECK_FALSE(missing);
   CHECK(contains(err, "nieprawidłowa konfiguracja"));
+
+  // the target is a non-empty directory: the rename fails and the temporary file goes away
+  const fs::path blocked = dir / "blocked.json";
+  fs::create_directories(blocked / "inside");
+  CHECK_FALSE(be::save_config_file(blocked.string(), c, &err));
+  CHECK_FALSE(err.empty());
+  CHECK_FALSE(fs::exists(blocked.string() + ".tmp"));
+  // the temporary file cannot be created: nothing is left either
+  const fs::path no_tmp = dir / "no-tmp.json";
+  fs::create_directories(no_tmp.string() + ".tmp");
+  CHECK_FALSE(be::save_config_file(no_tmp.string(), c, &err));
+  CHECK_FALSE(fs::exists(no_tmp));
+  CHECK(fs::is_directory(no_tmp.string() + ".tmp"));  // not ours: left alone
   fs::remove_all(dir);
 }
 

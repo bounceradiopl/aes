@@ -88,17 +88,23 @@ std::string config_to_json(const EncoderConfig& c);
 // whether one is stored, and there is no "password_hash".
 std::string config_to_api_json(const EncoderConfig& c);
 // Missing keys keep their defaults, unknown keys are ignored. nullopt (with a Polish *error)
-// for invalid JSON, a value of the wrong type, an unknown codec or a newer "version".
+// for invalid JSON, a value of the wrong type, an unknown codec, a "version" other than 1, or an
+// array longer than 4x its limit (64 stations, 12 inputs or 32 streams per station: an API body
+// cannot make normalize_config work through thousands of entries; validate_config explains a
+// smaller overshoot with the real limit).
 std::optional<EncoderConfig> config_from_json(std::string_view text, std::string* error);
 
 // Every rule of spec §2, §5.2 and §7; empty = valid. Disabled inputs and streams are only
 // checked for their ranges (gain, delay, latency) and ids: they may be left half filled in.
-// Enabled streams get the encoder's own settings check (validate_encoder_settings), a server,
-// port 1–65535, a mountpoint starting with '/' and a password; two enabled streams of enabled
-// stations may not feed the same server mountpoint.
+// Lengths are bounded everywhere (names 64 bytes, SDP 64 KB, host 253, mount/user/password 255).
+// Enabled streams get the encoder's own settings check (validate_encoder_settings), a server
+// (ASCII host name or IPv4, no port), port 1–65535, a mountpoint starting with '/' without
+// spaces, '?' or '#', and a password (ruling E7); two enabled streams of enabled stations may not
+// feed the same server mountpoint.
 std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c);
 // Rounds gains to 0.5 dB and delays to 0.1 s, raises input latencies below "source ptime + 1 ms",
-// names unnamed inputs after their SDP session and assigns ids to new stations and streams.
+// names unnamed inputs after their SDP session (control characters removed, cut to 64 bytes on a
+// whole UTF-8 character) and assigns ids to new stations and streams.
 // Returns Polish notices for the changes the user should hear about (raised latencies).
 std::vector<std::string> normalize_config(EncoderConfig& c);
 
@@ -114,8 +120,8 @@ void merge_passwords(EncoderConfig& next, const EncoderConfig& previous);
 
 // Reads the configuration file; *missing = true when it does not exist (then nullopt, no error).
 std::optional<EncoderConfig> load_config_file(const std::string& path, std::string* error, bool* missing = nullptr);
-// Writes the configuration atomically (a temporary file next to it, then a rename over it),
-// creating the directory when needed.
+// Writes the configuration atomically (a temporary file next to it, flushed to disk, then a rename
+// over it), creating the directory when needed. On failure the temporary file is removed.
 bool save_config_file(const std::string& path, const EncoderConfig& c, std::string* error);
 
 }  // namespace bam::encoder

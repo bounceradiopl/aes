@@ -29,6 +29,9 @@ struct SdpStream {
   uint32_t mediaclk_offset = 0;
 };
 
+// parse_sdp refuses a packet time (a=ptime, or a=framecount at the stream rate) above this.
+inline constexpr double kMaxSdpPtimeMs = 100.0;
+
 struct SdpParseResult {
   std::optional<SdpStream> stream;
   std::string error;  // Polish, user facing

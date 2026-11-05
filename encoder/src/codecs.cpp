@@ -92,7 +92,7 @@ const CodecLimits& codec_limits(Codec c) {
 }
 
 std::optional<Codec> parse_codec(std::string_view s) {
-  for (auto c : {Codec::Mp3, Codec::AacLc, Codec::HeAac, Codec::HeAacV2, Codec::Flac})
+  for (auto c : kCodecs)
     if (s == codec_name(c)) return c;
   return std::nullopt;
 }
