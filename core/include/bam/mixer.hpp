@@ -41,9 +41,13 @@ struct MixBusPlan {
 //
 // Levels never step: each member's gain moves linearly to its new value over kMixRampFrames, per
 // sample. A member is recognised across plans by its left ring (MixInput::left.samples()), so the
-// order of the inputs does not matter; a member that joins fades in from silence, one that leaves
-// is dropped, and a muted member is skipped once its fade has reached zero. While every audible
-// member sits at exactly 0 dB the bus sums in integers, bit-exact.
+// order of the inputs does not matter; a member that joins fades in from silence, a muted member
+// is skipped once its fade has reached zero, and a member missing from a new plan fades out over
+// kMixRampFrames instead of dropping at once (it keeps playing its own ring, bounded to
+// kMaxInputs "leaving" members per bus — the oldest is dropped first if that fills up) and is
+// matched again, continuing its level with no jump, if it reappears in a later plan before the
+// fade finishes. While every audible member sits at exactly 0 dB and none are leaving, the bus
+// sums in integers, bit-exact.
 class Mixer {
  public:
   Mixer();
@@ -68,15 +72,26 @@ class Mixer {
       gain = left == 0 ? target : target + (from - target) * (static_cast<double>(left) / kMixRampFrames);
     }
   };
+  struct Leaving {
+    MixInput input;  // the member's own rings, kept so it can still be read once it is off the plan
+    Level level;     // always fading toward 0 while held here
+  };
   struct State {
     bool started = false;
     uint64_t mixed_upto = 0;
     uint64_t owner = 0;
-    size_t count = 0;  // members in `levels`, in the order of the plan's inputs
+    size_t count = 0;  // members in `levels`/`inputs`, in the order of the plan's inputs
     std::array<Level, kMaxInputs> levels{};
+    std::array<MixInput, kMaxInputs> inputs{};  // this bus's current members' rings, parallel to `levels`
+    size_t leaving_count = 0;
+    std::array<Leaving, kMaxInputs> leaving{};  // members no longer in the plan, still fading to 0
   };
   void follow_plan(State& st, const MixBusPlan& bus);
   void mix_block(State& st, const MixBusPlan& bus, float peak[2]);
+  // Moves a member that just fell out of the plan into the leaving set so it keeps fading out.
+  // Bounded by kMaxInputs: if already full, the oldest leaving member is dropped (cut short)
+  // to make room, rather than growing or allocating.
+  static void start_leaving(State& st, const MixInput& input, const Level& level);
 
   std::mutex plan_mutex_;
   std::shared_ptr<const std::vector<MixBusPlan>> plan_;

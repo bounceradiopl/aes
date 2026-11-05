@@ -233,6 +233,116 @@ TEST_CASE("mixer: a member that joins fades in, and a constant 0 dB mix stays bi
   CHECK(bad == 0);  // both at 0 dB after the fade: bit-exact sum again
 }
 
+TEST_CASE("mixer fades out a member removed from the plan") {
+  Ring al, ar, bl, br, ol, orr;
+  std::vector<int32_t> aval(40000, 0x10000000), bval(40000, 0x08000000);
+  al.ring().write(0, aval.data(), aval.size());
+  ar.ring().write(0, aval.data(), aval.size());
+  bl.ring().write(0, bval.data(), bval.size());
+  br.ring().write(0, bval.data(), bval.size());
+  bam::Mixer mixer;
+  bam::MixBusPlan p;
+  p.out_left = ol.ring();
+  p.out_right = orr.ring();
+  p.inputs = {{al.ring(), ar.ring(), 1.0, 0}, {bl.ring(), br.ring(), 1.0, 0}};
+  mixer.set_plan({p});
+  uint64_t now = 1000;
+  for (; now <= 8000; now += 48) mixer.process(now, 1);
+  CHECK(span(ol, 6000, 7900) == std::vector<int32_t>(1900, 0x10000000 + 0x08000000));  // steady, bit-exact
+  const uint64_t removed_at = now;
+  p.inputs = {{al.ring(), ar.ring(), 1.0, 0}};  // B leaves the plan entirely (not muted: simply absent)
+  mixer.set_plan({p});
+  for (; now <= 16000; now += 48) mixer.process(now, 1);
+  auto down = span(ol, removed_at - 500, removed_at + 1000);
+  constexpr int64_t kBStep = 0x08000000LL / bam::kMixRampFrames + 1;  // B's full scale over the ramp, plus 1 LSB
+  int64_t max_step = 0;
+  bool monotonic = true;
+  for (size_t i = 1; i < down.size(); ++i) {
+    max_step = std::max<int64_t>(max_step, static_cast<int64_t>(down[i - 1]) - down[i]);
+    if (down[i] > down[i - 1]) monotonic = false;
+  }
+  CHECK(monotonic);
+  CHECK(max_step <= kBStep);
+  CHECK(down.front() == 0x10000000 + 0x08000000);  // still full before the change
+  CHECK(span(ol, removed_at + 1000, 15000) == std::vector<int32_t>(15000 - removed_at - 1000, 0x10000000));  // exactly A after
+  size_t between = 0;
+  for (int32_t v : down) between += v != 0x10000000 && v != 0x10000000 + 0x08000000;
+  CHECK(between == bam::kMixRampFrames - 1);
+  CHECK(mixer.late() == 0);
+}
+
+TEST_CASE("mixer fades a bus to 0 when its only member leaves the plan") {
+  Ring al, ar, ol, orr;
+  std::vector<int32_t> aval(40000, 0x10000000);
+  al.ring().write(0, aval.data(), aval.size());
+  ar.ring().write(0, aval.data(), aval.size());
+  bam::Mixer mixer;
+  bam::MixBusPlan p;
+  p.out_left = ol.ring();
+  p.out_right = orr.ring();
+  p.inputs = {{al.ring(), ar.ring(), 1.0, 0}};
+  mixer.set_plan({p});
+  uint64_t now = 1000;
+  for (; now <= 8000; now += 48) mixer.process(now, 1);
+  CHECK(span(ol, 6000, 7900) == std::vector<int32_t>(1900, 0x10000000));
+  const uint64_t removed_at = now;
+  p.inputs.clear();  // the bus stays in the plan (still set_plan'd below), now with no members at all
+  mixer.set_plan({p});
+  for (; now <= 16000; now += 48) mixer.process(now, 1);
+  auto down = span(ol, removed_at - 500, removed_at + 1000);
+  int64_t max_step = 0;
+  bool monotonic = true;
+  for (size_t i = 1; i < down.size(); ++i) {
+    max_step = std::max<int64_t>(max_step, static_cast<int64_t>(down[i - 1]) - down[i]);
+    if (down[i] > down[i - 1]) monotonic = false;
+  }
+  CHECK(monotonic);
+  CHECK(max_step <= kMaxStep);
+  CHECK(down.front() == 0x10000000);
+  CHECK(span(ol, removed_at + 1000, 15000) == std::vector<int32_t>(15000 - removed_at - 1000, 0));
+}
+
+TEST_CASE("mixer: a member rejoining mid-fade continues its level without a jump") {
+  Ring al, ar, bl, br, ol, orr;
+  std::vector<int32_t> aval(60000, 0x10000000), bval(60000, 0x08000000);
+  al.ring().write(0, aval.data(), aval.size());
+  ar.ring().write(0, aval.data(), aval.size());
+  bl.ring().write(0, bval.data(), bval.size());
+  br.ring().write(0, bval.data(), bval.size());
+  bam::Mixer mixer;
+  bam::MixBusPlan p;
+  p.out_left = ol.ring();
+  p.out_right = orr.ring();
+  p.inputs = {{al.ring(), ar.ring(), 1.0, 0}, {bl.ring(), br.ring(), 1.0, 0}};
+  mixer.set_plan({p});
+  uint64_t now = 1000;
+  for (; now <= 8000; now += 48) mixer.process(now, 1);
+  const uint64_t removed_at = now;
+  p.inputs = {{al.ring(), ar.ring(), 1.0, 0}};  // B leaves the plan
+  mixer.set_plan({p});
+  now += 48;
+  mixer.process(now, 1);
+  now += 48;
+  mixer.process(now, 1);  // only 2 of B's 240-frame fade-out blocks have run: still mid-fade
+  p.inputs = {{al.ring(), ar.ring(), 1.0, 0}, {bl.ring(), br.ring(), 1.0, 0}};  // B rejoins mid-fade
+  mixer.set_plan({p});
+  // run past removed_at + 2000 by the margin, so that whole span is actually mixed (mixed_upto
+  // trails "now" by kMixMarginFrames once caught up)
+  for (; now <= removed_at + 2000 + bam::kMixMarginFrames; now += 48) mixer.process(now, 1);
+
+  // A is constant, so any step in the raw output is purely B's level changing; this window spans
+  // both the fade-out and the rejoin boundary, so a jump anywhere (in particular right where B
+  // rejoins) shows up here.
+  auto got = span(ol, removed_at - 200, removed_at + 1500);
+  int64_t max_step = 0;
+  for (size_t i = 1; i < got.size(); ++i)
+    max_step = std::max<int64_t>(max_step, std::abs(static_cast<int64_t>(got[i]) - got[i - 1]));
+  CHECK(max_step <= kMaxStep);  // no jump anywhere, including right at the rejoin boundary
+
+  CHECK(span(ol, removed_at + 1500, removed_at + 2000) ==
+        std::vector<int32_t>(500, 0x10000000 + 0x08000000));  // B recovers to full strength, bit-exact
+}
+
 TEST_CASE("mixer: a bus taken over by another destination starts clean") {
   Ring al, ar, bl, br, ol, orr;
   std::vector<int32_t> neg(40000, -0x10000000), pos(40000, 0x20000000);

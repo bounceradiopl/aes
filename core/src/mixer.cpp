@@ -29,17 +29,43 @@ float Mixer::peak_db(int bus, int side) const {
   return peak_[bus * 2 + side].load(std::memory_order_relaxed);
 }
 
-// Carries every member's level over from the previous plan (matched by its left ring) and starts a
-// fade wherever the plan's gain differs from where the member is heading.
+// Moves a member that just fell out of the plan into the leaving set so it keeps fading out; see
+// the declaration for the bound on how many can be leaving at once.
+void Mixer::start_leaving(State& st, const MixInput& input, const Level& level) {
+  if (st.leaving_count == kMaxInputs) {
+    // Full: cut the oldest leaving member's fade short to make room for this one. kMaxInputs is
+    // already generous for how many members can be mid-fade at once (a plan has at most
+    // kMaxInputs members to begin with), so this only bites under rapid churn, and losing the
+    // tail of one fade is preferable to allocating or growing the set.
+    std::copy(st.leaving.begin() + 1, st.leaving.begin() + st.leaving_count, st.leaving.begin());
+    --st.leaving_count;
+  }
+  st.leaving[st.leaving_count++] = Leaving{input, level};
+}
+
+// Carries every member's level over from the previous plan (matched by its left ring, whether it
+// was still playing or already fading out in the leaving set) and starts a fade wherever the
+// plan's gain differs from where the member is heading. A previous member missing from the new
+// plan starts fading out instead of disappearing at once.
 void Mixer::follow_plan(State& st, const MixBusPlan& bus) {
   const size_t n = std::min(bus.inputs.size(), kMaxInputs);
+  std::array<bool, kMaxInputs> matched_level{};    // st.levels[j] claimed by a new input
+  std::array<bool, kMaxInputs> matched_leaving{};  // st.leaving[j] claimed by a new input
   for (size_t i = 0; i < n; ++i) {
     Level l;
     l.key = bus.inputs[i].left.samples();
-    for (size_t j = 0; j < st.count; ++j)
+    bool found = false;
+    for (size_t j = 0; j < st.count && !found; ++j)
       if (st.levels[j].key == l.key) {
         l = st.levels[j];
-        break;
+        matched_level[j] = true;
+        found = true;
+      }
+    for (size_t j = 0; j < st.leaving_count && !found; ++j)
+      if (st.leaving[j].level.key == l.key) {
+        l = st.leaving[j].level;  // continue its fade from where it was: no jump
+        matched_leaving[j] = true;
+        found = true;
       }
     const double target = bus.inputs[i].gain;
     if (target != l.target) {
@@ -49,12 +75,26 @@ void Mixer::follow_plan(State& st, const MixBusPlan& bus) {
     }
     next_levels_[i] = l;
   }
+  for (size_t j = 0; j < st.count; ++j) {
+    if (matched_level[j]) continue;
+    Level l = st.levels[j];
+    l.from = l.gain;
+    l.target = 0.0;
+    l.left = l.gain == 0.0 ? 0 : kMixRampFrames;
+    if (l.audible()) start_leaving(st, st.inputs[j], l);  // already silent: nothing to fade, just drop it
+  }
+  size_t w = 0;
+  for (size_t j = 0; j < st.leaving_count; ++j)
+    if (!matched_leaving[j]) st.leaving[w++] = st.leaving[j];  // claimed ones leave the set; the rest compact down
+  st.leaving_count = w;
+
   std::copy_n(next_levels_.begin(), n, st.levels.begin());
+  std::copy_n(bus.inputs.begin(), n, st.inputs.begin());
   st.count = n;
 }
 
 void Mixer::mix_block(State& st, const MixBusPlan& bus, float peak[2]) {
-  bool exact = true;  // every audible member at exactly 0 dB, none fading: integer sum
+  bool exact = st.leaving_count == 0;  // a leaving member is always mid-fade: never exactly 0 dB
   for (size_t k = 0; k < st.count; ++k) {
     const Level& l = st.levels[k];
     if (l.audible() && (l.left != 0 || l.gain != 1.0)) exact = false;
@@ -96,6 +136,24 @@ void Mixer::mix_block(State& st, const MixBusPlan& bus, float peak[2]) {
         }
       }
     }
+    // Members that left the plan: read from their own kept rings (not bus.inputs, which no longer
+    // lists them) and keep fading toward 0; drop each one as soon as it gets there.
+    size_t w = 0;
+    for (size_t k = 0; k < st.leaving_count; ++k) {
+      Leaving& lv = st.leaving[k];
+      lv.input.left.read(st.mixed_upto, in_l_.data(), kBlock);
+      lv.input.right.read(st.mixed_upto, in_r_.data(), kBlock);
+      for (uint32_t i = 0; i < kBlock; ++i) {
+        lv.level.advance();
+        acc_l_[i] += static_cast<double>(in_l_[i]) * lv.level.gain;
+        acc_r_[i] += static_cast<double>(in_r_[i]) * lv.level.gain;
+      }
+      if (lv.level.audible()) {
+        if (w != k) st.leaving[w] = lv;
+        ++w;
+      }
+    }
+    st.leaving_count = w;
     for (uint32_t i = 0; i < kBlock; ++i) {
       out_l_[i] = saturate(std::llround(acc_l_[i]));
       out_r_[i] = saturate(std::llround(acc_r_[i]));
