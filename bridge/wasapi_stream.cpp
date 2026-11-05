@@ -9,6 +9,7 @@
 #include <mmreg.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -484,20 +485,26 @@ void CaptureStream::run() {
 }
 
 // ---------------------------------------------------------------- render
-namespace {
-int meter_channels(const std::vector<RenderPair>& pairs) {
-  int top = 1;
-  for (const auto& p : pairs) top = std::max(top, p.channel_pair);
-  return 2 * top;
-}
-}  // namespace
-
-RenderStream::RenderStream(const ShmView& view, std::string endpoint, std::vector<RenderPair> pairs)
-    : AudioStream(view, meter_channels(pairs)), endpoint_(std::move(endpoint)), pairs_(std::move(pairs)) {
+// Every device channel is metered, so a pair added by update_feeds has its meter too.
+RenderStream::RenderStream(const ShmView& view, std::string endpoint, const std::vector<RenderFeed>& feeds)
+    : AudioStream(view, 2 * kDeviceCount), endpoint_(std::move(endpoint)) {
+  for (const auto& f : feeds) max_delay_ = std::max(max_delay_, f.delay);
+  fill(tables_[front_], feeds);
   start();
 }
 
 RenderStream::~RenderStream() { stop(); }
+
+void RenderStream::fill(FeedTable& t, const std::vector<RenderFeed>& feeds) {
+  t.count = static_cast<int>(std::min(feeds.size(), t.feeds.size()));
+  std::copy_n(feeds.begin(), t.count, t.feeds.begin());
+}
+
+void RenderStream::update_feeds(const std::vector<RenderFeed>& feeds) {
+  fill(tables_[back_], feeds);
+  // publish the back table, take the previous hand-over table (taken by the reader or not) as the next back
+  back_ = handover_.exchange(back_ | kFresh, std::memory_order_acq_rel) & ~kFresh;
+}
 
 void RenderStream::run() {
   ComScope com;
@@ -531,19 +538,27 @@ void RenderStream::run() {
   // The pacer runs on the slowest pair's timeline: it reads up to ready = now - max_delay. A pair
   // with a shorter delay reads (max_delay - delay) frames further on, i.e. up to now - delay, so
   // every pair plays "its own position" like a stream of its own; one pair: ahead = 0.
-  uint32_t max_delay = 0;
-  for (const auto& p : pairs_) max_delay = std::max(max_delay, p.delay);
+  const uint32_t max_delay = max_delay_;
   struct Feed {
-    int first;       // device channel of the pair's left side
-    uint64_t ahead;  // max_delay - delay
+    int first = 0;       // device channel of the pair's left side
+    uint64_t ahead = 0;  // max_delay - delay
     ChannelRing l, r;
   };
-  std::vector<Feed> feeds;
-  for (const auto& p : pairs_) {
-    const int first = 2 * (p.channel_pair - 1);
-    if (p.channel_pair < 1 || first >= channels) continue;  // the device has no such channels
-    feeds.push_back({first, max_delay - p.delay, view_.source_ring(p.kind, p.pair * 2), view_.source_ring(p.kind, p.pair * 2 + 1)});
-  }
+  std::array<Feed, kDeviceCount> feeds{};
+  int feed_count = 0;
+  // Rebuilds the ring table from the front feed table; no allocation, safe on the render thread.
+  const auto take_feeds = [&] {
+    const FeedTable& t = tables_[front_];
+    feed_count = 0;
+    for (int i = 0; i < t.count; ++i) {
+      const RenderFeed& p = t.feeds[static_cast<size_t>(i)];
+      const int first = 2 * (p.channel_pair - 1);
+      if (p.channel_pair < 1 || first >= channels) continue;  // the device has no such channels
+      const uint64_t ahead = p.delay < max_delay ? max_delay - p.delay : 0;
+      feeds[static_cast<size_t>(feed_count++)] = {first, ahead, view_.source_ring(p.kind, p.pair * 2), view_.source_ring(p.kind, p.pair * 2 + 1)};
+    }
+  };
+  take_feeds();
   std::vector<int32_t> l, r;
   RenderPacer pacer(fmt.rate, period_frames, channels);
   const RenderPacer::Reader read = [&](uint64_t pos, uint32_t frames, float* out) {
@@ -551,7 +566,8 @@ void RenderStream::run() {
     l.resize(frames);
     r.resize(frames);
     const auto stride = static_cast<size_t>(channels);
-    for (const Feed& f : feeds) {
+    for (int k = 0; k < feed_count; ++k) {
+      const Feed& f = feeds[static_cast<size_t>(k)];
       f.l.read(pos + f.ahead, l.data(), frames);
       f.r.read(pos + f.ahead, r.data(), frames);
       const bool right = f.first + 1 < channels;
@@ -570,6 +586,11 @@ void RenderStream::run() {
     if (FAILED(hr)) {
       fail(hr_text("odtwarzanie", hr));
       break;
+    }
+    // new pairs from update_feeds: take the hand-over table, give back the front one
+    if (handover_.load(std::memory_order_relaxed) & kFresh) {
+      front_ = handover_.exchange(front_, std::memory_order_acq_rel) & ~kFresh;
+      take_feeds();
     }
     // the slowest pair's source is complete up to "now - max_delay"
     uint64_t g = 0;

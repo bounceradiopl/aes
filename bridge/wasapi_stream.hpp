@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <mutex>
@@ -7,6 +8,8 @@
 #include <thread>
 #include <vector>
 
+#include "bam/constants.hpp"
+#include "bam/render_layout.hpp"
 #include "bam/shm_layout.hpp"
 
 namespace bam::bridge {
@@ -63,29 +66,42 @@ class CaptureStream : public AudioStream {
   std::string key_;
 };
 
-// One channel pair of a playback device and the timeline pair it plays.
-struct RenderPair {
-  int channel_pair = 1;  // device channels 2p-1, 2p (1-based)
-  ShmSource kind = ShmSource::None;
-  int pair = 0;          // ring pair of `kind`
-  uint32_t delay = 0;    // D_src: the rings are complete up to "now - delay"
-};
-
 // Plays timeline sources (any ring, mix buses included) on the channel pairs of one Windows
 // playback device, from a single WASAPI stream so all pairs share the device clock and one
 // resampler. Every pair is heard at "playback time - its own delay", as a stream of its own would be.
 class RenderStream : public AudioStream {
  public:
-  RenderStream(const ShmView& view, std::string endpoint, std::vector<RenderPair> pairs);
+  // max_delay of `feeds` is the stream's timeline for its whole life (see plan_device).
+  RenderStream(const ShmView& view, std::string endpoint, const std::vector<RenderFeed>& feeds);
   ~RenderStream() override;
 
   // Channel count of the device's mix format; 0 until the device is open.
   int device_channels() const { return device_channels_.load(std::memory_order_relaxed); }
 
+  // Replaces the pairs the device plays without reopening it; the render thread takes them at
+  // the start of its next pass and channels no longer fed play silence from then on. Bridge
+  // thread only (one writer). Feeds above kDeviceCount pairs are dropped.
+  void update_feeds(const std::vector<RenderFeed>& feeds);
+
  private:
+  // Fixed-size feed table handed to the render thread without allocation or locks: a triple
+  // buffer. Each of the three tables is owned by exactly one side at a time: the writer's back
+  // table, the reader's front table and the hand-over table in `handover_`. Ownership moves only
+  // by atomic exchange, so neither side ever waits for the other or reads a table being written.
+  struct FeedTable {
+    int count = 0;
+    std::array<RenderFeed, kDeviceCount> feeds{};
+  };
+  static constexpr uint32_t kFresh = 4;  // hand-over table holds feeds the reader has not taken
+  static void fill(FeedTable& t, const std::vector<RenderFeed>& feeds);
+
   void run() override;
   std::string endpoint_;
-  std::vector<RenderPair> pairs_;
+  uint32_t max_delay_ = 0;
+  std::array<FeedTable, 3> tables_{};
+  std::atomic<uint32_t> handover_{2};  // index of the hand-over table | kFresh
+  uint32_t back_ = 1;                  // writer's table (bridge thread)
+  uint32_t front_ = 0;                 // reader's table (render thread)
   std::atomic<int> device_channels_{0};
 };
 

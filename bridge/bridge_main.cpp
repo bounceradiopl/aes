@@ -19,6 +19,7 @@
 #include "bam/platform/process.hpp"
 #include "bam/platform/shm.hpp"
 #include "bam/platform/time.hpp"
+#include "bam/render_layout.hpp"
 #include "bam/routing.hpp"
 #include "bam/shm_layout.hpp"
 #include "endpoints.hpp"
@@ -36,7 +37,7 @@ constexpr uint32_t kWinSourceDelay = 960;
 
 struct Slot {
   std::string key;  // capture: the source id reported for the slot
-  std::vector<std::pair<std::string, int>> dests;  // render: destination ids and their channel pairs
+  std::optional<DeviceLayout> layout;  // render: what the device plays (destination ids for the report)
   std::unique_ptr<AudioStream> stream;
   int64_t failed_at = 0;
 };
@@ -96,35 +97,30 @@ class Bridge {
         slot.stream = std::make_unique<CaptureStream>(view_, s.slot, kind, parsed->key);
       }
     }
-    // one RenderStream per playback device, playing all of its routed channel pairs; the slot key
-    // covers only that device, so a change elsewhere leaves its stream running
-    std::map<std::string, std::vector<const BridgeDestReq*>> devices;
-    for (const auto& d : request_.dests) {
-      auto parsed = parse_dest(d.id);
-      if (parsed && parsed->kind == DestKind::WinOut) devices[parsed->key].push_back(&d);
-    }
-    for (auto& [endpoint, group] : devices) {
-      std::sort(group.begin(), group.end(), [](const BridgeDestReq* a, const BridgeDestReq* b) {
-        return a->channel_pair != b->channel_pair ? a->channel_pair < b->channel_pair : a->id < b->id;
-      });
-      const std::string prefix = "dst|" + endpoint + "|";
-      std::string key = prefix;
-      for (const auto* d : group)
-        key += std::to_string(d->channel_pair) + ":" + std::to_string(static_cast<int>(d->kind)) + ":" + std::to_string(d->pair) + ":" +
-               std::to_string(d->delay_frames) + ";";
+    // one RenderStream per playback device, playing all of its routed channel pairs. A changed
+    // pair goes to the running stream (update_feeds), so the device's other pairs play on; only
+    // a new timeline (max_delay) reopens it. Devices whose layout did not change stay untouched.
+    for (DeviceLayout& next : device_layouts(request_.dests)) {
+      const std::string key = "dst|" + next.endpoint;
       wanted[key] = true;
       Slot& slot = slots_[key];
-      slot.dests.clear();
-      for (const auto* d : group) slot.dests.emplace_back(d->id, d->channel_pair);
-      if (should_start(slot, now)) {
-        // the device's previous layout goes first, so its pairs are never played twice
-        for (auto& [k, other] : slots_)
-          if (k != key && k.rfind(prefix, 0) == 0) other.stream.reset();
-        std::vector<RenderPair> pairs;
-        for (const auto* d : group) pairs.push_back({d->channel_pair, d->kind, d->pair, d->delay_frames});
-        slot.stream = std::make_unique<RenderStream>(view_, endpoint, std::move(pairs));
+      switch (plan_device(slot.layout ? &*slot.layout : nullptr, &next)) {
+        case DeviceAction::Restart:  // the old stream goes first, so no pair is played twice
+          slot.stream.reset();
+          slot.failed_at = 0;
+          break;
+        case DeviceAction::UpdateFeeds:  // a stream waiting for its retry starts with the new layout
+          if (auto* render = dynamic_cast<RenderStream*>(slot.stream.get()); render && !render->finished()) render->update_feeds(next.feeds);
+          break;
+        case DeviceAction::Keep:
+        case DeviceAction::Start:  // no stream yet: should_start below
+        case DeviceAction::Stop:   // not for a device in the request
+          break;
       }
+      slot.layout = std::move(next);
+      if (should_start(slot, now)) slot.stream = std::make_unique<RenderStream>(view_, slot.layout->endpoint, slot.layout->feeds);
     }
+    // a device no longer in the request (DeviceAction::Stop) loses its slot and stream here
     for (auto it = slots_.begin(); it != slots_.end();) {
       if (!wanted.count(it->first)) {
         it = slots_.erase(it);
@@ -154,11 +150,12 @@ class Bridge {
     r.endpoints = list_endpoints();
     r.apps = list_apps();
     for (const auto& [key, slot] : slots_) {
-      if (slot.dests.empty()) {
+      if (!slot.layout) {
         r.slots.push_back(slot_state(slot.key, slot, 0));
         continue;
       }
-      for (const auto& [id, channel_pair] : slot.dests) r.slots.push_back(slot_state(id, slot, channel_pair));
+      for (size_t i = 0; i < slot.layout->feeds.size(); ++i)
+        r.slots.push_back(slot_state(slot.layout->dest_ids[i], slot, slot.layout->feeds[i].channel_pair));
     }
     view_.write_report(to_json(r));
   }
