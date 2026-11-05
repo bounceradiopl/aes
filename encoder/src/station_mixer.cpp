@@ -6,18 +6,6 @@
 
 namespace bam::encoder {
 
-void GainRamp::set_target(double target) {
-  if (target == target_) return;
-  from_ = level_;
-  target_ = target;
-  left_ = kRampFrames;
-}
-
-void GainRamp::skip(size_t frames) {
-  left_ -= static_cast<uint32_t>(std::min<size_t>(left_, frames));
-  level_ = left_ == 0 ? target_ : target_ + (from_ - target_) * (static_cast<double>(left_) / kRampFrames);
-}
-
 namespace {
 bool valid(int input) { return input >= 0 && input < kStationInputs; }
 }  // namespace

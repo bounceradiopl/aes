@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iterator>
+#include <stdexcept>
 #include <vector>
 
 #include "bam/encoder/dsp.hpp"
@@ -33,10 +34,8 @@ float noise(int64_t frame, int side) {
   return static_cast<float>(static_cast<double>(x >> 40) / static_cast<double>(1ull << 23) - 1.0);  // [-1, 1)
 }
 
-// A full-scale sine so slow that consecutive samples differ by less than one 16-bit LSB.
-float slow_sine(int64_t frame, int side) {
-  return static_cast<float>(std::sin(2 * kPi * 0.1 * static_cast<double>(frame) / 48000.0 + side * kPi / 2));
-}
+// Full-scale DC: every step in the output is the fade's own, so the step bound pins its length.
+float dc(int64_t, int) { return 1.0f; }
 
 using Signal = float (*)(int64_t, int);
 
@@ -115,8 +114,11 @@ TEST_CASE("delay line keeps the delay within its capacity") {
   CHECK_FALSE(small.set_delay_seconds(1.6));
 }
 
+// The largest step a 240-frame fade may make on a full-scale signal.
+constexpr double kFadeStep = 1.0 / be::kRampFrames + kLsb16;
+
 TEST_CASE("delay line change 1 s -> 3 s mid-stream fades, inserts silence, then aligns exactly") {
-  for (Signal sig : {slow_sine, noise}) {
+  for (Signal sig : {dc, noise}) {
     be::DelayLine line;
     REQUIRE(line.set_delay_seconds(1.0));
     std::vector<float> out;
@@ -135,12 +137,12 @@ TEST_CASE("delay line change 1 s -> 3 s mid-stream fades, inserts silence, then 
     for (int64_t n = silence_from; n < silence_to; ++n) loud += out[n * 2] != 0.0f || out[n * 2 + 1] != 0.0f;
     CHECK(loud == 0);
     check_aligned(out, sig, silence_to + be::kRampFrames, pos, 3 * 48000);
-    if (sig == slow_sine) CHECK(max_step(out, change - 1) <= 1.0 / be::kRampFrames + kLsb16);
+    if (sig == dc) CHECK(max_step(out, change - 1) <= kFadeStep);
   }
 }
 
 TEST_CASE("delay line change 3 s -> 1 s skips audio with a fade, then aligns exactly") {
-  for (Signal sig : {slow_sine, noise}) {
+  for (Signal sig : {dc, noise}) {
     be::DelayLine line;
     REQUIRE(line.set_delay_seconds(3.0));
     std::vector<float> out;
@@ -151,25 +153,75 @@ TEST_CASE("delay line change 3 s -> 1 s skips audio with a fade, then aligns exa
     run(line, sig, pos, 3 * 48000, out);
     check_aligned(out, sig, 3 * 48000, change, 3 * 48000);
     check_aligned(out, sig, change + 2 * be::kRampFrames, pos, 48000);
-    if (sig == slow_sine) CHECK(max_step(out, change - 1) <= 1.0 / be::kRampFrames + kLsb16);
+    if (sig == dc) CHECK(max_step(out, change - 1) <= kFadeStep);
   }
 }
 
-TEST_CASE("delay line change during a fade keeps the level smooth and lands on the last delay") {
-  be::DelayLine line;
-  REQUIRE(line.set_delay_seconds(1.0));
-  std::vector<float> out;
-  int64_t pos = 0;
-  run(line, slow_sine, pos, 2 * 48000, out);
-  const int64_t change = pos;
-  REQUIRE(line.set_delay_seconds(2.0));
-  run(line, slow_sine, pos, 100, out);  // mid fade-out
-  REQUIRE(line.set_delay_seconds(0.5));
-  run(line, slow_sine, pos, 100 + be::kRampFrames + 100, out);  // into the fade-in
-  REQUIRE(line.set_delay_seconds(1.5));
-  run(line, slow_sine, pos, 4 * 48000, out);
-  CHECK(max_step(out, change - 1) <= 1.0 / be::kRampFrames + kLsb16);
-  check_aligned(out, slow_sine, pos - 48000, pos, 72000);
+TEST_CASE("delay line change during a fade-out and then during the fade-in") {
+  for (Signal sig : {dc, noise}) {
+    be::DelayLine line;
+    REQUIRE(line.set_delay_seconds(1.0));
+    std::vector<float> out;
+    int64_t pos = 0;
+    run(line, sig, pos, 2 * 48000, out);
+    const int64_t change = pos;
+    REQUIRE(line.set_delay_seconds(2.0));
+    run(line, sig, pos, 100, out);  // fade-out at 140/240
+    if (sig == dc) CHECK(out.back() == 140.0f / 240.0f);
+    REQUIRE(line.set_delay_seconds(0.5));
+    run(line, sig, pos, 140 + 100, out);  // fade-out ends, skip to 0.5 s, fade-in at 100/240
+    if (sig == dc) CHECK(out.back() == 100.0f / 240.0f);
+    REQUIRE(line.set_delay_seconds(1.5));  // fades out from 100/240, 1 s of silence, fade-in
+    run(line, sig, pos, 3 * 48000, out);
+    if (sig == dc) CHECK(max_step(out, change - 1) <= kFadeStep);
+    check_aligned(out, sig, pos - 48000, pos, 72000);
+  }
+}
+
+TEST_CASE("delay line change during the silence of a longer delay") {
+  // 1 s -> 3 s; 0.5 s into the inserted silence (1.5 s reached) the delay is set again: to 2 s
+  // the silence runs on to 2 s, to 1.2 s (already passed) the read position skips ahead to it.
+  for (double second : {2.0, 1.2}) {
+    CAPTURE(second);
+    for (Signal sig : {dc, noise}) {
+      be::DelayLine line;
+      REQUIRE(line.set_delay_seconds(1.0));
+      std::vector<float> out;
+      int64_t pos = 0;
+      run(line, sig, pos, 2 * 48000, out);
+      const int64_t change = pos;
+      REQUIRE(line.set_delay_seconds(3.0));
+      run(line, sig, pos, be::kRampFrames + 24000, out);
+      CHECK(out.back() == 0.0f);
+      REQUIRE(line.set_delay_seconds(second));
+      run(line, sig, pos, 3 * 48000, out);
+      if (sig == dc) CHECK(max_step(out, change - 1) <= kFadeStep);
+      check_aligned(out, sig, pos - 48000, pos, std::llround(second * 48000));
+    }
+  }
+}
+
+TEST_CASE("delay line re-applying the delay it is heading to changes nothing") {
+  // Task 7 re-sends unchanged settings: that must not restart a fade (no dip).
+  be::DelayLine plain, reapplied;
+  std::vector<float> out_plain, out_reapplied;
+  int64_t pos_plain = 0, pos_reapplied = 0;
+  for (be::DelayLine* line : {&plain, &reapplied}) REQUIRE(line->set_delay_seconds(1.0));
+  run(plain, dc, pos_plain, 2 * 48000, out_plain);
+  run(reapplied, dc, pos_reapplied, 2 * 48000, out_reapplied);
+  REQUIRE(reapplied.set_delay_seconds(1.0));  // steady
+  for (be::DelayLine* line : {&plain, &reapplied}) REQUIRE(line->set_delay_seconds(2.0));
+  // re-applied during the fade-out, the silence and the fade-in
+  for (size_t frames : {size_t{100}, size_t{140 + 24000}, size_t{24000 + 100}}) {
+    run(plain, dc, pos_plain, frames, out_plain);
+    run(reapplied, dc, pos_reapplied, frames, out_reapplied);
+    REQUIRE(reapplied.set_delay_seconds(2.0));
+  }
+  CHECK(out_reapplied.back() == 100.0f / 240.0f);  // the last one was mid fade-in
+  run(plain, dc, pos_plain, 48000, out_plain);
+  run(reapplied, dc, pos_reapplied, 48000, out_reapplied);
+  CHECK(out_reapplied == out_plain);
+  CHECK(out_reapplied.back() == 1.0f);
 }
 
 TEST_CASE("station mixer sums inputs with their gains") {
@@ -342,6 +394,37 @@ TEST_CASE("stream conditioner ramps a gain change over 240 frames") {
   CHECK(out[(be::kRampFrames - 2) * 2] != 0.25f);
   CHECK(out[(be::kRampFrames - 1) * 2] == 0.25f);
   CHECK(out[(kBlock - 1) * 2 + 1] == 0.25f);
+}
+
+TEST_CASE("stream conditioner accepts only the stream rates") {
+  for (uint32_t rate : be::kStreamRates) CHECK_NOTHROW(be::StreamConditioner{rate});
+  for (uint32_t rate : {0u, 8000u, 16000u, 44000u, 96000u}) {
+    CAPTURE(rate);
+    CHECK_THROWS_AS(be::StreamConditioner{rate}, std::invalid_argument);
+  }
+}
+
+TEST_CASE("stream conditioner counts what does not fit the output") {
+  std::vector<float> in(kBlock * 2, 0.25f), out(kBlock * 2);
+  be::StreamConditioner pass(48000);
+  CHECK(pass.process(in.data(), kBlock, out.data(), 400) == 400);
+  CHECK(pass.dropped_frames() == 80);
+  CHECK(pass.process(in.data(), kBlock, out.data(), kBlock) == kBlock);
+  CHECK(pass.dropped_frames() == 80);
+
+  be::StreamConditioner resampled(44100);
+  CHECK(resampled.process(in.data(), kBlock, out.data(), resampled.max_out_frames(kBlock)) > 0);
+  CHECK(resampled.dropped_frames() == 0);
+  const size_t got = resampled.process(in.data(), kBlock, out.data(), 100);
+  CHECK(got <= 100);
+  CHECK(got >= 90);
+  // 480 in, room for about 100 out: about 372 input frames do not fit
+  CHECK(resampled.dropped_frames() >= 360);
+  CHECK(resampled.dropped_frames() <= 380);
+  // the next correctly sized block is whole again: no backlog was banked
+  const size_t next = resampled.process(in.data(), kBlock, out.data(), resampled.max_out_frames(kBlock));
+  CHECK(next <= static_cast<size_t>(std::ceil(kBlock * 44100.0 / 48000.0)) + 2);
+  CHECK(resampled.dropped_frames() <= 380);
 }
 
 #endif  // BAM_WITH_CODECS

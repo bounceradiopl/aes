@@ -9,6 +9,7 @@
 // block calls (write/read/mix/process) never allocate. The one exception is
 // StationMixer::take_peaks(), which any thread may call (lock-free atomics).
 #pragma once
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -25,6 +26,7 @@ namespace bam::encoder {
 inline constexpr uint32_t kStationRate = 48000;  // the station side of the signal path
 inline constexpr uint32_t kRampFrames = 240;     // 5 ms: every gain, mute, join, leave and delay change
 inline constexpr int kStationInputs = 3;
+inline constexpr std::array<uint32_t, 5> kStreamRates = {48000, 44100, 32000, 24000, 22050};  // spec §2
 
 // A gain that moves linearly, per frame, to each new target over kRampFrames; a new target set
 // mid-ramp starts from the level reached. Shared by the mixer inputs and the stream gain.
@@ -32,12 +34,20 @@ class GainRamp {
  public:
   GainRamp() : GainRamp(0.0) {}
   explicit GainRamp(double level) : level_(level), from_(level), target_(level) {}
-  void set_target(double target);
+  void set_target(double target) {
+    if (target == target_) return;
+    from_ = level_;
+    target_ = target;
+    left_ = kRampFrames;
+  }
   double next() {  // the gain for the next frame
     if (left_ != 0) skip(1);
     return level_;
   }
-  void skip(size_t frames);  // moves the ramp on by `frames` without applying it
+  void skip(size_t frames) {  // moves the ramp on by `frames` without applying it
+    left_ -= static_cast<uint32_t>(std::min<size_t>(left_, frames));
+    level_ = left_ == 0 ? target_ : target_ + (from_ - target_) * (static_cast<double>(left_) / kRampFrames);
+  }
   double level() const { return level_; }  // the gain of the last frame
   bool ramping() const { return left_ != 0; }
 
@@ -51,7 +61,7 @@ class GainRamp {
 // returns silence. A delay change while running never steps the level: the output fades out over
 // kRampFrames, the read position jumps (a shorter delay skips audio, a longer one inserts silence
 // of the difference), and it fades back in over kRampFrames. Before the first read() the delay
-// is set at once, with no fade.
+// is set at once, with no fade; setting the delay the line is at or heading to does nothing.
 class DelayLine {
  public:
   // Room for the frames written ahead of a read on top of the longest delay (the station thread
@@ -131,7 +141,7 @@ class StationMixer {
 // saturates.
 class StreamConditioner {
  public:
-  // out_rate: one of the stream rates (spec §5.2); starts at `gain` with no ramp.
+  // out_rate: one of kStreamRates, else std::invalid_argument; starts at `gain` with no ramp.
   explicit StreamConditioner(uint32_t out_rate, double gain = 1.0);
   ~StreamConditioner();
   StreamConditioner(const StreamConditioner&) = delete;
@@ -141,16 +151,20 @@ class StreamConditioner {
   uint32_t out_rate() const { return out_rate_; }
   // Output frames process() can write for in_frames input frames; size `out` for this.
   size_t max_out_frames(size_t in_frames) const;
-  // Returns the number of stereo frames written to out (at most out_capacity).
+  // Returns the number of stereo frames written to out (at most out_capacity). Input that does
+  // not fit (out_capacity below max_out_frames) is dropped and counted in dropped_frames().
   size_t process(const float* in, size_t in_frames, float* out, size_t out_capacity);
+  uint64_t dropped_frames() const { return dropped_; }  // input frames, since construction
 
  private:
   static constexpr size_t kChunkFrames = 1024;
+  static constexpr size_t kOutSlackFrames = 4;  // max_out_frames() margin over in × ratio
   uint32_t out_rate_;
   double ratio_;
   std::unique_ptr<DriftResampler> resampler_;  // null at 48000
   std::vector<float> scratch_;                 // kChunkFrames stereo frames after the gain
   GainRamp gain_;
+  uint64_t dropped_ = 0;
 };
 
 }  // namespace bam::encoder

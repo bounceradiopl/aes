@@ -18,8 +18,8 @@ bool DelayLine::set_delay_seconds(double seconds) {
   if (!(seconds >= 0)) return false;
   const double frames = std::round(seconds * kStationRate);
   if (frames > max_delay_frames()) return false;
+  if (static_cast<uint32_t>(frames) == target_) return true;  // already there or on the way: no new fade
   target_ = static_cast<uint32_t>(frames);
-  if (phase_ == Phase::Steady && target_ == current_) return true;
   if (!started_) {  // nothing heard yet: no fade needed
     current_ = target_;
     cursor_ = written_ - current_;
