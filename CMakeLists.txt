@@ -98,6 +98,21 @@ if(BAM_ENGINE_SOURCES)
   target_link_libraries(bam_engine PUBLIC bam_platform)
 endif()
 
+# ---- Bounce Encoder: audio encoders (64-bit builds with the codecs) ----
+if(BAM_WITH_CODECS)
+  # LAME and fdk-aac headers only, for the run-time loaded function types and constants
+  add_library(bam_codec_headers INTERFACE)
+  target_include_directories(bam_codec_headers SYSTEM INTERFACE
+    $<TARGET_PROPERTY:mp3lame,INTERFACE_INCLUDE_DIRECTORIES>
+    $<TARGET_PROPERTY:fdk-aac,INTERFACE_INCLUDE_DIRECTORIES>)
+  file(GLOB BAM_ENCODER_SOURCES CONFIGURE_DEPENDS encoder/src/*.cpp)
+  add_library(bam_encoder STATIC ${BAM_ENCODER_SOURCES})
+  target_include_directories(bam_encoder PUBLIC encoder/include)
+  target_link_libraries(bam_encoder PUBLIC bam_platform PRIVATE bam_codec_headers FLAC::FLAC)
+  # the shared codecs are loaded at run time; build them with anything that uses the encoder
+  add_dependencies(bam_encoder mp3lame fdk-aac)
+endif()
+
 # ---- service ----
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/service/main.cpp)
   set(BAM_SERVICE_SOURCES service/main.cpp)
@@ -176,7 +191,7 @@ if(BAM_BUILD_TESTS)
     # the shared codecs are loaded at run time from where the build put them
     target_compile_definitions(bam_tests PRIVATE BAM_WITH_CODECS
       BAM_MP3LAME_PATH="$<TARGET_FILE:mp3lame>" BAM_FDKAAC_PATH="$<TARGET_FILE:fdk-aac>")
-    target_link_libraries(bam_tests PRIVATE FLAC::FLAC)
+    target_link_libraries(bam_tests PRIVATE bam_encoder bam_codec_headers FLAC::FLAC)
     add_dependencies(bam_tests mp3lame fdk-aac)
   endif()
   add_test(NAME bam_tests COMMAND bam_tests)

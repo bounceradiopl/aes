@@ -2,6 +2,7 @@
 #include <doctest/doctest.h>
 
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -68,6 +69,19 @@ TEST_CASE("named event") {
 TEST_CASE("process helpers") {
   CHECK(bp::process_alive(bp::current_pid()));
   CHECK_FALSE(bp::process_alive(0));
+}
+
+TEST_CASE("executable directory holds the test binary") {
+  const std::string dir = bp::executable_dir();
+  REQUIRE_FALSE(dir.empty());
+  CHECK(dir.back() != '/');
+  CHECK(dir.back() != '\\');
+#ifdef _WIN32
+  std::ifstream exe(dir + "\\bam_tests.exe", std::ios::binary);
+#else
+  std::ifstream exe(dir + "/bam_tests", std::ios::binary);
+#endif
+  CHECK(exe.good());
 }
 
 TEST_CASE("multicast sockets only receive their own groups") {
