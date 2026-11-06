@@ -51,6 +51,10 @@ Instrukcja: [docs/INSTALL.md](docs/INSTALL.md). W skrócie:
 5. W zakładce **Routing** połącz źródła z celami.
 6. W mAirList wybierz sterownik ASIO **BounceAES Master**.
 
+## Co nowego w 1.2.2
+
+Bezpieczeństwo panelu, z zabezpieczeniami przetestowanymi w Bounce Encoder 1.0 (dźwięk, ASIO i routing bez zmian): jedno żądanie na połączenie, treść żądań tylko jako JSON (do 1 MB), pierwsze hasło tylko z `127.0.0.1`/`localhost`, blokada po 5 nieudanych logowaniach zamiast spowalniania, zmiana hasła wylogowuje inne sesje, a podgląd na żywo kończy się z sesją. Własne skrypty korzystające z API muszą wysyłać JSON z `Content-Type: application/json` (panel i ikona w zasobniku już to robią). Szczegóły: [docs/INSTALL.md](docs/INSTALL.md) (rozdziały 4 i 10).
+
 ## Bounce Encoder
 
 Osobny program z tego samego repozytorium (wspólny rdzeń AES67/PTP): **enkoder AES67 → Icecast** dla Windows 10/11 x64. BounceAES Master działa bez zmian obok niego.

@@ -27,7 +27,7 @@ Konfiguracja i logi znajdują się w `C:\ProgramData\BounceAES Master\` (`config
 ## 3. Pierwsze uruchomienie panelu
 
 1. Kliknij dwukrotnie ikonę BounceAES Master w zasobniku albo otwórz `http://127.0.0.1:8067` na tym komputerze.
-2. Ustaw hasło panelu (co najmniej 8 znaków). Pierwsze hasło można ustawić **tylko z tego komputera**.
+2. Ustaw hasło panelu (co najmniej 8 znaków). Pierwsze hasło można ustawić **tylko z tego komputera** i tylko z panelu otwartego pod `http://127.0.0.1:8067` albo `http://localhost:8067` (nie przez nazwę komputera).
 3. Panel jest dostępny również z innych komputerów pod `http://<adres-komputera>:8067`, po zalogowaniu. Jeśli panel ma być dostępny z zewnątrz, wystaw go przez odwrotne proxy z HTTPS.
 
 Kolory ikony w zasobniku:
@@ -98,6 +98,14 @@ Ten sam plik pobierzesz później przyciskiem **SDP** przy wyjściu albo z okna 
 
 ### Aktualizacja z wersji 1.0
 Konfiguracja 1.0 przenosi się sama przy pierwszym uruchomieniu 1.1 (kopia: `config.json.v1.bak`). Urządzenie N staje się wyjściem N (zasilanym z ASIO N), subskrypcją N (jeśli miało źródło, połączoną z wejściem ASIO N) i nazwą pary ASIO N, więc wszystko gra tak jak wcześniej.
+
+### Co nowego w 1.2.2: bezpieczeństwo panelu
+Panel dostał te same zabezpieczenia co Bounce Encoder 1.0; dźwięk, ASIO, bridge i routing działają bez zmian.
+- Jedno żądanie na połączenie: żądanie ukryte w treści innego żądania nigdy nie zostanie wykonane.
+- Panel przyjmuje tylko metody GET, POST, PUT i DELETE, treść wyłącznie jako JSON (`Content-Type: application/json`) z nagłówkiem `Content-Length`, najwyżej 1 MB; bez kompresji (`Content-Encoding`), przesyłania w częściach, formularzy i `multipart`. Własne skrypty i narzędzia muszą wysyłać JSON (wbudowany panel, ikona w zasobniku i przykłady `curl` z tej instrukcji już to robią); POST bez treści (np. wylogowanie) jest dozwolony.
+- Pierwsze hasło tylko z panelu otwartego pod `127.0.0.1` lub `localhost` (ochrona przed DNS rebinding).
+- Nieudane logowania: po 5 błędnych hasłach w ciągu minuty adres jest blokowany na 30 s (odpowiedź „zbyt wiele nieudanych prób”).
+- Zmiana hasła wylogowuje wszystkie inne sesje (inne karty, inne komputery); podgląd na żywo kończy się po wylogowaniu i nie przedłuża sesji.
 
 ### Aktualizacja: zgodność wersji usługi i sterownika
 Usługa, sterownik ASIO (wersja 64- i 32-bitowa) oraz BounceAES Audio Bridge muszą być w tej samej wersji — nowy instalator wymienia je wszystkie naraz, więc zwykła aktualizacja (rozdział 2) wystarczy. Jeśli po aktualizacji tylko części plików (np. ręcznie podmieniony sterownik ASIO ze starszej wersji) sterownik zgłosi w aplikacji ASIO błąd „**niezgodna wersja usługi i sterownika ASIO**” — zainstaluj ponownie pełny pakiet.
@@ -234,7 +242,13 @@ Software'owe znaczniki czasu PTP i wysyłanie tysięcy pakietów na sekundę są
 Uruchomienie usługi w oknie konsoli (do diagnostyki, po zatrzymaniu usługi Windows):
 `"C:\Program Files\BounceAES Master\BounceAESService.exe" --console`
 
-## 10. Podpisywanie plików (wewnętrzne)
+## 10. Znane ograniczenia
+
+- **Panel tylko w zaufanej sieci.** Biblioteka HTTP panelu czyta bardzo długie pierwsze wiersze żądań w całości, zanim sprawdzi logowanie. Komputer z dostępem do portu panelu może w ten sposób zająć dużo pamięci usługi. Ustaw adres panelu na kartę sieci administracyjnej albo `127.0.0.1` (rozdział 4) i nie wystawiaj portu 8067 do internetu (z zewnątrz tylko przez odwrotne proxy z HTTPS i własnym uwierzytelnieniem). Poprawka przyjdzie z aktualizacją biblioteki, wspólną dla BounceAES Master i Bounce Encoder.
+- Na Windows port panelu jest otwierany z opcją `SO_REUSEADDR`: inny program uruchomiony na tym komputerze może otworzyć ten sam port i odbierać część połączeń. To kolejny powód, by panel był dostępny tylko z zaufanej sieci i komputera.
+- Panel obsługuje jedno żądanie na połączenie (zabezpieczenie przed przemycaniem żądań); dla panelu nie ma to odczuwalnego kosztu.
+
+## 11. Podpisywanie plików (wewnętrzne)
 
 Pliki BounceAES Master nie są podpisane komercyjnym certyfikatem. Do użytku wewnętrznego można je podpisać własnym, darmowym certyfikatem firmy i zaufać mu na komputerach firmowych. Nigdy nie używaj certyfikatu ani nazwy innego producenta.
 
