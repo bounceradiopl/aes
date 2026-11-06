@@ -37,6 +37,8 @@ jobs:
         run: |
           mkdir run-encoder && cd run-encoder
           printf '{"version":1,"interface_ip":"127.0.0.1","http_bind":"127.0.0.1","http_port":8070,"stations":[]}' > cfg.json
+          # loopback only: refuse to start with anything else in the configuration
+          jq -e '.interface_ip == "127.0.0.1" and .http_bind == "127.0.0.1" and .stations == []' cfg.json
           ../build/BounceEncoder --version
           ../build/BounceEncoder --console --config cfg.json > encoder.log 2>&1 &
           enc=$!
@@ -45,6 +47,8 @@ jobs:
           curl -sf -b jar http://127.0.0.1:8070/api/codecs > codecs.json
           jq -r '.codecs[] | "\(.id) \(.available) \(.library)"' codecs.json
           jq -e 'all(.codecs[]; .available)' codecs.json
+          curl -sf -b jar http://127.0.0.1:8070/api/status > status.json
+          jq -e '.interface_ip == "127.0.0.1"' status.json
           test -f public/panel.json
           kill $enc
       - name: Service log
@@ -107,6 +111,9 @@ jobs:
           New-Item -ItemType Directory encoder-check | Out-Null
           Set-Location encoder-check
           '{"version":1,"interface_ip":"127.0.0.1","http_bind":"127.0.0.1","http_port":8070,"stations":[]}' | Set-Content -Encoding ascii cfg.json
+          # loopback only: refuse to start with anything else in the configuration
+          $cfg = Get-Content -Raw cfg.json | ConvertFrom-Json
+          if ($cfg.interface_ip -ne '127.0.0.1' -or $cfg.http_bind -ne '127.0.0.1' -or @($cfg.stations).Count -ne 0) { throw 'cfg.json is not loopback-only' }
           $enc = Start-Process -PassThru -NoNewWindow -RedirectStandardOutput encoder.out -RedirectStandardError encoder.log "$b64\BounceEncoder.exe" -ArgumentList '--console', '--config', 'cfg.json'
           try {
             Start-Sleep 3
@@ -119,6 +126,8 @@ jobs:
               if (-not $c.library.StartsWith($b64, [System.StringComparison]::OrdinalIgnoreCase)) { throw "codec $($c.id) loaded from $($c.library)" }
             }
             if (-not (Test-Path public\panel.json)) { throw 'public\panel.json was not written' }
+            $status = Invoke-RestMethod -WebSession $web http://127.0.0.1:8070/api/status
+            if ($status.interface_ip -ne '127.0.0.1') { throw "the service runs on $($status.interface_ip), not 127.0.0.1" }
           } finally {
             Stop-Process $enc -ErrorAction SilentlyContinue
             Get-Content encoder.log -Tail 30 -ErrorAction SilentlyContinue

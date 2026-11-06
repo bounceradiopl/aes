@@ -45,7 +45,6 @@ Unicode true
 Name "${APP}"
 OutFile "BounceEncoder-setup.exe"
 InstallDir "$PROGRAMFILES64\Bounce Encoder"
-InstallDirRegKey HKLM "Software\Bounce\Bounce Encoder" "InstallDir"
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 InstallColors F72868 050505
@@ -105,8 +104,8 @@ LangString Need64 ${LANG_POLISH} "Bounce Encoder wymaga 64-bitowego systemu Wind
 LangString Need64 ${LANG_ENGLISH} "Bounce Encoder requires 64-bit Windows 10 or 11."
 LangString PtpWarn ${LANG_POLISH} "Włączony jest klient PTP usługi czasu Windows (w32time). Zajmuje on porty 319/320 i uniemożliwi synchronizację Bounce Encoder z zegarem PTP.$\r$\n$\r$\nWyłącz go po instalacji (opis w INSTRUKCJA.md, rozdział 11)."
 LangString PtpWarn ${LANG_ENGLISH} "The Windows Time service PTP client (w32time) is enabled. It occupies ports 319/320 and prevents Bounce Encoder from synchronising to the PTP clock.$\r$\n$\r$\nDisable it after installation (see INSTRUKCJA.md, section 11)."
-LangString AclWarn ${LANG_POLISH} "Nie udało się ustawić uprawnień folderu $APPDATA\Bounce Encoder (kod $0). Plik config.json z hasłami strumieni może być czytelny dla innych użytkowników tego komputera: ustaw uprawnienia ręcznie (INSTRUKCJA.md, rozdział 2)."
-LangString AclWarn ${LANG_ENGLISH} "Could not set the permissions of $APPDATA\Bounce Encoder (code $0). config.json with the stream passwords may be readable by other users of this computer: set the permissions by hand (INSTRUKCJA.md, section 2)."
+LangString AclWarn ${LANG_POLISH} "Nie udało się ustawić uprawnień folderu $APPDATA\Bounce Encoder (kod $1). Plik config.json z hasłami strumieni może być czytelny dla innych użytkowników tego komputera: ustaw uprawnienia ręcznie (INSTRUKCJA.md, rozdział 2)."
+LangString AclWarn ${LANG_ENGLISH} "Could not set the permissions of $APPDATA\Bounce Encoder (code $1). config.json with the stream passwords may be readable by other users of this computer: set the permissions by hand (INSTRUKCJA.md, section 2)."
 LangString DelConfig ${LANG_POLISH} "Usunąć także konfigurację i logi Bounce Encoder ($APPDATA\Bounce Encoder)?$\r$\n$\r$\nKonfiguracja zawiera stacje, strumienie z hasłami Icecast i hasło panelu. Wybierz Nie, jeśli zamierzasz zainstalować program ponownie."
 LangString DelConfig ${LANG_ENGLISH} "Also delete the Bounce Encoder configuration and logs ($APPDATA\Bounce Encoder)?$\r$\n$\r$\nThe configuration holds the stations, the streams with their Icecast passwords and the panel password. Choose No if you plan to install the program again."
 
@@ -120,6 +119,14 @@ Function .onInit
     Abort
   ${EndIf}
   SetRegView 64
+  ; an update goes to the folder of the installed copy (InstallDirRegKey would read the 32-bit
+  ; registry view); a folder given with /D= on the command line wins
+  ${If} $INSTDIR == "$PROGRAMFILES64\Bounce Encoder"
+    ReadRegStr $0 HKLM "Software\Bounce\Bounce Encoder" "InstallDir"
+    ${If} $0 != ""
+      StrCpy $INSTDIR $0
+    ${EndIf}
+  ${EndIf}
 FunctionEnd
 
 Function un.onInit
@@ -128,8 +135,13 @@ FunctionEnd
 
 ; Stops the components so that no file is locked (update and uninstall). net stop waits until the
 ; service has stopped (its stop wait hint is 10 s); a service that hangs is ended with taskkill.
+; The failure actions are cleared first, so that the taskkill fallback cannot make the service
+; control manager restart the service while files are replaced or the service is deleted (the
+; install section sets them again).
 !macro STOP_COMPONENTS
   nsExec::ExecToLog 'taskkill /F /IM BounceEncoderTray.exe'
+  Pop $0
+  nsExec::ExecToLog 'sc.exe failure ${SERVICE} reset= 0 actions= ""'
   Pop $0
   nsExec::ExecToLog 'net.exe stop ${SERVICE}'
   Pop $0
@@ -167,25 +179,48 @@ Section "Bounce Encoder" SecMain
   ;     passwords and the panel password hash), inherited by everything the service writes there;
   ;     public\ adds read access for Users (panel.json for the tray, replaced by a rename at every
   ;     service start: a file created in public\ inherits the folder's ACEs, so the rename keeps them).
-  ;     Order: grant first, then cut inheritance from %ProgramData%, so the folder is never left
-  ;     without an owner ACE; then make existing children (an update) inherit only. ---
+  ;     The folder may exist already, even created by another user (who would own it, with an
+  ;     implicit right to change its ACL, and may have added ACEs of their own). Order:
+  ;       1. Administrators take ownership of the folder and everything in it;
+  ;       2. the folder and everything in it go back to inherited ACEs only (explicit ACEs removed);
+  ;       3. Administrators and SYSTEM get inheritable full control;
+  ;       4. only then the ACEs inherited from %ProgramData% are cut (never without step 3);
+  ;       5. Users may read public\.
+  ;     Every step is tried; $1 keeps the first error code for the warning. ---
   CreateDirectory "$APPDATA\Bounce Encoder"
   CreateDirectory "$APPDATA\Bounce Encoder\public"
+  StrCpy $1 0
+  nsExec::ExecToLog 'takeown /F "$APPDATA\Bounce Encoder" /A'
+  Pop $0
+  nsExec::ExecToLog 'icacls "$APPDATA\Bounce Encoder" /setowner ${SID_ADMINS} /T /C /Q'
+  Pop $0
+  ${If} $0 != 0
+  ${AndIf} $1 == 0
+    StrCpy $1 $0
+  ${EndIf}
+  nsExec::ExecToLog 'icacls "$APPDATA\Bounce Encoder" /reset /T /C /Q'
+  Pop $0
+  ${If} $0 != 0
+  ${AndIf} $1 == 0
+    StrCpy $1 $0
+  ${EndIf}
   nsExec::ExecToLog 'icacls "$APPDATA\Bounce Encoder" /grant:r ${SID_ADMINS}:(OI)(CI)F ${SID_SYSTEM}:(OI)(CI)F'
   Pop $0
   ${If} $0 == 0
     nsExec::ExecToLog 'icacls "$APPDATA\Bounce Encoder" /inheritance:r'
     Pop $0
   ${EndIf}
-  ${If} $0 == 0
-    nsExec::ExecToLog 'icacls "$APPDATA\Bounce Encoder\*" /reset /T /C /Q'
-    Pop $0
-  ${EndIf}
-  ${If} $0 == 0
-    nsExec::ExecToLog 'icacls "$APPDATA\Bounce Encoder\public" /grant:r ${SID_USERS}:(OI)(CI)RX'
-    Pop $0
-  ${EndIf}
   ${If} $0 != 0
+  ${AndIf} $1 == 0
+    StrCpy $1 $0
+  ${EndIf}
+  nsExec::ExecToLog 'icacls "$APPDATA\Bounce Encoder\public" /grant:r ${SID_USERS}:(OI)(CI)RX'
+  Pop $0
+  ${If} $0 != 0
+  ${AndIf} $1 == 0
+    StrCpy $1 $0
+  ${EndIf}
+  ${If} $1 != 0
     MessageBox MB_OK|MB_ICONEXCLAMATION "$(AclWarn)" /SD IDOK
   ${EndIf}
 
@@ -218,7 +253,9 @@ Section "Bounce Encoder" SecMain
   ; --- menu Start ---
   CreateDirectory "$SMPROGRAMS\Bounce Encoder"
   CreateShortcut "$SMPROGRAMS\Bounce Encoder\Bounce Encoder.lnk" "$INSTDIR\BounceEncoderTray.exe" "--panel" "$INSTDIR\bounce.ico"
-  WriteINIStr "$SMPROGRAMS\Bounce Encoder\Panel Bounce Encoder.url" "InternetShortcut" "URL" "${PANEL_URL}"
+  ; the panel at the address the service wrote to public\panel.json (fallback 127.0.0.1:8070)
+  Delete "$SMPROGRAMS\Bounce Encoder\Panel Bounce Encoder.url"
+  CreateShortcut "$SMPROGRAMS\Bounce Encoder\Panel Bounce Encoder.lnk" "$INSTDIR\BounceEncoderTray.exe" "--open-panel" "$INSTDIR\bounce.ico"
   CreateShortcut "$SMPROGRAMS\Bounce Encoder\Instrukcja.lnk" "$INSTDIR\INSTRUKCJA.md"
   CreateShortcut "$SMPROGRAMS\Bounce Encoder\Odinstaluj Bounce Encoder.lnk" "$INSTDIR\uninstall.exe"
 

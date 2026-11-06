@@ -28,7 +28,7 @@ BounceAES Master (sterownik ASIO) i Bounce Encoder to dwa niezależne programy. 
    - dodaje regułę zapory dla programu `BounceEncoder.exe`: odbiór AES67 (RTP), PTP 319/320 i panel 8070. Reguła dotyczy tylko tego programu, nie otwiera portów dla innych;
    - zakłada folder `C:\ProgramData\Bounce Encoder` z uprawnieniami **tylko dla administratorów i usługi** (SYSTEM), bo `config.json` zawiera hasła strumieni i skrót hasła panelu. Podfolder `public` mogą czytać wszyscy użytkownicy: jest w nim tylko `panel.json` (adres i port panelu dla ikony w zasobniku);
    - dodaje ikonę w zasobniku do autostartu (przy każdym logowaniu);
-   - tworzy skrót **Bounce Encoder** na pulpicie i w menu Start. Skrót otwiera panel.
+   - tworzy skrót **Bounce Encoder** na pulpicie i w menu Start (uruchamia ikonę w zasobniku i otwiera panel) oraz w menu Start *Panel Bounce Encoder* (otwiera tylko panel), *Instrukcja* i *Odinstaluj Bounce Encoder*.
 3. Pasek zadań: Windows nie pozwala instalatorom przypinać programów. Kliknij prawym przyciskiem skrót na pulpicie → *Pokaż więcej opcji* → *Przypnij do paska zadań*.
 
 Pliki w `C:\ProgramData\Bounce Encoder\`:
@@ -42,28 +42,36 @@ Pliki w `C:\ProgramData\Bounce Encoder\`:
 
 Ostrzeżenia i błędy trafiają też do Dziennika zdarzeń Windows (Aplikacja, źródło „Bounce Encoder”).
 
-**Uprawnienia folderu ustawione ręcznie.** Jeśli instalator zgłosił, że nie mógł ustawić uprawnień, albo folder powstał bez instalatora, uruchom w wierszu poleceń jako administrator:
+**Uprawnienia folderu ustawione ręcznie.** Jeśli instalator zgłosił, że nie mógł ustawić uprawnień, albo folder powstał bez instalatora (np. założył go inny użytkownik), zatrzymaj usługę i uruchom w wierszu poleceń jako administrator:
 
 ```bat
+takeown /F "C:\ProgramData\Bounce Encoder" /A
+icacls "C:\ProgramData\Bounce Encoder" /setowner *S-1-5-32-544 /T /C /Q
+icacls "C:\ProgramData\Bounce Encoder" /reset /T /C /Q
 icacls "C:\ProgramData\Bounce Encoder" /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F
 icacls "C:\ProgramData\Bounce Encoder" /inheritance:r
-icacls "C:\ProgramData\Bounce Encoder\*" /reset /T /C
 mkdir "C:\ProgramData\Bounce Encoder\public"
 icacls "C:\ProgramData\Bounce Encoder\public" /grant:r *S-1-5-32-545:(OI)(CI)RX
 ```
 
-`*S-1-5-32-544` to Administratorzy, `*S-1-5-18` to SYSTEM, `*S-1-5-32-545` to Użytkownicy (identyfikatory działają w każdej wersji językowej Windows).
+Kolejno: Administratorzy przejmują folder i wszystko w nim (właściciel folderu może zawsze zmienić jego uprawnienia), wszystkie dodane ręcznie uprawnienia są usuwane, Administratorzy i SYSTEM dostają pełną kontrolę, folder przestaje dziedziczyć uprawnienia z `C:\ProgramData`, a podfolder `public` dostaje odczyt dla Użytkowników. `*S-1-5-32-544` to Administratorzy, `*S-1-5-18` to SYSTEM, `*S-1-5-32-545` to Użytkownicy (identyfikatory działają w każdej wersji językowej Windows). Instalator robi to samo przy każdej instalacji i aktualizacji.
 
 ## 3. Pierwsze uruchomienie panelu
 
 1. Kliknij dwukrotnie ikonę Bounce Encoder w zasobniku albo skrót na pulpicie. Możesz też otworzyć `http://127.0.0.1:8070` w przeglądarce na tym komputerze.
 2. Ustaw hasło panelu (co najmniej 8 znaków). Pierwsze hasło można ustawić **tylko z tego komputera**. Z innego komputera panel pokaże tylko tę informację.
-3. Potem panel jest dostępny również z innych komputerów pod `http://<adres-komputera>:8070`, po zalogowaniu. Jeśli panel ma być dostępny spoza sieci firmowej, wystaw go przez odwrotne proxy z HTTPS.
+3. Potem panel jest dostępny również z innych komputerów pod `http://<adres-komputera>:8070`, po zalogowaniu. Jeśli panel ma być dostępny spoza sieci firmowej, wystaw go przez odwrotne proxy z HTTPS. Proxy na tym samym komputerze sprawia, że dla usługi każde żądanie przychodzi z tego komputera: pierwsze hasło dałoby się wtedy ustawić z zewnątrz (ustaw je przed uruchomieniem proxy), a nieudane logowania wszystkich klientów liczą się razem, więc blokada po błędnych hasłach dotyczy wszystkich naraz.
 4. Otwórz **Ustawienia…** (rozdział 4) i wybierz kartę sieciową AoIP.
 
 **Zmień hasło** (u góry panelu) zmienia hasło. Inne otwarte panele, także na innych komputerach, trzeba wtedy zalogować ponownie.
 
-**Zapomniane hasło.** Zatrzymaj usługę (`services.msc` → Bounce Encoder → Zatrzymaj). Jako administrator otwórz `C:\ProgramData\Bounce Encoder\config.json` w Notatniku, zmień wartość `"password_hash"` na `""` i zapisz. Uruchom usługę i ustaw nowe hasło z tego komputera. Stacje i strumienie zostają bez zmian.
+**Zapomniane hasło.**
+1. Zatrzymaj usługę (`services.msc` → Bounce Encoder → Zatrzymaj).
+2. Jako administrator otwórz `C:\ProgramData\Bounce Encoder\config.json` w Notatniku. Zmień wartość `"password_hash"` na `""`, a `"http_bind"` na `"127.0.0.1"` (zapamiętaj poprzednią wartość) i zapisz. Pierwsze hasło przyjmuje tylko połączenie z adresu `127.0.0.1`: gdy panel nasłuchuje na adresie karty, przeglądarka na tym komputerze łączy się z adresu tej karty i usługa uzna ją za komputer zdalny.
+3. Uruchom usługę, otwórz `http://127.0.0.1:8070` na tym komputerze i ustaw nowe hasło.
+4. W **Ustawienia…** wpisz z powrotem poprzedni adres panelu, zapisz i uruchom usługę ponownie.
+
+Stacje i strumienie zostają bez zmian.
 
 Ikona w zasobniku:
 
@@ -86,7 +94,7 @@ Podpowiedź ikony pokazuje liczbę nadających strumieni, wejść z sygnałem i 
 | Adres panelu | `0.0.0.0`: panel dostępny ze wszystkich kart sieciowych; `127.0.0.1`: tylko z tego komputera; adres jednej karty: tylko z tej sieci |
 | Port panelu | domyślnie 8070 |
 
-Adres i port panelu zmieniają się po ponownym uruchomieniu usługi (`services.msc` → Bounce Encoder → Uruchom ponownie). Ikona w zasobniku sama odczyta nowy adres.
+Adres i port panelu zmieniają się po ponownym uruchomieniu usługi (`services.msc` → Bounce Encoder → Uruchom ponownie). Ikona w zasobniku i skrót *Panel Bounce Encoder* w menu Start same odczytają nowy adres (z `public\panel.json`). Link na ostatniej stronie instalatora prowadzi zawsze do `http://127.0.0.1:8070`.
 
 **Zalecenie:** ustaw adres panelu na kartę sieci administracyjnej (biurowej), a nie na kartę AoIP ani `0.0.0.0`. Panel ma logowanie, ale powinien być dostępny tylko z zaufanej sieci (rozdział 13).
 
@@ -150,7 +158,7 @@ Każdy strumień wysyła sygnał stacji do jednego mountpointu na serwerze Iceca
 | Gain strumienia | −60…+12 dB, co 0,5 dB, tylko dla tego strumienia. Sygnał powyżej 0 dBFS jest przycinany, nie zawija się |
 | Serwer Icecast | nazwa serwera albo adres IPv4, bez `http://` i bez portu |
 | Port | port serwera Icecast, zwykle 8000 |
-| Mountpoint | zaczyna się od „/”, bez spacji, „?” i „#”, np. `/radio.mp3`. Ten sam serwer i mountpoint nie może się powtórzyć w żadnej stacji |
+| Mountpoint | zaczyna się od „/”, bez spacji, „?” i „#”, np. `/radio.mp3`. We włączonych stacjach ten sam serwer i mountpoint może wystąpić tylko raz (sprawdzane są wszystkie strumienie tych stacji, także wyłączone). Stacje wyłączone nie są sprawdzane, więc wyłączona stacja zapasowa może mieć te same mountpointy |
 | Użytkownik | zwykle `source` (puste pole oznacza `source`) |
 | Hasło | hasło źródła Icecast. Wymagane dla włączonego strumienia |
 
@@ -158,7 +166,9 @@ Każdy strumień wysyła sygnał stacji do jednego mountpointu na serwerze Iceca
 
 **Zmiana strumienia w trakcie pracy** (np. bitrate'u): po zapisaniu ten strumień zamyka połączenie i łączy się od nowa, z nowymi ustawieniami. Inne strumienie i stacje nadają bez przerwy.
 
-Każdy strumień ma własny wątek i własną kolejkę (5 s). Wolny serwer albo sieć nie wstrzymuje innych strumieni. Gdy kolejka się przepełni, najstarsze dane są odrzucane i liczone w Statystykach („Odrzucone”).
+Każdy strumień ma własny wątek i dwie kolejki po około 5 s, więc wolny serwer albo sieć nie wstrzymuje innych strumieni ani stacji:
+- **dźwięk przed kodekiem**: gdy kodek nie nadąża (przeciążony procesor), najstarsze ramki są odrzucane i liczone w Statystykach („Ramki: kolejka”);
+- **dane do serwera**: gdy serwer albo łącze nie nadąża, cała zaległa kolejka jest odrzucana (liczona w „Odrzucone”), a kodek zaczyna strumień od nowa od nowej ramki (FLAC: od nowego nagłówka). Słuchacze słyszą krótką przerwę, ale strumień zostaje poprawny i połączenie trwa.
 
 ## 8. Kodeki i bitrate
 
@@ -287,7 +297,7 @@ Bounce Encoder jest na licencji GPL-3.0-or-later. Kodeki to osobne biblioteki, �
 | libogg 1.3.5, libFLAC 1.4.3 | BSD-3-Clause | wkompilowane w `BounceEncoder.exe` |
 | libsamplerate 0.2.2 | BSD-2-Clause | wkompilowane |
 
-**Instalator z kodekiem AAC jest przeznaczony wyłącznie do użytku wewnętrznego.** Nie rozpowszechniaj go publicznie bez licencji patentowej na AAC. Pełne teksty licencji są w folderze programu (`licencje\`) i w pliku `LICENCJE.md`.
+**Instalator z kodekiem AAC jest przeznaczony wyłącznie do użytku wewnętrznego.** Przekazanie go poza firmę wymaga decyzji właściciela projektu (licencja FDK AAC jest niezgodna z GPL, AAC wymaga licencji patentowej). Pełne teksty licencji są w folderze programu (`licencje\`) i w pliku `LICENCJE.md`.
 
 ## 15. Aktualizacja, odinstalowanie, podpisywanie
 

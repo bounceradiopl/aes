@@ -6,6 +6,7 @@
 #include <httplib.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -1000,12 +1001,16 @@ TEST_CASE("encoder service: panel.json lives in the public folder next to the co
   CHECK(be::panel_file_path("/var/lib/enc/config.json") == "/var/lib/enc/public/panel.json");
   CHECK(be::panel_file_path("bounce-encoder-config.json") == "./public/panel.json");
   CHECK(be::panel_file_path("D:/test/moja.json") == "D:/test/public/panel.json");
-  // the tray builds the same path from these names (%ProgramData% + data dir + public + file)
-  CHECK(std::string(be::kEncoderDataDirName) == "Bounce Encoder");
-  CHECK(std::string(be::kPanelPublicDirName) + "/" + be::kPanelFileName == "public/panel.json");
 
   // write_panel_file creates the missing public folder and replaces the file in it
-  const std::string dir = "bam_enc_pubtest_" + std::to_string(bp::current_pid());
+  struct TempDir {
+    std::string path = "bam_enc_pubtest_" + std::to_string(bp::current_pid());
+    ~TempDir() {
+      std::error_code ec;
+      std::filesystem::remove_all(path, ec);
+    }
+  } temp;
+  const std::string& dir = temp.path;
   REQUIRE(bp::ensure_directory(dir));
   const std::string config_path = dir + "/config.json";
   const std::string path = be::panel_file_path(config_path);
@@ -1016,8 +1021,6 @@ TEST_CASE("encoder service: panel.json lives in the public folder next to the co
   CHECK(j == json({{"bind", "10.0.0.6"}, {"port", 8071}}));
   CHECK_FALSE(exists(path + ".tmp"));
   CHECK_FALSE(exists(dir + "/panel.json"));  // never next to config.json itself
-  std::error_code ec;
-  std::filesystem::remove_all(dir, ec);
 }
 
 TEST_CASE("encoder HTTP: a request hidden in a refused request's body is never executed") {

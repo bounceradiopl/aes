@@ -286,6 +286,12 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdline, int) {
   g_instance = instance;
+  // --open-panel (the Start-menu "Panel Bounce Encoder" entry): open the panel at the address in
+  // public\panel.json and exit, whether or not the tray runs.
+  if (cmdline && wcsstr(cmdline, L"--open-panel") != nullptr) {
+    open_panel(L"");
+    return 0;
+  }
   // Shortcuts pass --panel; the logon autostart entry does not, so logging in opens no window.
   const bool want_panel = cmdline && wcsstr(cmdline, L"--panel") != nullptr;
   HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\BounceEncoderTray");

@@ -4,6 +4,7 @@
 #include "bam/encoder/engine.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <map>
 #include <mutex>

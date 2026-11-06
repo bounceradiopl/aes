@@ -47,11 +47,33 @@ przy budowaniu do folderu `encoder-licenses/` obok programów, a instalator kopi
 | libFLAC | 1.4.3 | BSD-3-Clause | wkompilowana statycznie |
 | libsamplerate | 0.2.2 | BSD-2-Clause | wkompilowana statycznie (`third_party/libsamplerate`) |
 
-**FDK AAC.** Licencja Fraunhofera nie jest zgodna z GPL i nie obejmuje patentów: AAC (w tym HE-AAC)
-jest objęty patentami, a licencję patentową trzeba uzyskać osobno (np. przez Via LA). Dlatego
-fdk-aac jest osobnym plikiem ładowanym w czasie pracy, a nie częścią programu, a instalator
-Bounce Encoder z `libfdk-aac-2.dll` jest przeznaczony **wyłącznie do użytku wewnętrznego**
-(decyzja właściciela projektu). Nie rozpowszechniaj go publicznie. Bez tego pliku Bounce Encoder
-działa z MP3 i FLAC, a strumienie AAC są wyłączone z wyjaśnieniem w panelu.
+Źródła kodeków (te same archiwa dla każdego buildu; sumy z `cmake/codecs.cmake`):
+
+| Biblioteka | Archiwum źródłowe | SHA-256 |
+|---|---|---|
+| LAME 3.100 | https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz | `ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e` |
+| fdk-aac 2.0.3 | https://github.com/mstorsjo/fdk-aac/archive/refs/tags/v2.0.3.tar.gz | `e25671cd96b10bad896aa42ab91a695a9e573395262baed4e4a2ff178d6a3a78` |
+| libogg 1.3.5 | https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.gz | `0eb4b4b9420a0f51db142ba3f9c64b333f826532dc0f48c6410ae51f4799b664` |
+| libFLAC 1.4.3 | https://downloads.xiph.org/releases/flac/flac-1.4.3.tar.xz | `6c58e69cd22348f441b861092b825e591d0b822e106de6eb0ee4d05d27205b70` |
+
+LAME jest budowany przez `cmake/lame/` (bez zmian w kodzie LAME), pozostałe biblioteki ich własnym
+CMake. **Kod źródłowy dla odbiorców plików binarnych:** każdy, kto otrzymał instalator albo pliki
+Bounce Encoder, może otrzymać odpowiadający im pełny kod źródłowy: to repozytorium
+(https://github.com/bounceradiopl/aes) w wersji, z której zbudowano pliki, oraz powyższe archiwa
+kodeków. Kto przekazuje pliki binarne dalej, przekazuje razem z nimi ten kod albo informację, skąd
+go pobrać.
+
+**FDK AAC.** Fakty:
+- licencja Fraunhofer FDK AAC nie jest zgodna z GPL;
+- licencja Fraunhofera nie obejmuje patentów: AAC (także HE-AAC) jest objęty patentami, a licencję
+  patentową trzeba uzyskać osobno;
+- w Bounce Encoder fdk-aac jest osobnym plikiem `libfdk-aac-2.dll`, ładowanym w czasie pracy; to
+  nie usuwa niezgodności licencji z GPL;
+- instalator i pliki z `libfdk-aac-2.dll` są rozpowszechniane wyłącznie do użytku wewnętrznego
+  właściciela projektu. Przekazanie ich poza firmę wymaga decyzji właściciela projektu (licencje
+  kodu i patentów).
+
+Bez tego pliku Bounce Encoder działa z MP3 i FLAC, a strumienie AAC są wyłączone z wyjaśnieniem w
+panelu.
 
 Osobna licencja dla Ricochetu (wyżej) nie obejmuje kodeków: mają one własne licencje z tabeli.
