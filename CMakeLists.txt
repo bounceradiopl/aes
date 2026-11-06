@@ -20,6 +20,12 @@ else()
   set(BAM_WITH_CODECS_DEFAULT OFF)
 endif()
 option(BAM_WITH_CODECS "Fetch and build the Bounce Encoder codec libraries" ${BAM_WITH_CODECS_DEFAULT})
+# Stereo Tool processing of Bounce Encoder (cmake/stereotool.cmake): the pinned Thimeo SDK for the
+# build-time check of the binding and, on Windows x64, libStereoTool_64.dll next to the encoder.
+# The binding itself is always built with the encoder (the library is loaded at run time).
+include(CMakeDependentOption)
+cmake_dependent_option(BAM_WITH_STEREOTOOL "Fetch the pinned Stereo Tool SDK (libStereoTool 11.07) for Bounce Encoder"
+  ON "BAM_WITH_CODECS;CMAKE_SIZEOF_VOID_P EQUAL 8" OFF)
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /utf-8 /EHsc)
@@ -64,6 +70,9 @@ endif()
 # Bounce Encoder codecs: mp3lame, fdk-aac (shared, loaded at run time), ogg + FLAC (static)
 if(BAM_WITH_CODECS)
   include(cmake/codecs.cmake)
+endif()
+if(BAM_WITH_STEREOTOOL)
+  include(cmake/stereotool.cmake)
 endif()
 
 # ---- core ----
@@ -125,6 +134,9 @@ if(BAM_WITH_CODECS)
   target_link_libraries(bam_encoder PUBLIC bam_platform bam_http PRIVATE bam_codec_headers FLAC::FLAC)
   # the shared codecs are loaded at run time; build them with anything that uses the encoder
   add_dependencies(bam_encoder mp3lame fdk-aac)
+  if(BAM_WITH_STEREOTOOL)
+    add_dependencies(bam_encoder bam_stereotool_sdk_check)  # the binding matches the SDK
+  endif()
 endif()
 
 # ---- service ----
@@ -148,6 +160,13 @@ if(TARGET bam_encoder)
   target_link_libraries(BounceEncoder PRIVATE bam_encoder)
   # the run-time codec libraries go next to the executable (set_codec_library_dirs default)
   add_dependencies(BounceEncoder mp3lame fdk-aac)
+  if(BAM_STEREOTOOL_DLL)
+    # and so does Stereo Tool (Windows x64), where the encoder loads it from
+    add_custom_target(bam_stereotool_dll ALL
+      COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:BounceEncoder>"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${BAM_STEREOTOOL_DLL}" "$<TARGET_FILE_DIR:BounceEncoder>/libStereoTool_64.dll"
+      VERBATIM)
+  endif()
 endif()
 
 # ---- Windows-only apps ----
@@ -231,6 +250,30 @@ if(BAM_BUILD_TESTS)
       BAM_MP3LAME_PATH="$<TARGET_FILE:mp3lame>" BAM_FDKAAC_PATH="$<TARGET_FILE:fdk-aac>")
     target_link_libraries(bam_tests PRIVATE bam_encoder bam_codec_headers FLAC::FLAC)
     add_dependencies(bam_tests mp3lame fdk-aac)
+  endif()
+  if(TARGET bam_encoder)
+    # A stand-in for libStereoTool under the real library's file name, in a folder of its own
+    # (never next to the executables, where the encoder looks for the real one); the tests point
+    # the binding at that folder.
+    add_library(fake_stereotool SHARED tests/fake_stereotool/fake_stereotool.cpp)
+    if(WIN32)
+      set(_bam_fake_st_name StereoTool_64)
+    elseif(APPLE)
+      set(_bam_fake_st_name StereoTool_64)
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+      set(_bam_fake_st_name StereoTool_noX11_arm64)
+    else()
+      set(_bam_fake_st_name StereoTool_intel64)
+    endif()
+    set_target_properties(fake_stereotool PROPERTIES
+      PREFIX lib OUTPUT_NAME ${_bam_fake_st_name}
+      RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/fake_stereotool
+      LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/fake_stereotool
+      ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/fake_stereotool)
+    target_compile_definitions(bam_tests PRIVATE
+      BAM_FAKE_STEREOTOOL_PATH="$<TARGET_FILE:fake_stereotool>"
+      BAM_FAKE_STEREOTOOL_DIR="$<TARGET_FILE_DIR:fake_stereotool>")
+    add_dependencies(bam_tests fake_stereotool)
   endif()
   add_test(NAME bam_tests COMMAND bam_tests)
   # a hanging test must not hold ctest (or CI) for ever; with the progress output of
