@@ -30,7 +30,7 @@ Konfiguracja i logi znajdują się w `C:\ProgramData\BounceAES Master\` (`config
 2. Ustaw hasło panelu (co najmniej 8 znaków). Pierwsze hasło można ustawić **tylko z tego komputera** i tylko z panelu otwartego pod `http://127.0.0.1:8067` albo `http://localhost:8067` (nie przez nazwę komputera).
 3. Panel jest dostępny również z innych komputerów pod `http://<adres-komputera>:8067`, po zalogowaniu. Jeśli panel ma być dostępny z zewnątrz, wystaw go przez odwrotne proxy z HTTPS. Proxy na tym samym komputerze sprawia, że dla usługi każde żądanie przychodzi z tego komputera: pierwsze hasło dałoby się wtedy ustawić z zewnątrz (ustaw je przed uruchomieniem proxy), a nieudane logowania wszystkich klientów liczą się razem, więc blokada po błędnych hasłach dotyczy wszystkich naraz.
 
-Kolory ikony w zasobniku:
+Ikona BounceAES Master ma litery **BA** (Bounce Encoder: **BE**). Kolor kropki w prawym dolnym rogu ikony w zasobniku:
 
 | Kolor | Znaczenie |
 |---|---|
@@ -98,6 +98,9 @@ Ten sam plik pobierzesz później przyciskiem **SDP** przy wyjściu albo z okna 
 
 ### Aktualizacja z wersji 1.0
 Konfiguracja 1.0 przenosi się sama przy pierwszym uruchomieniu 1.1 (kopia: `config.json.v1.bak`). Urządzenie N staje się wyjściem N (zasilanym z ASIO N), subskrypcją N (jeśli miało źródło, połączoną z wejściem ASIO N) i nazwą pary ASIO N, więc wszystko gra tak jak wcześniej.
+
+### Co nowego w 1.2.4: ikona BA
+Nowa ikona, żeby nie mylić BounceAES Master z Bounce Encoderem: litery **BA** na czarnym kwadracie z różową kropką (Bounce Encoder od 1.0.3 ma litery **BE**). Ta sama ikona jest na skrótach, w instalatorze, na liście aplikacji i w karcie panelu w przeglądarce. W zasobniku stan pokazuje kolorowa kropka w prawym dolnym rogu, z tymi samymi kolorami co wcześniej (rozdział 3). Bez zmian w działaniu. Jeśli po aktualizacji skrót na pulpicie wciąż ma starą ikonę, wystarczy wylogować się i zalogować ponownie (Windows trzyma ikony w pamięci podręcznej).
 
 ### Co nowego w 1.2.3: nowy wygląd panelu
 Nowy wygląd panelu, bez zmian w działaniu (API, ustawienia i routing jak w 1.2.2). Zakładki są w górnym pasku, a stan usługi (PTP, ASIO, Audio Windows, nadające wyjścia, subskrypcje z sygnałem, karta sieciowa, czas działania) w pasku stanu na dole ekranu. Mierniki są segmentowe, ze skalą dBFS i szczytem zapamiętanym przez 1,5 s; różowy segment zapala się tylko przy przesterowaniu (od −1 dBFS). Pola wyboru są przełącznikami, a **Usuń** jest zwykłym przyciskiem tekstowym: na czerwono tylko w oknie potwierdzenia.

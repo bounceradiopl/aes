@@ -32,7 +32,7 @@ Unicode true
 
 !define APP "Bounce Encoder"
 !define PUBLISHER "BOUNCE SP. Z O.O."
-!define VER "1.0.2"
+!define VER "1.0.3"
 !define SERVICE "BounceEncoder"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\BounceEncoder"
 !define EVENTLOG_KEY "SYSTEM\CurrentControlSet\Services\EventLog\Application\Bounce Encoder"
@@ -55,15 +55,15 @@ RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 InstallColors F72868 050505
 
-VIProductVersion "1.0.2.0"
+VIProductVersion "1.0.3.0"
 VIAddVersionKey "ProductName" "${APP}"
 VIAddVersionKey "CompanyName" "${PUBLISHER}"
 VIAddVersionKey "FileDescription" "${APP} - instalator"
 VIAddVersionKey "FileVersion" "${VER}"
 VIAddVersionKey "LegalCopyright" "GPL-3.0-or-later"
 
-!define MUI_ICON "${ROOT}\tray\bounce.ico"
-!define MUI_UNICON "${ROOT}\tray\bounce.ico"
+!define MUI_ICON "${ROOT}\encoder_tray\encoder.ico"
+!define MUI_UNICON "${ROOT}\encoder_tray\encoder.ico"
 !define MUI_ABORTWARNING
 
 !define MUI_HEADERIMAGE
@@ -276,7 +276,12 @@ Section "Bounce Encoder" SecMain
   File "/oname=INSTRUKCJA.md" "${ROOT}\docs\ENCODER-INSTALL.md"
   File "/oname=TESTY.md" "${ROOT}\docs\ENCODER-TESTING.md"
   File "/oname=przyklad-orban.sdp" "${ROOT}\tests\data\orban.sdp"
-  File "${ROOT}\tray\bounce.ico"
+  File "${ROOT}\encoder_tray\encoder.ico"
+  ; up to 1.0.2 the encoder used the BounceAES Master icon (bounce.ico); keep it only when
+  ; BounceAES Master lives in the same folder
+  ${IfNot} ${FileExists} "$INSTDIR\BounceAESService.exe"
+    Delete "$INSTDIR\bounce.ico"
+  ${EndIf}
   SetOutPath "$INSTDIR\licencje"
   File "${PAYLOAD}\encoder-licenses\LAME-COPYING.txt"
   File "${PAYLOAD}\encoder-licenses\fdk-aac-NOTICE.txt"
@@ -372,21 +377,21 @@ Section "Bounce Encoder" SecMain
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "Bounce Encoder" '"$INSTDIR\BounceEncoderTray.exe"'
 
   ; --- skrót na pulpicie (wszyscy użytkownicy): ikona w zasobniku + panel ---
-  CreateShortcut "$DESKTOP\Bounce Encoder.lnk" "$INSTDIR\BounceEncoderTray.exe" "--panel" "$INSTDIR\bounce.ico" 0 SW_SHOWNORMAL "" "Panel i stan Bounce Encoder"
+  CreateShortcut "$DESKTOP\Bounce Encoder.lnk" "$INSTDIR\BounceEncoderTray.exe" "--panel" "$INSTDIR\encoder.ico" 0 SW_SHOWNORMAL "" "Panel i stan Bounce Encoder"
 
   ; --- menu Start ---
   CreateDirectory "$SMPROGRAMS\Bounce Encoder"
-  CreateShortcut "$SMPROGRAMS\Bounce Encoder\Bounce Encoder.lnk" "$INSTDIR\BounceEncoderTray.exe" "--panel" "$INSTDIR\bounce.ico"
+  CreateShortcut "$SMPROGRAMS\Bounce Encoder\Bounce Encoder.lnk" "$INSTDIR\BounceEncoderTray.exe" "--panel" "$INSTDIR\encoder.ico"
   ; the panel at the address the service wrote to public\panel.json (fallback 127.0.0.1:8070)
   Delete "$SMPROGRAMS\Bounce Encoder\Panel Bounce Encoder.url"
-  CreateShortcut "$SMPROGRAMS\Bounce Encoder\Panel Bounce Encoder.lnk" "$INSTDIR\BounceEncoderTray.exe" "--open-panel" "$INSTDIR\bounce.ico"
+  CreateShortcut "$SMPROGRAMS\Bounce Encoder\Panel Bounce Encoder.lnk" "$INSTDIR\BounceEncoderTray.exe" "--open-panel" "$INSTDIR\encoder.ico"
   CreateShortcut "$SMPROGRAMS\Bounce Encoder\Instrukcja.lnk" "$INSTDIR\INSTRUKCJA.md"
   CreateShortcut "$SMPROGRAMS\Bounce Encoder\Odinstaluj Bounce Encoder.lnk" "$INSTDIR\uninstall.exe"
 
   ; --- rejestr: ścieżka + wpis w Aplikacje / Panel sterowania ---
   WriteRegStr HKLM "Software\Bounce\Bounce Encoder" "InstallDir" "$INSTDIR"
   WriteRegStr HKLM "${UNINST_KEY}" "DisplayName" "${APP}"
-  WriteRegStr HKLM "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\bounce.ico"
+  WriteRegStr HKLM "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\encoder.ico"
   WriteRegStr HKLM "${UNINST_KEY}" "DisplayVersion" "${VER}"
   WriteRegStr HKLM "${UNINST_KEY}" "Publisher" "${PUBLISHER}"
   WriteRegStr HKLM "${UNINST_KEY}" "URLInfoAbout" "https://github.com/bounceradiopl/aes"
@@ -402,6 +407,9 @@ Section "Bounce Encoder" SecMain
   ${If} $0 == 1
     MessageBox MB_OK|MB_ICONEXCLAMATION "$(PtpWarn)" /SD IDOK
   ${EndIf}
+
+  ; new icons: let Explorer drop its cached copies (shortcuts, Apps list)
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 
   nsExec::ExecToLog 'sc.exe start ${SERVICE}'
   Pop $0
@@ -429,7 +437,10 @@ Section "Uninstall"
   Delete "$INSTDIR\INSTRUKCJA.md"
   Delete "$INSTDIR\TESTY.md"
   Delete "$INSTDIR\przyklad-orban.sdp"
-  Delete "$INSTDIR\bounce.ico"
+  Delete "$INSTDIR\encoder.ico"
+  ${IfNot} ${FileExists} "$INSTDIR\BounceAESService.exe"
+    Delete "$INSTDIR\bounce.ico"  ; left by 1.0.2 and earlier
+  ${EndIf}
   Delete "$INSTDIR\licencje\LAME-COPYING.txt"
   Delete "$INSTDIR\licencje\fdk-aac-NOTICE.txt"
   Delete "$INSTDIR\licencje\libogg-COPYING.txt"
