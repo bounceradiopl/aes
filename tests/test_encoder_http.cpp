@@ -1040,7 +1040,8 @@ TEST_CASE("encoder HTTP: a request hidden in a refused request's body is never e
       const RawExchange x = raw_exchange(port, hiding_request(head, offset, kLastRequest));
       CHECK(x.closed);
       CHECK(statuses_or_reset(x.statuses, 413));
-      if (!x.statuses.empty()) CHECK(x.text.find("za duża") != std::string::npos);  // the whole answer before the close
+      // the whole answer before the close; on Windows a reset may cut the body off after the status line
+      if (!x.statuses.empty() && !kResetMayLoseAnswer) CHECK(x.text.find("za duża") != std::string::npos);
       CHECK_FALSE(password_set());
     }
   }
