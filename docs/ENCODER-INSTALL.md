@@ -81,7 +81,7 @@ Kolejno:
 
 Stacje i strumienie zostają bez zmian.
 
-Ikona w zasobniku:
+Ikona w zasobniku ma litery **BE** (BounceAES Master: **BA**) i kolorową kropkę w prawym dolnym rogu:
 
 | Kolor | Znaczenie |
 |---|---|
@@ -314,6 +314,8 @@ Licencja FDK AAC nie jest zgodna z GPL, dlatego licencja Bounce Encoder ma dodat
 ## 15. Aktualizacja, odinstalowanie, podpisywanie
 
 **Aktualizacja:** uruchom nowy instalator. Zatrzyma usługę i ikonę, wymieni pliki i uruchomi usługę ponownie. Konfiguracja zostaje.
+
+**Co nowego w 1.0.3:** własna ikona z literami **BE** na czarnym kwadracie z różową kropką, żeby nie mylić Bounce Encodera z BounceAES Master (ten ma litery **BA**). Ta sama ikona jest w zasobniku, na skrótach, w instalatorze, na liście aplikacji i w karcie panelu w przeglądarce; plik ikony w folderze programu to teraz `encoder.ico`. W zasobniku stan pokazuje kolorowa kropka w prawym dolnym rogu, z tymi samymi kolorami co wcześniej (rozdział 3). Bez zmian w działaniu.
 
 **Co nowego w 1.0.2:** nowy wygląd panelu, wspólny z BounceAES Master 1.2.3; bez zmian w działaniu. Stan usługi (PTP, wejścia, strumienie, karta sieciowa, czas działania) jest w pasku stanu na dole, nadający strumień ma lampkę **NA ANTENIE**, mierniki są segmentowe, ze skalą dBFS i zapamiętanym szczytem.
 

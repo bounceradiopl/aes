@@ -32,7 +32,7 @@ Unicode true
 
 !define APP "Bounce Encoder"
 !define PUBLISHER "BOUNCE SP. Z O.O."
-!define VER "1.0.2"
+!define VER "1.0.3"
 !define SERVICE "BounceEncoder"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\BounceEncoder"
 !define EVENTLOG_KEY "SYSTEM\CurrentControlSet\Services\EventLog\Application\Bounce Encoder"
@@ -55,7 +55,7 @@ RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 InstallColors F72868 050505
 
-VIProductVersion "1.0.2.0"
+VIProductVersion "1.0.3.0"
 VIAddVersionKey "ProductName" "${APP}"
 VIAddVersionKey "CompanyName" "${PUBLISHER}"
 VIAddVersionKey "FileDescription" "${APP} - instalator"

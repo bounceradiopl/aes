@@ -4,6 +4,6 @@
 namespace bam::encoder {
 
 inline constexpr const char* kEncoderProductName = "Bounce Encoder";
-inline constexpr const char* kEncoderVersion = "1.0.2";
+inline constexpr const char* kEncoderVersion = "1.0.3";
 
 }  // namespace bam::encoder

@@ -51,6 +51,10 @@ Instrukcja: [docs/INSTALL.md](docs/INSTALL.md). W skrócie:
 5. W zakładce **Routing** połącz źródła z celami.
 6. W mAirList wybierz sterownik ASIO **BounceAES Master**.
 
+## Co nowego w 1.2.4
+
+Nowa ikona, żeby nie mylić programów: BounceAES Master ma litery **BA**, Bounce Encoder (1.0.3) litery **BE**, obie na czarnym kwadracie z różową kropką. Ikona w zasobniku pokazuje stan kolorową kropką w prawym dolnym rogu (zielona, żółta, czerwona), jak dotąd. Bez zmian w działaniu.
+
 ## Co nowego w 1.2.3
 
 Nowy wygląd panelu, bez zmian w działaniu: zakładki w górnym pasku, stan usługi (PTP, ASIO, Audio Windows, wyjścia, subskrypcje, karta sieciowa, czas działania) w pasku stanu na dole, mierniki LED ze skalą dBFS i zapamiętanym szczytem, przełączniki zamiast pól wyboru. Wygląd jest wspólny z Bounce Encoder 1.0.2 (`panel-common/common.css`).
@@ -69,6 +73,7 @@ Osobny program z tego samego repozytorium (wspólny rdzeń AES67/PTP): **enkoder
 - Bez processingu, RDS i metadanych; PTP tylko jako slave.
 - Wersja 1.0.1: blokada logowania działa też przy równoległych próbach (wspólna poprawka z BounceAES Master 1.2.2).
 - Wersja 1.0.2: nowy wygląd panelu, wspólny z BounceAES Master 1.2.3 (lampka „NA ANTENIE” przy nadającym strumieniu, mierniki LED, pasek stanu na dole); bez zmian w działaniu.
+- Wersja 1.0.3: własna ikona z literami **BE** (BounceAES Master ma **BA**), w zasobniku, na skrótach, w instalatorze i w karcie przeglądarki; bez zmian w działaniu.
 
 Instrukcja: [docs/ENCODER-INSTALL.md](docs/ENCODER-INSTALL.md), testy i odbiór: [docs/ENCODER-TESTING.md](docs/ENCODER-TESTING.md), specyfikacja: [docs/superpowers/specs/2026-11-05-bounce-encoder-design.md](docs/superpowers/specs/2026-11-05-bounce-encoder-design.md). Licencja Bounce Encoder (GPLv3) ma dodatkowe uprawnienie na połączenie z fdk-aac; w Bounce instalator z AAC jest bez ograniczeń, a przed przekazaniem poza firmę trzeba sprawdzić patenty AAC ([LICENSING.md](LICENSING.md)).
 
@@ -106,7 +111,7 @@ Panel pokazuje logotyp Bounce ([panel/logo.svg](panel/logo.svg), biała wersja) 
 | `panel-common/` | arkusz stylów wspólny dla paneli BounceAES Master i Bounce Encoder |
 | `encoder/` | Bounce Encoder: kodeki, bufor opóźnienia, miks stacji, klient Icecast, silnik, API i panel WWW (`encoder/panel/`) |
 | `encoder_service/`, `encoder_tray/` | Bounce Encoder: usługa Windows / `--console` i ikona w zasobniku |
-| `tools/` | `bounceaes-test` (test pętli), `ptp-sim` (testowy master PTP) |
+| `tools/` | `bounceaes-test` (test pętli), `ptp-sim` (testowy master PTP), `make_icons.py` (generuje ikony BA i BE: `python3 tools/make_icons.py`, wymaga Pillow) |
 | `installer/` | instalator NSIS (`nsis/`), skrypty PowerShell |
 | `tests/` | testy jednostkowe i integracyjne (doctest) |
 

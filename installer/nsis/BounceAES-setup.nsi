@@ -33,7 +33,7 @@ Unicode true
 
 !define APP "BounceAES Master"
 !define PUBLISHER "BOUNCE SP. Z O.O."
-!define VER "1.2.3"
+!define VER "1.2.4"
 !define SERVICE "BounceAESMaster"
 !define CLSID "{6B1F3C2A-8E4D-4B7A-9C51-2A7E0D4B3F10}"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\BounceAESMaster"
@@ -48,7 +48,7 @@ RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 InstallColors F72868 050505
 
-VIProductVersion "1.2.3.0"
+VIProductVersion "1.2.4.0"
 VIAddVersionKey "ProductName" "${APP}"
 VIAddVersionKey "CompanyName" "${PUBLISHER}"
 VIAddVersionKey "FileDescription" "${APP} - instalator"
