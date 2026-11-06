@@ -45,7 +45,7 @@ wejścia → opóźnienie → miks stacji (48 kHz float stereo)
 - Processing działa na **osobnym wątku na stację** (worker processingu), między wątkiem stacji a workerami strumieni: wątek stacji oddaje bloki miksu do kolejki processingu (jak dziś do strumieni), worker woła `stereoTool_Process` w miejscu i rozdaje wynik strumieniom. Wątek stacji nigdy nie czeka na Stereo Tool.
 - Rozmiar bloku: tak jak dziś pass stacji (10 ms = 480 ramek); Stereo Tool przyjmuje dowolne bloki.
 - Opóźnienie Stereo Tool (`GetLatency2(48000, …)`) jest podawane w statusie; strumienie po prostu je dziedziczą (dla Icecasta bez znaczenia).
-- **Bezpieczne obejście (bypass):** gdy biblioteki brak, instancja się nie utworzy, licencja jest nieważna dla użytych funkcji (decyzja: dalej przetwarza — Stereo Tool sam ogranicza funkcje bez licencji; panel ostrzega), worker nie nadąża (kolejka > 200 ms) albo `Process` rzuci wyjątek/SEH — stacja przechodzi płynnie (rampa 5 ms) na sygnał bez processingu i panel pokazuje przyczynę. Powrót do processingu tylko po zmianie ustawień albo ręcznym „Uruchom ponownie processing”. Nigdy cisza z powodu processingu.
+- **Bezpieczne obejście (bypass):** gdy biblioteki brak, instancja się nie utworzy, licencja jest nieważna dla użytych funkcji (`CheckLicenseValid` = false: Stereo Tool bez licencji może słyszalnie oznaczać nielicencjonowane funkcje, więc na antenę idzie sygnał bez processingu, a panel pokazuje listę funkcji bez licencji), worker nie nadąża (kolejka > 200 ms) albo `Process` rzuci wyjątek/SEH — stacja przechodzi płynnie (rampa 5 ms) na sygnał bez processingu i panel pokazuje przyczynę. Powrót do processingu tylko po zmianie ustawień albo ręcznym „Uruchom ponownie processing”. Nigdy cisza z powodu processingu.
 - Wyłączenie/włączenie processingu i zmiana presetu: przejście z rampą 5 ms (krzyżowe przenikanie sygnału przetworzonego i nieprzetworzonego, wyrównanych o opóźnienie Stereo Tool).
 
 ## 4. Biblioteka i proces
@@ -104,5 +104,5 @@ wejścia → opóźnienie → miks stacji (48 kHz float stereo)
 | Biblioteka 117 MB powiększa instalator | akceptowane; instalator kompresuje (LZMA) |
 | Thimeo zmienia API / licencję | wersja przypięta SHA-256; aktualizacja świadomie, z testem w CI |
 | Stereo Tool blokuje wątek / ulega awarii | osobny wątek na stację, kolejka z limitem, bypass bez ciszy; wyjątki SEH łapane w workerze |
-| Licencja nieważna dla funkcji presetu | stan i lista funkcji w panelu; Stereo Tool sam ogranicza funkcje |
+| Licencja nieważna dla funkcji presetu | bypass bez processingu (nic słyszalnego na antenie), stan i lista funkcji w panelu |
 | Interfejs WWW Stereo Tool niedostępny zdalnie | celowo (bezpieczeństwo); zdalny pulpit; opisane w instrukcji |
