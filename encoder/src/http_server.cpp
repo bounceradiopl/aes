@@ -363,6 +363,13 @@ struct EncoderHttpServer::Impl {
     server = std::make_unique<httplib::Server>();
     server_used = false;
     server->new_task_queue = [] { return new httplib::ThreadPool(kHttpThreads); };
+    // Ruling E11: one request per connection. With a keep-alive count of 1, httplib serves exactly
+    // one request, answers it with "Connection: close" and closes the socket, so nothing a client
+    // sends after the first request (a body httplib did not read, whatever the reason: a refusal
+    // below, a multipart or encoding error inside httplib, HEAD, Range...) is ever parsed as a
+    // request. The panel needs little else: one long /api/live connection and occasional fetches
+    // (each one a new connection, well within httplib's listen backlog of 5).
+    server->set_keep_alive_max_count(1);
     routes(*server);
   }
 
@@ -467,65 +474,77 @@ struct EncoderHttpServer::Impl {
 
   enum Access { kPublic, kSession };
 
-  // Answers `status` with a JSON error and makes httplib close the connection right after it, so
-  // the unread body is never parsed as further requests. httplib 0.18.7 ignores a response's
-  // "Connection: close"; it closes when writing the response fails. The content provider writes
-  // the whole answer and then returns false, which httplib takes as a failed write (the client
-  // has the complete response) and ends the connection.
-  static void answer_and_close(httplib::Response& res, int status, const std::string& message) {
-    auto body = std::make_shared<std::string>(json{{"error", message}}.dump());
-    res.status = status;
-    res.set_header("Connection", "close");
-    res.set_content_provider(body->size(), "application/json; charset=utf-8",
-                             [body](size_t offset, size_t length, httplib::DataSink& sink) {
-                               sink.write(body->data() + offset, length);
-                               return false;  // everything written: end the connection
-                             });
+  // The JSON media type, exactly: "application/json", optionally with a charset parameter.
+  static bool is_json_type(const std::string& value) {
+    auto trim_lower = [](std::string t) {
+      const size_t b = t.find_first_not_of(" \t"), e = t.find_last_not_of(" \t");
+      t = b == std::string::npos ? std::string() : t.substr(b, e - b + 1);
+      for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      return t;
+    };
+    size_t pos = value.find(';');
+    if (trim_lower(value.substr(0, pos)) != "application/json") return false;
+    while (pos != std::string::npos) {
+      const size_t next = value.find(';', pos + 1);
+      const std::string param = trim_lower(value.substr(pos + 1, next == std::string::npos ? std::string::npos : next - pos - 1));
+      if (param.rfind("charset=", 0) != 0) return false;
+      pos = next;
+    }
+    return true;
   }
 
-  // Requests httplib would read without a bound or not in step: chunked (Transfer-Encoding), a
-  // POST/PUT/PATCH without Content-Length (read until the connection closes), a malformed
-  // or repeated Content-Length, or more than kMaxApiBodyBytes (which httplib would first read
-  // and discard). true: answered and the connection closes.
-  static bool refuse_unreadable(const httplib::Request& req, httplib::Response& res) {
+  // The request allowlist, checked on the headers before httplib reads anything else. Only what
+  // the panel sends gets through: GET, POST, PUT and DELETE; no Content-Encoding; no Range on the
+  // API; a body only with one plain Content-Length of at most kMaxApiBodyBytes (no chunked body,
+  // nothing httplib would read until the connection closes); a body only as JSON (a form, multipart
+  // or text/plain POST is what another web site could send cross-origin without a CORS
+  // preflight), and /api/setup always as JSON. true: refused (answered).
+  static bool refuse(const httplib::Request& req, httplib::Response& res) {
+    const std::string& m = req.method;
+    if (m != "GET" && m != "POST" && m != "PUT" && m != "DELETE") {
+      send_error(res, 405, "metoda " + m + " nie jest obsługiwana");
+      return true;
+    }
+    if (req.has_header("Content-Encoding")) {
+      send_error(res, 415, "kodowanie treści (Content-Encoding) nie jest obsługiwane");
+      return true;
+    }
+    if (req.has_header("Range") && req.path.rfind("/api/", 0) == 0) {
+      send_error(res, 416, "nagłówek Range nie jest obsługiwany przez API");
+      return true;
+    }
     if (req.has_header("Transfer-Encoding")) {
-      answer_and_close(res, 411, "treść żądania musi mieć nagłówek Content-Length (przesyłanie w częściach nie jest obsługiwane)");
+      send_error(res, 411, "treść żądania musi mieć nagłówek Content-Length (przesyłanie w częściach nie jest obsługiwane)");
       return true;
     }
-    if (!req.has_header("Content-Length")) {
-      // httplib reads these until the connection closes; a DELETE without a length has no body
-      const bool with_body = req.method == "POST" || req.method == "PUT" || req.method == "PATCH";
-      if (with_body) answer_and_close(res, 411, "treść żądania musi mieć nagłówek Content-Length");
-      return with_body;
-    }
-    const std::string value = req.get_header_value("Content-Length");
-    if (req.get_header_value_count("Content-Length") != 1 || value.empty() || value.size() > 19 ||
-        value.find_first_not_of("0123456789") != std::string::npos) {
-      answer_and_close(res, 400, "nieprawidłowy nagłówek Content-Length");
+    uint64_t length = 0;
+    if (req.has_header("Content-Length")) {
+      const std::string value = req.get_header_value("Content-Length");
+      if (req.get_header_value_count("Content-Length") != 1 || value.empty() || value.size() > 19 ||
+          value.find_first_not_of("0123456789") != std::string::npos) {
+        send_error(res, 400, "nieprawidłowy nagłówek Content-Length");
+        return true;
+      }
+      length = std::stoull(value);
+      if (length > kMaxApiBodyBytes) {
+        send_error(res, 413, "treść żądania jest za duża (najwyżej " + std::to_string(kMaxApiBodyBytes / (1024 * 1024)) + " MB)");
+        return true;
+      }
+    } else if (m == "POST" || m == "PUT") {  // httplib would read the body until the connection closes
+      send_error(res, 411, "treść żądania musi mieć nagłówek Content-Length");
       return true;
     }
-    if (std::stoull(value) > kMaxApiBodyBytes) {
-      answer_and_close(res, 413, "treść żądania jest za duża (najwyżej " + std::to_string(kMaxApiBodyBytes / (1024 * 1024)) + " MB)");
+    if ((length > 0 || req.path == "/api/setup") && !is_json_type(req.get_header_value("Content-Type"))) {
+      send_error(res, 415, "oczekiwano treści typu application/json");
       return true;
     }
     return false;
   }
 
-  // A body is only accepted as JSON: a form or text/plain POST is what another web site could send
-  // cross-origin without a CORS preflight. /api/setup always needs the JSON type.
-  static bool json_body_ok(const httplib::Request& req) {
-    if (req.body.empty() && req.path != "/api/setup") return true;
-    std::string type = req.get_header_value("Content-Type");
-    type = type.substr(0, type.find(';'));
-    while (!type.empty() && type.back() == ' ') type.pop_back();
-    for (char& c : type) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return type == "application/json";
-  }
-
+  // The session (kSession), checked after the body was read.
   httplib::Server::Handler guard(Access access, httplib::Server::Handler handler) {
     return [this, access, handler = std::move(handler)](const httplib::Request& req, httplib::Response& res) {
       if (access == kSession && !authorized(req)) return send_error(res, 401, "wymagane logowanie");
-      if (!json_body_ok(req)) return send_error(res, 415, "oczekiwano treści typu application/json");
       handler(req, res);
     };
   }
@@ -551,19 +570,16 @@ struct EncoderHttpServer::Impl {
       return httplib::Server::HandlerResponse::Handled;
     });
 
-    // Runs on the headers, before any body is read. Only requests whose body cannot be read safely
-    // are answered here (and their connection closed); everything else is read in full (at most
-    // kMaxApiBodyBytes) and checked by guard(), so the connection stays in step: a refused
-    // request's body is never parsed as further requests.
+    // Runs on the headers, before any body is read: the allowlist (refuse). The connection closes
+    // after every answer (one request per connection), so an unread body is never parsed.
     server.set_pre_routing_handler([](const httplib::Request& req, httplib::Response& res) {
       res.set_header("X-Frame-Options", "DENY");
       res.set_header("X-Content-Type-Options", "nosniff");
       res.set_header("Cache-Control", "no-store");
-      return refuse_unreadable(req, res) ? httplib::Server::HandlerResponse::Handled : httplib::Server::HandlerResponse::Unhandled;
+      return refuse(req, res) ? httplib::Server::HandlerResponse::Handled : httplib::Server::HandlerResponse::Unhandled;
     });
 
-    // Every route goes through guard(): the session (kSession) and a JSON body, checked after the
-    // body was read.
+    // Every route goes through guard(): the session (kSession), checked after the body was read.
     using Handler = httplib::Server::Handler;
     auto get = [&](const std::string& pattern, Access a, Handler h) { server.Get(pattern, guard(a, std::move(h))); };
     auto post = [&](const std::string& pattern, Access a, Handler h) { server.Post(pattern, guard(a, std::move(h))); };

@@ -169,7 +169,8 @@ std::string head_with_length(const std::string& method, const std::string& path,
          (cookie.empty() ? std::string() : "Cookie: " + cookie + "\r\n") + "Content-Length: " +
          (length.empty() ? std::to_string(body_size) : length) + "\r\n\r\n";
 }
-// Ends a raw exchange: a last request on the same connection, after which the server closes.
+// A last request on the same connection: with one request per connection it is never answered
+// (if it were, the server would close after it anyway).
 const std::string kLastRequest = "GET /api/auth-state HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
 
 std::string chunked_request(const std::string& method, const std::string& path, const std::string& body,
@@ -938,13 +939,13 @@ TEST_CASE("encoder HTTP: a request hidden in a refused request's body is never e
   // read-ahead boundaries, and next to them
   const std::vector<size_t> offsets = {4096, 4095, 4097, 8192, 2000};
 
-  SUBCASE("(a) inside a text/plain body: 415, the body is read as a body, the connection stays in step") {
+  SUBCASE("(a) inside a text/plain body: 415, then the connection closes") {
     for (size_t offset : offsets) {
       CAPTURE(offset);
       const auto head = [](size_t n) { return head_with_length("POST", "/api/setup", "text/plain", n); };
       const RawExchange x = raw_exchange(port, hiding_request(head, offset, kLastRequest));
-      CHECK(x.statuses == std::vector<int>{415, 200});  // the outer request and the last one, nothing in between
-      CHECK(x.text.find("\"password_set\":false") != std::string::npos);
+      CHECK(x.closed);
+      CHECK(x.statuses == std::vector<int>{415});  // one request per connection: nothing after it is read
       CHECK_FALSE(password_set());
     }
   }
@@ -980,14 +981,15 @@ TEST_CASE("encoder HTTP: a request hidden in a refused request's body is never e
       CHECK_FALSE(password_set());
     }
   }
-  SUBCASE("(d) inside an unauthenticated request to a protected endpoint: 401, nothing else") {
+  SUBCASE("(d) inside an unauthenticated request to a protected endpoint: 401, then the connection closes") {
     for (const std::string path : {"/api/stations", "/api/password", "/api/logout", "/api/config"}) {
       for (size_t offset : offsets) {
         CAPTURE(path);
         CAPTURE(offset);
         const auto head = [&](size_t n) { return head_with_length(path == "/api/config" ? "PUT" : "POST", path, "application/json", n); };
         const RawExchange x = raw_exchange(port, hiding_request(head, offset, kLastRequest));
-        CHECK(x.statuses == std::vector<int>{401, 200});
+        CHECK(x.closed);
+        CHECK(x.statuses == std::vector<int>{401});
         CHECK_FALSE(password_set());
       }
     }
@@ -1075,5 +1077,94 @@ TEST_CASE("encoder HTTP: a login that checked the old password does not survive 
   CHECK(login_cookie.empty());
   f.take_cookie(change);
   f.get("/api/config");  // the session that changed it goes on
+}
+
+TEST_CASE("encoder HTTP: one request per connection, whatever httplib makes of a request") {
+  Fixture f;
+  const uint16_t port = f.server->port();
+  auto password_set = [&] { return json::parse(f.client->Get("/api/auth-state")->body)["password_set"].get<bool>(); };
+  const std::vector<size_t> offsets = {4096, 8192, 12288};  // httplib's 4 KB read-ahead boundaries
+  // The first response only, then the server closes: the hidden setup copies are never parsed.
+  auto check_vector = [&](const std::string& name, const std::function<std::string(size_t)>& head, const std::string& tail = "") {
+    for (size_t offset : offsets) {
+      CAPTURE(name);
+      CAPTURE(offset);
+      const RawExchange x = raw_exchange(port, hiding_request(head, offset, tail + kLastRequest));
+      CHECK(x.closed);
+      CHECK(x.statuses.size() <= 1);  // a reset may (rarely) cost the client even the first answer
+      if (!x.statuses.empty()) CHECK(x.statuses[0] >= 400);
+      CHECK_FALSE(password_set());
+    }
+  };
+  auto with = [](std::string method, std::string headers) {
+    return [method, headers](size_t n) {
+      std::string h = headers;
+      const std::string marker = "{n}";
+      for (size_t p; (p = h.find(marker)) != std::string::npos;) h.replace(p, marker.size(), std::to_string(n));
+      return method + " /api/setup HTTP/1.1\r\nHost: 127.0.0.1\r\n" + h + "\r\n";
+    };
+  };
+  auto chunk_head = [](std::string method, std::string headers) {
+    return [method, headers](size_t n) {
+      std::ostringstream hex;
+      hex << std::hex << n;
+      return method + " /api/setup HTTP/1.1\r\nHost: 127.0.0.1\r\n" + headers + "Transfer-Encoding: chunked\r\n\r\n" + hex.str() + "\r\n";
+    };
+  };
+  const std::string chunk_end = "\r\n0\r\n\r\n";
+
+  SUBCASE("(1) multipart/form-data without a boundary, and with a malformed part") {
+    check_vector("multipart, no boundary", with("POST", "Content-Type: multipart/form-data\r\nContent-Length: {n}\r\n"));
+    check_vector("multipart, bad part", with("POST", "Content-Type: multipart/form-data; boundary=xyz\r\nContent-Length: {n}\r\n"));
+  }
+  SUBCASE("(2) Content-Encoding gzip and br") {
+    check_vector("gzip", with("POST", "Content-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: {n}\r\n"));
+    check_vector("br", with("POST", "Content-Type: application/json\r\nContent-Encoding: br\r\nContent-Length: {n}\r\n"));
+  }
+  SUBCASE("(3) HEAD with a chunked body, a Content-Length over 1 MB, two Content-Lengths") {
+    check_vector("HEAD chunked", chunk_head("HEAD", ""), chunk_end);
+    check_vector("HEAD > 1 MB", with("HEAD", "Content-Length: 2000000\r\n"));
+    check_vector("HEAD two lengths", with("HEAD", "Content-Length: {n}\r\nContent-Length: {n}\r\n"));
+  }
+  SUBCASE("(4) Range with a Content-Length over 1 MB and with a chunked body") {
+    for (const std::string range : {"bytes=0-", "bytes=-5"}) {
+      check_vector("Range " + range + " > 1 MB",
+                   with("POST", "Content-Type: application/json\r\nRange: " + range + "\r\nContent-Length: 2000000\r\n"));
+      check_vector("Range " + range + " chunked", chunk_head("POST", "Content-Type: application/json\r\nRange: " + range + "\r\n"), chunk_end);
+    }
+  }
+  SUBCASE("(5) pipelining: two requests on one connection, only the first is answered") {
+    const std::string get = "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+    const RawExchange x = raw_exchange(port, get + get);
+    CHECK(x.closed);
+    CHECK(x.statuses == std::vector<int>{200});
+  }
+}
+
+TEST_CASE("encoder HTTP: methods, encodings, ranges and body types outside the allowlist are refused") {
+  Fixture f;
+  const uint16_t port = f.server->port();
+  CHECK(raw_status(port, "HEAD /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n") == 405);
+  CHECK(raw_status(port, "OPTIONS /api/setup HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://example.com\r\n\r\n") == 405);
+  CHECK(raw_status(port, "PATCH /api/config HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}") == 405);
+  CHECK(raw_status(port, "POST /api/setup HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Encoding: identity\r\n"
+                         "Content-Length: 2\r\n\r\n{}") == 415);
+  CHECK(raw_status(port, "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=0-10\r\n\r\n") == 416);
+  // the JSON media type exactly; a charset parameter is fine, anything else is not
+  auto setup = [&](const std::string& type) {
+    const std::string body = json{{"password", "x"}}.dump();  // too short: 400 once the type is accepted
+    return raw_status(port, "POST /api/setup HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: " + type + "\r\nContent-Length: " +
+                                std::to_string(body.size()) + "\r\n\r\n" + body);
+  };
+  CHECK(setup("application/json") == 400);
+  CHECK(setup("Application/JSON; charset=UTF-8") == 400);
+  CHECK(setup("application/json;charset=utf-8") == 400);
+  CHECK(setup("application/jsonx") == 415);
+  CHECK(setup("application/json; boundary=x") == 415);
+  CHECK(setup("multipart/form-data; boundary=x") == 415);
+  CHECK(setup("text/plain") == 415);
+  CHECK(json::parse(f.client->Get("/api/auth-state")->body)["password_set"] == false);
+  // the panel files still answer, and the live feed still runs on its own connection
+  CHECK(f.client->Get("/")->status == 200);
 }
 #endif  // BAM_WITH_CODECS
