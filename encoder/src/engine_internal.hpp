@@ -146,6 +146,7 @@ class AudioQueue {
   // Waits up to wait_ms for frames, then takes up to max_frames; 0 when none (or woken).
   size_t pop(float* out, size_t max_frames, int wait_ms);
   void wake();  // makes a waiting pop() return
+  size_t size_frames() const;  // frames waiting now
   uint64_t dropped_frames() const { return dropped_.load(std::memory_order_relaxed); }
   size_t capacity_frames() const { return capacity_; }
 
@@ -208,6 +209,132 @@ class StreamWorker {
   bool active_ = false;  // set once by the constructor
   std::atomic<bool> running_{true};
   std::thread thread_;
+};
+
+// ---- Stereo Tool processing (processing_worker.cpp) ----
+
+// What a ProcessingWorker runs with, fixed for its lifetime.
+struct ProcessingSettings {
+  std::string license_key;  // the effective key (the station's, else the default); a secret: never logged
+  std::string preset_path;  // the .sts to load; empty: Stereo Tool's own defaults
+  std::string home_dir;     // the instance's home folder; empty: the library's default
+  int web_port = 0;         // the instance's web interface (127.0.0.1 only); 0: off
+  // Tests: sees every block handed to the streams, on the output thread (must not allocate).
+  std::function<void(const float* stereo, size_t frames)> output_tap;
+  // Tests: called on the Stereo Tool thread after each block it processed.
+  std::function<void()> st_block_tap;
+};
+
+namespace testing {
+// How long stop() waits for the Stereo Tool thread before leaving it (0: the default 5 s).
+void set_processing_stop_timeout_ms(int ms);
+}  // namespace testing
+
+// Stereo Tool between a station and its streams (spec §3), one per station with processing.
+//
+// Threads: the station thread only copies its mix into the bounded queue (push). The output
+// thread takes it in blocks of 10 ms, keeps the unprocessed signal in a ring (the bypass), hands
+// each block to the Stereo Tool thread and waits for it, then crossfades processed and
+// unprocessed and hands the result to the streams. The Stereo Tool thread owns the instance: it
+// creates it, loads the preset, measures the latency and processes the blocks. Neither audio
+// thread allocates per block, and no lock is held across a Stereo Tool call; the output thread
+// never waits on Stereo Tool for more than kMaxBehindNs, so a stuck or slow Stereo Tool ends in
+// the bypass, not in silence.
+//
+// Timing: both paths are delayed by the same delay_frames() = Stereo Tool latency + kRampFrames
+// (the margin lets every switch away from Stereo Tool crossfade over kRampFrames, even when the
+// failed block itself never came back). The delay is 0 until the latency is known and never
+// shrinks; when it grows the output pauses for the difference (the streams get the audio later,
+// nothing is skipped or inserted). Every switch processed <-> unprocessed is a kRampFrames
+// crossfade of the two, aligned.
+//
+// Bypass (spec §3): until Stereo Tool is ready and its licence was found valid for the settings
+// (checked after kLicenceFirstCheckFrames of processed audio, then every kLicenceCheckFrames);
+// for good on a licence found invalid, a Stereo Tool failure, or when the worker stays behind the
+// station for more than kMaxBehindNs ("kolejka > 200 ms"). restart() leaves the bypass.
+class ProcessingWorker {
+ public:
+  static constexpr size_t kQueueFrames = size_t(kStationRate) * 2;  // 2 s from the station
+  static constexpr size_t kBlockFrames = 480;                       // 10 ms per Stereo Tool call
+  static constexpr uint32_t kMaxLatencyFrames = kStationRate / 2;   // a longer latency is refused
+  static constexpr int64_t kMaxBehindNs = 200'000'000;
+  static constexpr uint64_t kLicenceFirstCheckFrames = kStationRate / 2;
+  static constexpr uint64_t kLicenceCheckFrames = kStationRate;
+
+  // Starts both threads; the instance is built on the Stereo Tool thread (meanwhile, and on any
+  // failure, the streams get the unprocessed mix).
+  ProcessingWorker(const ProcessingSettings& s, std::string station_id);
+  ~ProcessingWorker();  // stop()
+  ProcessingWorker(const ProcessingWorker&) = delete;
+  ProcessingWorker& operator=(const ProcessingWorker&) = delete;
+
+  // Station thread: hands over a block of the mix (copies only, never waits on Stereo Tool).
+  void push(const float* stereo, size_t frames) { in_.push(stereo, frames); }
+  // Any thread: the streams the output goes to, taken by the output thread at its next block;
+  // lists it let go of are released here (on the caller's thread), or by stop().
+  void set_streams(std::vector<std::shared_ptr<StreamWorker>> streams);
+  // Any thread: leaves the bypass and tries again (a failed or missing instance is built anew,
+  // a working one is kept with its settings). After a crash nothing is created until the
+  // service restarts; while Stereo Tool is stuck in a call, the restart waits for it to return.
+  void restart();
+  ProcessingStatus status() const;
+  uint32_t delay_frames() const { return delay_.load(std::memory_order_relaxed); }
+  // Stops both threads; waits for the Stereo Tool thread at most the stop timeout (a call stuck
+  // in the library leaves that thread behind, logged). Idempotent.
+  void stop();
+
+  struct Core;  // shared with the Stereo Tool thread, which may outlive the worker (stop())
+
+ private:
+  enum class Mode { Dry, Probation, Processed };
+  enum class Reason { None, Starting, LicenceCheck, Setup, Licence, TooSlow, Process, Crash, RestartWaits };
+  enum class Pending { None, Setup, Job };
+  void run();
+  void take_streams();
+  void begin_restart();
+  bool take_result(bool wait);    // a finished Stereo Tool command, handled; false when none
+  void wait_job();
+  void go_dry(Reason why, ProcessingState state);
+  void set_state(ProcessingState state, Reason why);
+  void emit();
+  void deliver(const float* stereo, size_t frames);
+  void note_backlog(int64_t now);
+
+  const std::string station_id_;
+  AudioQueue in_;
+  std::shared_ptr<Core> core_;
+  std::function<void(const float*, size_t)> output_tap_;
+
+  std::mutex streams_m_;
+  std::shared_ptr<const std::vector<std::shared_ptr<StreamWorker>>> pending_streams_;
+  std::vector<std::shared_ptr<const void>> graveyard_;  // released by set_streams()/stop()
+  std::atomic<bool> has_pending_streams_{false};
+
+  // output thread only
+  std::shared_ptr<const std::vector<std::shared_ptr<StreamWorker>>> streams_;
+  std::vector<float> block_, dry_, proc_, out_;  // dry_/proc_: rings indexed by input frame
+  int64_t written_ = 0;        // input frames in dry_ so far (the next input frame's index)
+  int64_t emitted_ = 0;        // the next input frame to emit
+  int64_t proc_end_ = 0;       // proc_ holds processed frames [session_start_, proc_end_)
+  int64_t session_start_ = 0;  // first input frame of the current Stereo Tool session
+  uint32_t session_latency_ = 0;
+  int64_t job_start_ = 0;      // input frame of the block at the Stereo Tool thread
+  size_t job_frames_ = 0;
+  Mode mode_ = Mode::Dry;
+  bool licence_ok_ = false;    // the current session's licence check passed
+  Pending pending_ = Pending::None;
+  bool restart_wanted_ = false;
+  int64_t behind_since_ = 0;   // monotonic ns since the queue has not been empty, 0 = it was
+  GainRamp mix_{0.0};          // share of the processed signal
+
+  std::atomic<uint32_t> delay_{0};
+  std::atomic<int> state_{int(ProcessingState::Bypass)};
+  std::atomic<int> reason_{int(Reason::Starting)};
+  std::atomic<bool> restart_{false};
+  std::atomic<bool> running_{true};
+  std::atomic<bool> stopped_{false};
+  std::thread out_thread_;
+  std::thread st_thread_;
 };
 
 // ---- stations (station.cpp) ----

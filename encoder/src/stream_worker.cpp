@@ -69,6 +69,11 @@ size_t AudioQueue::pop(float* out, size_t max_frames, int wait_ms) {
   return n;
 }
 
+size_t AudioQueue::size_frames() const {
+  std::lock_guard lock(m_);
+  return size_;
+}
+
 void AudioQueue::wake() {
   {
     std::lock_guard lock(m_);

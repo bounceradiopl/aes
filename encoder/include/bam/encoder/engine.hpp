@@ -72,6 +72,34 @@ struct StreamStatus {
   int64_t started_ns = 0;  // monotonic time the stream worker was built: changes only when the stream restarts
 };
 
+// Stereo Tool processing of a station (processing_worker.cpp). Whatever the state, the station's
+// streams get audio: Bypass and Error carry the unprocessed mix (never silence).
+enum class ProcessingState {
+  Off,      // no processing (not configured, or stopped)
+  Running,  // the streams get the Stereo Tool output
+  Bypass,   // processing is set up but bypassed: starting, licence, too slow, Stereo Tool failed
+  Error,    // processing could not be set up: library, instance, preset, or a crash (see reason)
+};
+inline const char* processing_state_name(ProcessingState s) {
+  switch (s) {
+    case ProcessingState::Running: return "running";
+    case ProcessingState::Bypass: return "bypass";
+    case ProcessingState::Error: return "error";
+    case ProcessingState::Off: break;
+  }
+  return "off";
+}
+
+struct ProcessingStatus {
+  ProcessingState state = ProcessingState::Off;
+  std::string reason;     // Polish, why not Running; empty while running
+  double latency_ms = 0;  // delay of the processed path (Stereo Tool latency + 5 ms crossfade margin)
+  double cpu_pct = 0;     // Stereo Tool time / audio time over the last second processed; 0 when not processing
+  bool license_valid = false;        // the licence covers the features the settings use (last check)
+  std::string unlicensed_features;   // Stereo Tool's list when the licence check failed
+  uint64_t queue_dropped_frames = 0; // 48 kHz frames lost: the worker fell more than 2 s behind the station
+};
+
 struct StationStatus {
   std::string id;
   std::string name;
