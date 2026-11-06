@@ -5,11 +5,8 @@
 #include <httplib.h>
 
 #include <atomic>
-#include <cctype>
-#include <chrono>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
 #include <fstream>
 #include <functional>
 #include <mutex>
@@ -21,12 +18,13 @@
 #include "bam/auth.hpp"
 #include "bam/encoder/engine.hpp"
 #include "bam/encoder/version.hpp"
+#include "bam/http/guard.hpp"
+#include "bam/http/login_throttle.hpp"
 #include "bam/log.hpp"
 #include "bam/platform/process.hpp"
 #include "bam/platform/time.hpp"
 #include "bam/platform/udp.hpp"
 #include "codec_impl.hpp"
-#include "login_throttle.hpp"
 
 namespace bam::encoder {
 
@@ -39,54 +37,13 @@ constexpr const char* kCookie = "bounce_encoder_session";
 constexpr int kHttpThreads = 32;  // every open panel tab holds one thread for its live feed
 constexpr int64_t kLiveIntervalNs = 200'000'000;
 
-void send_json(httplib::Response& res, const json& j, int status = 200) {
-  res.status = status;
-  res.set_content(j.dump(), "application/json; charset=utf-8");
-}
+using http::is_local;  // the address and a loopback Host (bam/http/guard.hpp)
+using http::is_local_address;
+using http::is_loopback_host;
+using http::send_error;
+using http::send_json;
 
-void send_error(httplib::Response& res, int status, const std::string& message) { send_json(res, {{"error", message}}, status); }
-
-std::string session_cookie(const httplib::Request& req) {
-  const std::string cookies = req.get_header_value("Cookie");
-  const std::string key = std::string(kCookie) + "=";
-  size_t pos = 0;
-  while (pos < cookies.size()) {
-    while (pos < cookies.size() && (cookies[pos] == ' ' || cookies[pos] == ';')) ++pos;
-    if (cookies.compare(pos, key.size(), key) == 0) {
-      const size_t end = cookies.find(';', pos);
-      return cookies.substr(pos + key.size(), end == std::string::npos ? std::string::npos : end - pos - key.size());
-    }
-    const size_t next = cookies.find(';', pos);
-    if (next == std::string::npos) break;
-    pos = next + 1;
-  }
-  return {};
-}
-
-bool is_local_address(const httplib::Request& req) {
-  return req.remote_addr == "127.0.0.1" || req.remote_addr == "::1" || req.remote_addr == "::ffff:127.0.0.1";
-}
-
-// The Host header names this computer by a loopback literal: 127.0.0.1, localhost or [::1], with
-// an optional port (case-insensitive). A page that rebinds its own domain to 127.0.0.1 (DNS
-// rebinding) sends requests from 127.0.0.1, same-origin, but with its own name as the Host.
-bool is_loopback_host(const httplib::Request& req) {
-  if (req.get_header_value_count("Host") != 1) return false;
-  std::string host = req.get_header_value("Host");
-  for (char& c : host) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  for (const char* name : {"127.0.0.1", "localhost", "[::1]"}) {
-    const size_t n = std::strlen(name);
-    if (host.compare(0, n, name) != 0) continue;
-    if (host.size() == n) return true;
-    const std::string port = host.substr(n + 1);
-    return host[n] == ':' && !port.empty() && port.size() <= 5 && port.find_first_not_of("0123456789") == std::string::npos;
-  }
-  return false;
-}
-
-// A request from a browser on this computer that opened the panel by a loopback address: the
-// only place the first password may be set from.
-bool is_local(const httplib::Request& req) { return is_local_address(req) && is_loopback_host(req); }
+std::string session_cookie(const httplib::Request& req) { return http::session_cookie(req, kCookie); }
 
 std::optional<json> parse_body(const httplib::Request& req, httplib::Response& res) {
   try {
@@ -375,19 +332,15 @@ struct EncoderHttpServer::Impl {
   std::mutex sessions_mutex;
   std::shared_ptr<SessionStore> sessions_ = std::make_shared<SessionStore>();  // replaced on a password change
   uint64_t sessions_generation_ = 0;  // counts the replacements (sessions_mutex)
-  detail::LoginThrottle throttle;
+  http::LoginThrottle throttle;
   std::mutex change_mutex;  // one configuration change (build, validate, save, apply) at a time
   std::thread thread;
   std::atomic<bool> stopping{false};
   std::atomic<bool> listen_returned{false};  // the listen thread is past listen_after_bind()
   uint16_t port = 0;
 
-  // httplib's Server::stop() does nothing until the listen thread has set is_running(): a stop
-  // that comes first would leave the thread listening for ever and its join() hanging. Waits until
-  // the server listens (or its thread ended). Short: the thread only has to start.
-  void wait_listening() const {
-    while (!server->is_running() && !listen_returned) std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
+  // A stop() right after start() must reach a running server (bam/http/guard.hpp).
+  void wait_listening() const { http::wait_listening(*server, listen_returned); }
 
   Impl(EncoderEngine& e, std::string path) : engine(e), config_path(std::move(path)) { make_server(); }
 
@@ -395,13 +348,9 @@ struct EncoderHttpServer::Impl {
     server = std::make_unique<httplib::Server>();
     server_used = false;
     server->new_task_queue = [] { return new httplib::ThreadPool(kHttpThreads); };
-    // Ruling E11: one request per connection. With a keep-alive count of 1, httplib serves exactly
-    // one request, answers it with "Connection: close" and closes the socket, so nothing a client
-    // sends after the first request (a body httplib did not read, whatever the reason: a refusal
-    // below, a multipart or encoding error inside httplib, HEAD, Range...) is ever parsed as a
-    // request. The panel needs little else: one long /api/live connection and occasional fetches
-    // (each one a new connection, well within httplib's listen backlog of 5).
-    server->set_keep_alive_max_count(1);
+    // Ruling E11: one request per connection, the request allowlist before any body is read, JSON
+    // answers for httplib's own refusals (bam/http/guard.hpp).
+    http::install_request_guard(*server, kMaxApiBodyBytes);
     routes(*server);
   }
 
@@ -504,98 +453,14 @@ struct EncoderHttpServer::Impl {
     return PasswordResult::Saved;
   }
 
-  enum Access { kPublic, kSession };
-
-  // The JSON media type, exactly: "application/json", optionally with a charset parameter.
-  static bool is_json_type(const std::string& value) {
-    auto trim_lower = [](std::string t) {
-      const size_t b = t.find_first_not_of(" \t"), e = t.find_last_not_of(" \t");
-      t = b == std::string::npos ? std::string() : t.substr(b, e - b + 1);
-      for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-      return t;
-    };
-    size_t pos = value.find(';');
-    if (trim_lower(value.substr(0, pos)) != "application/json") return false;
-    while (pos != std::string::npos) {
-      const size_t next = value.find(';', pos + 1);
-      const std::string param = trim_lower(value.substr(pos + 1, next == std::string::npos ? std::string::npos : next - pos - 1));
-      if (param.rfind("charset=", 0) != 0) return false;
-      pos = next;
-    }
-    return true;
-  }
-
-  // The request allowlist, checked on the headers before httplib reads anything else: only what
-  // cannot be read safely is refused here. GET, POST, PUT and DELETE only; no Content-Encoding; no
-  // Range on the API; a body only with one plain Content-Length of at most kMaxApiBodyBytes (no
-  // chunked body, nothing httplib would read until the connection closes); no multipart body
-  // (httplib would parse it before any handler). true: refused
-  // (answered). Everything with a bounded body is answered after httplib has read that body
-  // (guard(): JSON type, session): a server that closes on unread bytes makes Windows reset the
-  // connection, and the reset destroys the answer before the client can read it.
-  static bool refuse(const httplib::Request& req, httplib::Response& res) {
-    const std::string& m = req.method;
-    if (m != "GET" && m != "POST" && m != "PUT" && m != "DELETE") {
-      send_error(res, 405, "metoda " + m + " nie jest obsługiwana");
-      return true;
-    }
-    if (req.has_header("Content-Encoding")) {
-      send_error(res, 415, "kodowanie treści (Content-Encoding) nie jest obsługiwane");
-      return true;
-    }
-    if (req.has_header("Range") && req.path.rfind("/api/", 0) == 0) {
-      send_error(res, 416, "nagłówek Range nie jest obsługiwany przez API");
-      return true;
-    }
-    if (req.has_header("Transfer-Encoding")) {
-      send_error(res, 411, "treść żądania musi mieć nagłówek Content-Length (przesyłanie w częściach nie jest obsługiwane)");
-      return true;
-    }
-    uint64_t length = 0;
-    if (req.has_header("Content-Length")) {
-      const std::string value = req.get_header_value("Content-Length");
-      if (req.get_header_value_count("Content-Length") != 1 || value.empty() || value.size() > 19 ||
-          value.find_first_not_of("0123456789") != std::string::npos) {
-        send_error(res, 400, "nieprawidłowy nagłówek Content-Length");
-        return true;
-      }
-      length = std::stoull(value);
-      if (length > kMaxApiBodyBytes) {
-        send_error(res, 413, "treść żądania jest za duża (najwyżej " + std::to_string(kMaxApiBodyBytes / (1024 * 1024)) + " MB)");
-        return true;
-      }
-    } else if (m == "POST" || m == "PUT") {  // httplib would read the body until the connection closes
-      send_error(res, 411, "treść żądania musi mieć nagłówek Content-Length");
-      return true;
-    }
-    // multipart bodies are not just read but parsed by httplib (files, boundaries) before any
-    // handler: never let them in
-    std::string type = req.get_header_value("Content-Type");
-    for (char& c : type) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    if (type.find("multipart/") != std::string::npos) {
-      send_error(res, 415, "oczekiwano treści typu application/json");
-      return true;
-    }
-    return false;
-  }
-
-  // A body only as JSON (a form, multipart or text/plain POST is what another web site could send
-  // cross-origin without a CORS preflight), and /api/setup always as JSON. Checked after the body
-  // was read (its length was bounded by refuse()); with one request per connection nothing that
-  // body contains is ever parsed as a request.
-  static bool wrong_body_type(const httplib::Request& req) {
-    const uint64_t length = req.get_header_value_u64("Content-Length");
-    return (length > 0 || req.path == "/api/setup") && !is_json_type(req.get_header_value("Content-Type"));
-  }
+  using Access = http::Access;
+  static constexpr Access kPublic = Access::Public;
+  static constexpr Access kSession = Access::Session;
 
   // The body type (415) and the session (kSession, 401), checked after the body was read; the
-  // handler runs only when both pass.
+  // handler runs only when both pass (bam/http/guard.hpp).
   httplib::Server::Handler guard(Access access, httplib::Server::Handler handler) {
-    return [this, access, handler = std::move(handler)](const httplib::Request& req, httplib::Response& res) {
-      if (wrong_body_type(req)) return send_error(res, 415, "oczekiwano treści typu application/json");
-      if (access == kSession && !authorized(req)) return send_error(res, 401, "wymagane logowanie");
-      handler(req, res);
-    };
+    return http::guard(access, [this](const httplib::Request& req) { return authorized(req); }, std::move(handler));
   }
 
   static std::optional<size_t> find_station(const json& doc, const std::string& id) {
@@ -606,32 +471,6 @@ struct EncoderHttpServer::Impl {
   }
 
   void routes(httplib::Server& server) {
-    server.set_payload_max_length(kMaxApiBodyBytes);  // a second line of defence: checked before routing below
-    server.set_error_handler([](const httplib::Request& req, httplib::Response& res) {
-      if (res.has_header("Content-Type")) return httplib::Server::HandlerResponse::Unhandled;  // already answered
-      if (res.status == 413 && !is_json_type(req.get_header_value("Content-Type"))) {
-        // httplib's own limit for a form (urlencoded) body, 8 KB, far below ours: the type is wrong
-        send_error(res, 413, "oczekiwano treści typu application/json");
-      } else if (res.status == 413) {
-        send_error(res, 413, "treść żądania jest za duża (najwyżej " + std::to_string(kMaxApiBodyBytes / (1024 * 1024)) + " MB)");
-      } else if (res.status == 400) {
-        send_error(res, 400, "nieprawidłowe żądanie");
-      } else {
-        return httplib::Server::HandlerResponse::Unhandled;
-      }
-      return httplib::Server::HandlerResponse::Handled;
-    });
-
-    // Runs on the headers, before any body is read: what cannot be read safely (refuse). The
-    // connection closes after every answer (one request per connection), so an unread body is never
-    // parsed; bounded bodies are read first and answered by guard().
-    server.set_pre_routing_handler([](const httplib::Request& req, httplib::Response& res) {
-      res.set_header("X-Frame-Options", "DENY");
-      res.set_header("X-Content-Type-Options", "nosniff");
-      res.set_header("Cache-Control", "no-store");
-      return refuse(req, res) ? httplib::Server::HandlerResponse::Handled : httplib::Server::HandlerResponse::Unhandled;
-    });
-
     // Every route goes through guard(): the body type (415) and the session (kSession, 401), both
     // checked after the body was read.
     using Handler = httplib::Server::Handler;

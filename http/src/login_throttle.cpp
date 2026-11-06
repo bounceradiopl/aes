@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-#include "login_throttle.hpp"
+#include "bam/http/login_throttle.hpp"
 
-namespace bam::encoder::detail {
+namespace bam::http {
 
 namespace {
 bool is_loopback(const std::string& a) { return a == "127.0.0.1" || a == "::1" || a == "::ffff:127.0.0.1"; }
@@ -64,4 +64,4 @@ void LoginThrottle::prune(int64_t now_ns) {
   }
 }
 
-}  // namespace bam::encoder::detail
+}  // namespace bam::http

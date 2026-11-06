@@ -2,7 +2,8 @@
 // Panel login throttling: failed logins are counted per remote address and overall; an address
 // with too many recent failures is refused for a while (HTTP 429) instead of a request thread
 // sleeping. Loopback addresses (someone at the computer itself) are only subject to their own
-// counter, so failures from the network can never lock the local administrator out.
+// counter, so failures from the network can never lock the local administrator out. Shared by the
+// BounceAES Master and Bounce Encoder panels.
 #pragma once
 #include <cstdint>
 #include <deque>
@@ -10,7 +11,7 @@
 #include <mutex>
 #include <string>
 
-namespace bam::encoder::detail {
+namespace bam::http {
 
 class LoginThrottle {
  public:
@@ -44,4 +45,4 @@ class LoginThrottle {
   int64_t overall_blocked_until_ = 0;
 };
 
-}  // namespace bam::encoder::detail
+}  // namespace bam::http
