@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 cmake_minimum_required(VERSION 3.24)
-project(BounceAESMaster VERSION 1.2.2 LANGUAGES C CXX)
+project(BounceAESMaster VERSION 1.2.3 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -115,11 +115,11 @@ if(BAM_WITH_CODECS)
     $<TARGET_PROPERTY:mp3lame,INTERFACE_INCLUDE_DIRECTORIES>
     $<TARGET_PROPERTY:fdk-aac,INTERFACE_INCLUDE_DIRECTORIES>)
   file(GLOB BAM_ENCODER_SOURCES CONFIGURE_DEPENDS encoder/src/*.cpp)
-  # Bounce Encoder panel: encoder/panel/ -> bam::encoder::kEncoderPanelAssets
+  # Bounce Encoder panel: encoder/panel/ and panel-common/ -> bam::encoder::kEncoderPanelAssets
   include(cmake/embed_files.cmake)
   set(BAM_ENCODER_PANEL_ASSETS_CPP ${CMAKE_CURRENT_BINARY_DIR}/encoder_panel_assets.cpp)
   bam_embed_files(encoder/panel ${BAM_ENCODER_PANEL_ASSETS_CPP} "bam/encoder/http_server.hpp" bam::encoder
-    EncoderPanelAsset kEncoderPanelAssets kEncoderPanelAssetCount)
+    EncoderPanelAsset kEncoderPanelAssets kEncoderPanelAssetCount panel-common)
   add_library(bam_encoder STATIC ${BAM_ENCODER_SOURCES} ${BAM_ENCODER_PANEL_ASSETS_CPP})
   target_include_directories(bam_encoder PUBLIC encoder/include)
   target_link_libraries(bam_encoder PUBLIC bam_platform bam_http PRIVATE bam_codec_headers FLAC::FLAC)

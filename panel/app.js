@@ -91,16 +91,23 @@ function fmtUptime(s) {
 
 function meterValue(db) { return Math.max(0, Math.min(1, (db + 60) / 60)); }
 
-// A stereo meter: two hairline bars, updated through data-meter="<key>-<side>".
+// A stereo LED meter: two segmented bars, updated through data-meter="<key>-<side>".
 function meter(key) {
   return el("div", { class: "meter stereo" },
     el("span", { dataset: { meter: `${key}-0` } }),
     el("span", { dataset: { meter: `${key}-1` } }));
 }
 
+// The level (--v), the peak of the last HOLD_MS (--p) and clipping above -1 dBFS (.clip), both held.
+const HOLD_MS = 1500;
 function setMeter(span, db) {
-  span.style.setProperty("--v", meterValue(db));
-  span.classList.toggle("clip", db > -1);
+  const v = meterValue(db);
+  const now = performance.now();
+  if (!(span._peak >= v) || now - span._peakAt > HOLD_MS) { span._peak = v; span._peakAt = now; }
+  if (db > -1) span._clipAt = now;
+  span.style.setProperty("--v", v);
+  span.style.setProperty("--p", span._peak);
+  span.classList.toggle("clip", now - (span._clipAt ?? -Infinity) < HOLD_MS);
 }
 
 function sourceName(id) {
@@ -170,7 +177,10 @@ function currentTab() {
 
 function showTab() {
   const valid = currentTab();
-  for (const a of $$(".tabs a")) a.classList.toggle("active", a.dataset.tab === valid);
+  for (const a of $$(".tabs a")) {
+    a.classList.toggle("active", a.dataset.tab === valid);
+    a.setAttribute("aria-selected", String(a.dataset.tab === valid));
+  }
   for (const s of $$(".tab")) s.classList.toggle("hidden", s.id !== `tab-${valid}`);
   if (valid === "logs") loadLogs();
   if (valid === "routing") startRoutingPoll(); else stopRoutingPoll();
@@ -406,7 +416,7 @@ function renderVirtual() {
     if (pick) sel.value = pick.id;
     const now = feeding(n.id);
     const send = el("button", { type: "button", class: "mini primary", onclick: () => setRoute(sel.value, n.id) }, "Wysyłaj");
-    const stop = el("button", { type: "button", class: "mini", onclick: () => setRoute(sel.value, null) }, "Rozłącz");
+    const stop = el("button", { type: "button", class: "mini", dataset: { icon: "unlink" }, onclick: () => setRoute(sel.value, null) }, "Rozłącz");
     const sync = () => { const fed = v.routes[sel.value] === n.id; send.hidden = fed; stop.hidden = !fed; };
     sel.addEventListener("change", sync);
     sync();
@@ -434,7 +444,7 @@ function renderVirtual() {
       el("td", {}, netSources.length ? sel : el("span", { class: "hint" }, "brak subskrypcji")),
       el("td", { class: "actions" },
         netSources.length ? el("button", { type: "button", class: "mini primary", onclick: () => setRoute(d.id, sel.value) }, "Odbieraj") : null,
-        cur ? el("button", { type: "button", class: "mini", onclick: () => setRoute(d.id, null) }, "Rozłącz") : null));
+        cur ? el("button", { type: "button", class: "mini", dataset: { icon: "unlink" }, onclick: () => setRoute(d.id, null) }, "Rozłącz") : null));
   });
   const table = (caption, hint, head, rows) => [
     el("h4", { class: "virtual-head" }, caption), el("p", { class: "hint" }, hint),
@@ -541,20 +551,20 @@ function renderOutputs() {
     const src = state.draft.routes[`net-out:${n}`];
     const mixMembers = state.routing?.mixes?.[`net-out:${n}`];
     const row = el("tr", { class: o.enabled ? "" : "off" },
-      el("td", { class: "c-del" }, state.config.outputs[i].enabled ? deleteButton(`net-out:${n}`, `Usuń wyjście ${pad2(n)}`) : null),
       el("td", { class: "c-num" }, pad2(n)),
-      el("td", {}, el("input", { type: "checkbox", checked: o.enabled, "aria-label": `Wyjście ${pad2(n)} aktywne`,
+      el("td", { class: "c-sw" }, el("input", { type: "checkbox", checked: o.enabled, "aria-label": `Wyjście ${pad2(n)} aktywne`,
         onchange: (e) => { set("enabled", e.target.checked); row.classList.toggle("off", !e.target.checked); } })),
       el("td", {}, el("input", { type: "text", value: o.name, maxLength: 40, dataset: { field: "name" }, "aria-label": `Nazwa wyjścia ${pad2(n)}`, oninput: (e) => set("name", e.target.value) })),
       el("td", {}, el("div", { class: "inline" },
         el("input", { type: "text", class: "addr", value: o.address, dataset: { field: "address" }, "aria-label": `Adres wyjścia ${pad2(n)}`, oninput: (e) => set("address", e.target.value.trim()) }),
-        el("button", { type: "button", class: "mini", title: "SDP wyjścia: pokaż, kopiuj, pobierz plik", onclick: () => openSdp(n) }, "SDP"))),
+        el("button", { type: "button", class: "mini", dataset: { icon: "file" }, title: "SDP wyjścia: pokaż, kopiuj, pobierz plik", onclick: () => openSdp(n) }, "SDP"))),
       el("td", {}, ptime),
-      el("td", {}, el("input", { type: "checkbox", checked: o.keep_active, "aria-label": `Utrzymuj wyjście ${pad2(n)}`, onchange: (e) => set("keep_active", e.target.checked) })),
+      el("td", { class: "c-sw" }, el("input", { type: "checkbox", checked: o.keep_active, "aria-label": `Utrzymuj wyjście ${pad2(n)}`, onchange: (e) => set("keep_active", e.target.checked) })),
       el("td", {}, mixMembers
         ? el("span", {}, mixCountText(mixMembers))
         : el("a", { class: "route-link" + (src ? "" : " none"), href: "#routing", title: src || "" }, src ? sourceName(src) : "brak")),
-      el("td", {}, meter(`out-${n}`)));
+      el("td", { class: "c-meter" }, meter(`out-${n}`)),
+      el("td", { class: "c-del" }, state.config.outputs[i].enabled ? deleteButton(`net-out:${n}`, `Usuń wyjście ${pad2(n)}`) : null));
     tbody.append(row);
     issueRow(tbody, row, `outputs[${n}].`, 9);
   });
@@ -575,18 +585,18 @@ function renderSubscriptions() {
     const info = sdpInfo(s.sdp);
     const saved = state.config.subscriptions[i];
     const row = el("tr", { class: s.enabled ? "" : "off" },
-      el("td", { class: "c-del" }, saved.enabled || saved.sdp ? deleteButton(`net-in:${n}`, `Usuń subskrypcję ${pad2(n)}`) : null),
       el("td", { class: "c-num" }, pad2(n)),
-      el("td", {}, el("input", { type: "checkbox", checked: s.enabled, "aria-label": `Subskrypcja ${pad2(n)} aktywna`,
+      el("td", { class: "c-sw" }, el("input", { type: "checkbox", checked: s.enabled, "aria-label": `Subskrypcja ${pad2(n)} aktywna`,
         onchange: (e) => { set("enabled", e.target.checked); row.classList.toggle("off", !e.target.checked); } })),
       el("td", {}, el("input", { type: "text", value: s.name, maxLength: 40, dataset: { field: "name" }, "aria-label": `Nazwa subskrypcji ${pad2(n)}`, oninput: (e) => set("name", e.target.value) })),
       el("td", {}, el("div", { class: "source" },
         el("span", { class: "dot", dataset: { sig: n } }),
         info ? el("span", { class: "label", title: info.addr }, info.name || "(bez nazwy)", el("small", {}, info.addr)) : el("span", { class: "label none" }, "brak SDP"),
-        el("button", { type: "button", class: "mini", title: "Zmień SDP źródła", onclick: () => openPaste(i) }, "SDP…"))),
+        el("button", { type: "button", class: "mini", dataset: { icon: "file" }, title: "Zmień SDP źródła", onclick: () => openPaste(i) }, "SDP…"))),
       el("td", {}, el("input", { type: "number", class: "lat", min: 1, max: 1000, step: 0.5, value: s.latency_us / 1000, dataset: { field: "latency_us" },
         "aria-label": `Opóźnienie subskrypcji ${pad2(n)} w ms`, oninput: (e) => set("latency_us", Math.round(Number(e.target.value) * 1000)) })),
-      el("td", {}, meter(`sub-${n}`)));
+      el("td", { class: "c-meter" }, meter(`sub-${n}`)),
+      el("td", { class: "c-del" }, saved.enabled || saved.sdp ? deleteButton(`net-in:${n}`, `Usuń subskrypcję ${pad2(n)}`) : null));
     tbody.append(row);
     issueRow(tbody, row, `subscriptions[${n}].`, 8);
   });
@@ -595,7 +605,7 @@ function renderSubscriptions() {
 }
 
 function deleteButton(id, label) {
-  return el("button", { type: "button", class: "mini danger", title: `${label} (od razu, po potwierdzeniu)`, "aria-label": label,
+  return el("button", { type: "button", class: "mini danger", dataset: { icon: "trash" }, title: `${label} (od razu, po potwierdzeniu)`, "aria-label": label,
     onclick: () => openStream(id, true) }, "Usuń");
 }
 
@@ -865,9 +875,9 @@ function openStream(id, confirmFirst = false) {
   const showActions = () => {
     $("#stream-confirm").hidden = true;
     $("#stream-actions").replaceChildren(
-      el("button", { type: "button", class: "danger", onclick: showConfirm }, info.remove),
+      el("button", { type: "button", class: "danger", dataset: { icon: "trash" }, onclick: showConfirm }, info.remove),
       el("span", { class: "spacer" }),
-      el("button", { type: "button", class: "ghost", onclick: () => { dlg.close(); if (info.kind === "net-in") openSourceSdp(info.n); else openSdp(info.n); } },
+      el("button", { type: "button", class: "ghost", dataset: { icon: "file" }, onclick: () => { dlg.close(); if (info.kind === "net-in") openSourceSdp(info.n); else openSdp(info.n); } },
         info.kind === "net-in" ? "SDP źródła…" : "SDP / plik .sdp…"),
       el("button", { value: "cancel", class: "primary" }, "Zamknij"));
   };
@@ -943,9 +953,9 @@ function renderDestNetActions(id) {
   const showActions = () => {
     $("#dest-confirm").hidden = true;
     $("#dest-actions").replaceChildren(
-      el("button", { type: "button", class: "danger", onclick: showConfirm }, info.remove),
+      el("button", { type: "button", class: "danger", dataset: { icon: "trash" }, onclick: showConfirm }, info.remove),
       el("span", { class: "spacer" }),
-      el("button", { type: "button", class: "ghost", onclick: () => { dlg.close(); openSdp(info.n); } }, "SDP / plik .sdp…"),
+      el("button", { type: "button", class: "ghost", dataset: { icon: "file" }, onclick: () => { dlg.close(); openSdp(info.n); } }, "SDP / plik .sdp…"),
       el("button", { value: "cancel", class: "primary" }, "Zamknij"));
   };
   const showConfirm = () => {
@@ -978,9 +988,9 @@ function renderMixRows(id) {
     const slider = el("input", { type: "range", min: -60, max: 12, step: 0.5, value: m.gain_db,
       "aria-label": `Głośność: ${sourceLabel(m.source)}`,
       oninput: (e) => { val.textContent = fmtDb(e.target.value); queueMixUpdate(id, i, { gain_db: Number(e.target.value) }); } });
-    const mute = el("button", { type: "button", class: "mini", "aria-pressed": String(m.mute), title: m.mute ? "Włącz z powrotem" : "Wycisz",
+    const mute = el("button", { type: "button", class: "mini", dataset: { icon: "mute" }, "aria-pressed": String(m.mute), title: m.mute ? "Włącz z powrotem" : "Wycisz",
       onclick: () => applyMixUpdate(id, i, { mute: !m.mute }) }, "Wycisz");
-    const remove = el("button", { type: "button", class: "mini", "aria-label": `Usuń ${sourceLabel(m.source)} z miksu`, onclick: () => removeMixMember(id, i) }, "×");
+    const remove = el("button", { type: "button", class: "mini icon-only", dataset: { icon: "x" }, title: "Usuń z miksu", "aria-label": `Usuń ${sourceLabel(m.source)} z miksu`, onclick: () => removeMixMember(id, i) });
     return el("tr", {},
       el("td", {}, sourceLabel(m.source)),
       el("td", {}, el("span", { class: "range-row" }, slider, val)),
@@ -1161,6 +1171,12 @@ function applyLive() {
   setPill("#pill-asio", live.asio.connected ? `połączono · ${live.asio.buffer_frames} próbek` : "brak aplikacji", live.asio.connected ? "ok" : "warn");
   setPill("#pill-win", live.bridge?.connected ? "aktywne" : "brak sesji", live.bridge?.connected ? "ok" : null,
     live.bridge?.connected ? "Audio Windows: BounceAES Audio Bridge działa" : "Audio Windows: brak sesji użytkownika (AoIP i ASIO działają)");
+  // the status strip: outputs on air, subscriptions with a signal, uptime
+  const txOn = live.outputs.filter((d) => d.tx).length;
+  const sigOn = live.subscriptions.filter((d) => d.sig).length;
+  setPill("#stat-outputs", `${txOn}/${live.outputs.length}`, null);
+  setPill("#stat-subs", `${sigOn}/${live.subscriptions.length}`, live.subscriptions.length && sigOn < live.subscriptions.length ? "warn" : null);
+  setPill("#stat-uptime", fmtUptime(live.uptime_s), null);
 
   const outs = new Map(live.outputs.map((d) => [d.i, d]));
   const subs = new Map(live.subscriptions.map((d) => [d.i, d]));

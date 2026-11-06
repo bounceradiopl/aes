@@ -77,30 +77,48 @@ function issuesText(r, fallback) {
 
 function meterValue(db) { return Math.max(0, Math.min(1, (db + 60) / 60)); }
 
-// A stereo meter: two hairline bars, updated through data-meter="<key>" and the side (0, 1).
+// A stereo LED meter: two segmented bars, updated through data-meter="<key>" and the side (0, 1).
 function meter(key) {
   return el("div", { class: "meter stereo", dataset: { meter: key } }, el("span"), el("span"));
 }
 
+// The dBFS scale under a meter (positions in common.css).
+function meterScale() {
+  return el("span", { class: "meter-scale wide", "aria-hidden": "true" }, el("i", {}, "−40"), el("i", {}, "−20"), el("i", {}, "−10"), el("i", {}, "0"));
+}
+
+// Each bar: the level (--v), the peak of the last HOLD_MS (--p) and clipping above -1 dBFS (.clip), both held.
+const HOLD_MS = 1500;
 function setMeter(box, peaks) {
   const spans = box.children;
+  const now = performance.now();
   for (let side = 0; side < 2; ++side) {
     const db = peaks ? peaks[side] : -120;
-    spans[side].style.setProperty("--v", meterValue(db));
-    spans[side].classList.toggle("clip", db > -1);
+    const bar = spans[side];
+    const v = meterValue(db);
+    if (!(bar._peak >= v) || now - bar._peakAt > HOLD_MS) { bar._peak = v; bar._peakAt = now; }
+    if (db > -1) bar._clipAt = now;
+    bar.style.setProperty("--v", v);
+    bar.style.setProperty("--p", bar._peak);
+    bar.classList.toggle("clip", now - (bar._clipAt ?? -Infinity) < HOLD_MS);
   }
   box.title = peaks ? `L ${L.fmtPeak(peaks[0])} dBFS · P ${L.fmtPeak(peaks[1])} dBFS` : "";
 }
 
-// A state: a dot and a text, updated through data-state="<key>".
+// A state: a mark and a text, updated through data-state="<key>". A stream on air (`tally`) shows
+// the "NA ANTENIE" lamp and its bitrate.
 function stateBox(key) {
   return el("span", { class: "state", dataset: key ? { state: key } : null }, el("span", { class: "dot" }), el("span", { class: "txt" }, "—"));
 }
 
-function setState(box, s) {
+function setState(box, s, tally = false) {
+  const onAir = tally && s.kind === "on" && s.kbps != null;
+  const [mark, txt] = box.children;
   box.className = `state ${s.kind}`;
-  $(".dot", box).className = `dot ${s.kind}`;
-  $(".txt", box).textContent = s.text;
+  box.title = s.text;  // the whole text, also when the row cuts it short
+  mark.className = onAir ? "tally" : `dot ${s.kind}`;
+  mark.textContent = onAir ? "NA ANTENIE" : "";
+  txt.textContent = onAir ? L.fmtKbps(s.kbps) : s.text;
 }
 
 function setPill(id, text, kind, title) {
@@ -289,51 +307,56 @@ function renderStations() {
   if (!stations.length) {
     list.replaceChildren(el("div", { class: "empty-state" },
       el("p", { class: "hint" }, "Brak stacji. Stacja odbiera do 3 wejść AES67, sumuje je i wysyła do 8 strumieni Icecast."),
-      el("button", { type: "button", class: "primary", onclick: () => { location.hash = "#edit/new"; } }, "Dodaj pierwszą stację")));
+      el("button", { type: "button", class: "primary", dataset: { icon: "plus" }, onclick: () => { location.hash = "#edit/new"; } }, "Dodaj pierwszą stację")));
     return;
   }
   list.replaceChildren(...stations.map((st, i) => stationCard(st, i)));
   applyLive();
 }
 
+// A station as a strip: its head (switch, name, state, sum meter) over one dense row per input and
+// stream, grouped under a side legend.
 function stationCard(st, i) {
   const toggle = el("input", { type: "checkbox", checked: st.enabled, "aria-label": `${stationLabel(st, i)}: włączona`,
     onchange: (e) => setStationEnabled(st.id, e.target.checked, e.target) });
-  const rows = [el("tr", { class: "group" }, el("td", { colSpan: 6 }, `Wejścia (${st.inputs.length})`))];
-  if (!st.inputs.length) rows.push(el("tr", {}, el("td", { colSpan: 6, class: "empty" }, "Brak wejść: stacja nadaje ciszę.")));
-  st.inputs.forEach((inp, j) => {
+  const group = (legend, rows, empty) => el("tbody", {},
+    ...(rows.length ? rows : [el("tr", {}, el("td", { colSpan: 6, class: "empty" }, empty))])
+      .map((row, k) => { if (k === 0) row.prepend(el("th", { class: "legend", scope: "rowgroup", rowSpan: Math.max(1, rows.length) }, legend)); return row; }));
+  const inputs = st.inputs.map((inp, j) => {
     const info = L.sdpInfo(inp.sdp);
-    rows.push(el("tr", { class: inp.enabled ? "" : "off" },
-      el("td", { class: "c-dot c-num" }, L.pad2(j + 1)),
-      el("td", { class: "c-name" }, inp.name || info?.name || `Wejście ${j + 1}`),
-      el("td", { class: "c-addr" }, info?.address ? `${info.address}:${info.port}` : "brak SDP"),
-      el("td", { class: "c-set" }, `gain ${L.fmtGain(inp.gain_db)} · opóźnienie ${L.fmtDelay(inp.delay_s)}`),
+    const name = inp.name || info?.name || `Wejście ${j + 1}`;
+    const addr = info?.address ? `${info.address}:${info.port}` : "brak SDP";
+    const set = `gain ${L.fmtGain(inp.gain_db)} · opóźnienie ${L.fmtDelay(inp.delay_s)}`;
+    return el("tr", { class: inp.enabled ? "" : "off" },
+      el("td", { class: "c-num" }, L.pad2(j + 1)),
+      el("td", { class: "c-name", title: name }, name),
+      el("td", { class: "c-addr", title: addr }, addr),
+      el("td", { class: "c-set", title: set }, set),
       el("td", { class: "c-meter" }, meter(`in:${st.id}:${j}`)),
-      el("td", { class: "c-state" }, stateBox(`in:${st.id}:${j}`))));
+      el("td", { class: "c-state" }, stateBox(`in:${st.id}:${j}`)));
   });
-  rows.push(el("tr", { class: "group" }, el("td", { colSpan: 6 }, `Strumienie (${st.streams.length})`)));
-  if (!st.streams.length) rows.push(el("tr", {}, el("td", { colSpan: 6, class: "empty" }, "Brak strumieni: dodaj je w edycji stacji.")));
-  st.streams.forEach((s, k) => {
-    rows.push(el("tr", { class: s.enabled ? "" : "off" },
-      el("td", { class: "c-dot c-num" }, L.pad2(k + 1)),
-      el("td", { class: "c-name" }, streamTitle(s)),
-      el("td", { class: "c-addr" }, streamTarget(s)),
-      el("td", { class: "c-set" }, `gain ${L.fmtGain(s.gain_db)}`),
-      el("td", { class: "c-meter" }, meter(`str:${st.id}:${s.id}`)),
-      el("td", { class: "c-state" }, stateBox(`str:${st.id}:${s.id}`))));
-  });
+  const streams = st.streams.map((s, k) => el("tr", { class: s.enabled ? "" : "off" },
+    el("td", { class: "c-num" }, L.pad2(k + 1)),
+    el("td", { class: "c-name", title: streamTitle(s) }, streamTitle(s)),
+    el("td", { class: "c-addr", title: streamTarget(s) }, streamTarget(s)),
+    el("td", { class: "c-set" }, `gain ${L.fmtGain(s.gain_db)}`),
+    el("td", { class: "c-meter" }, meter(`str:${st.id}:${s.id}`)),
+    el("td", { class: "c-state" }, stateBox(`str:${st.id}:${s.id}`))));
   return el("article", { class: "station" + (st.enabled ? "" : " off") },
     el("div", { class: "station-head" },
       el("label", { class: "toggle", title: "Włącz lub wyłącz stację (od razu)" }, toggle),
       el("div", { class: "station-title" },
         el("h2", {}, stationLabel(st, i)),
         stateBox(`st:${st.id}`)),
-      meter(`st:${st.id}`),
+      el("div", { class: "station-meter" }, meter(`st:${st.id}`), meterScale()),
       el("span", { class: "peak", dataset: { peak: st.id } }, ""),
       el("div", { class: "head-tools" },
-        el("button", { type: "button", class: "ghost", onclick: () => { location.hash = editHash(st.id); } }, "Edytuj"),
-        el("button", { type: "button", class: "mini danger", onclick: () => deleteStation(st.id) }, "Usuń"))),
-    el("div", { class: "table-wrap" }, el("table", { class: "lines" }, el("tbody", {}, ...rows))));
+        el("button", { type: "button", class: "ghost", dataset: { icon: "pencil" }, onclick: () => { location.hash = editHash(st.id); } }, "Edytuj"),
+        el("button", { type: "button", class: "mini danger", dataset: { icon: "trash" }, onclick: () => deleteStation(st.id) }, "Usuń"))),
+    el("div", { class: "table-wrap" }, el("table", { class: "lines" },
+      el("colgroup", {}, ...["legend", "num", "name", "addr", "set", "meter", "state"].map((c) => el("col", { class: `k-${c}` }))),
+      group(`Wejścia ${st.inputs.length}`, inputs, "Brak wejść: stacja nadaje ciszę."),
+      group(`Strumienie ${st.streams.length}`, streams, "Brak strumieni: dodaj je w edycji stacji."))));
 }
 
 // The station switch in the list: applied at once (the stored stream passwords stay, E7).
@@ -596,11 +619,11 @@ function inputBlock(j) {
       el("div", { class: "block-title" }, el("span", {}, `Wejście ${j + 1}`)),
       live ? meter(live) : null,
       live ? stateBox(live) : el("span", { class: "hint" }, "nowe: stan po zapisaniu"),
-      el("button", { type: "button", class: "mini danger", onclick: () => removeInput(j) }, "Usuń")),
+      el("button", { type: "button", class: "mini danger", dataset: { icon: "trash" }, onclick: () => removeInput(j) }, "Usuń")),
     el("div", { class: "block-body input-body" },
       el("label", { class: "sdp" }, "SDP źródła", sdp,
         el("div", { class: "sdp-tools" },
-          el("button", { type: "button", class: "mini", onclick: () => file.click() }, "Wczytaj plik SDP…"), file, infoLine),
+          el("button", { type: "button", class: "mini", dataset: { icon: "upload" }, onclick: () => file.click() }, "Wczytaj plik SDP…"), file, infoLine),
         fieldError(`${p}.sdp`)),
       el("label", {}, "Nazwa", name, fieldError(`${p}.name`)),
       el("label", {}, "Gain wejścia",
@@ -719,7 +742,7 @@ function streamBlock(k) {
       el("div", { class: "block-title" }, title, target),
       live ? meter(live) : null,
       live ? stateBox(live) : el("span", { class: "hint" }, "nowy: stan po zapisaniu"),
-      el("button", { type: "button", class: "mini danger", onclick: () => removeStream(k) }, "Usuń")),
+      el("button", { type: "button", class: "mini danger", dataset: { icon: "trash" }, onclick: () => removeStream(k) }, "Usuń")),
     el("div", { class: "block-body stream-body" },
       el("label", { class: "s2" }, "Kodek", codec, codecNote),
       el("label", {}, "Częstotliwość", rate),
@@ -917,6 +940,7 @@ function applyLive() {
   }
   setPill("#pill-inputs", `${inOn}/${inAll}`, inAll ? (inOn === inAll ? "ok" : "warn") : null, "Wejścia AES67 z sygnałem / włączone (stacje działające)");
   setPill("#pill-streams", `${strOn}/${strAll}`, strAll ? (strOn === strAll ? "ok" : "warn") : null, "Strumienie, które nadają / włączone (stacje działające)");
+  setPill("#stat-uptime", L.fmtUptime(live.uptime_s), null);
 
   for (const box of $$("[data-meter]")) {
     const [kind, sid, x] = box.dataset.meter.split(":");
@@ -930,7 +954,7 @@ function applyLive() {
     const on = !!st?.enabled;
     setState(box, kind === "st" ? L.stationState(st)
       : kind === "in" ? L.inputState(st?.inputs[Number(x)], on)
-        : L.streamState(st?.streams.find((s) => s.id === x), on));
+        : L.streamState(st?.streams.find((s) => s.id === x), on), kind === "str");
   }
   for (const span of $$("[data-peak]")) {
     const st = stations.get(span.dataset.peak);
@@ -979,7 +1003,7 @@ function renderStats() {
   ]);
   const num = (v, bad) => el("td", { class: bad ? "bad" : "" }, L.fmtNum(v));
   const name = (st, i) => el("td", { class: "l name" }, st.name || `Stacja ${i + 1}`);
-  const stateCell = (s) => { const b = stateBox(null); setState(b, s); return el("td", { class: "l" }, b); };
+  const stateCell = (s, tally = false) => { const b = stateBox(null); setState(b, s, tally); return el("td", { class: "l" }, b); };
   $("#stats-station-rows").replaceChildren(...live.stations.map((st, i) => el("tr", {},
     name(st, i), stateCell(L.stationState(st)), el("td", {}, st.running ? L.fmtUptime(st.uptime_s) : "—"), num(st.skipped_frames, st.skipped_frames > 0))));
   if (!live.stations.length) $("#stats-station-rows").append(el("tr", {}, el("td", { class: "l hint", colSpan: 4 }, "Brak stacji.")));
@@ -995,7 +1019,7 @@ function renderStats() {
     name(st, i),
     el("td", { class: "l" }, L.codec(state.codecs, x.codec)?.lossless ? `${x.codec_label} · ${L.fmtRate(x.sample_rate)}` : `${x.codec_label} · ${x.bitrate_kbps} kb/s · ${L.fmtRate(x.sample_rate)}`),
     el("td", { class: "l mono" }, `${x.host}:${x.port}${x.mount}`),
-    stateCell(L.streamState(x, st.enabled)),
+    stateCell(L.streamState(x, st.enabled), true),
     el("td", {}, L.fmtBytes(x.bytes_sent)), el("td", {}, L.fmtNum(x.kbps, 1)),
     num(x.reconnects, x.reconnects > 0), el("td", { class: x.dropped_bytes > 0 ? "bad" : "" }, L.fmtBytes(x.dropped_bytes)),
     num(x.queue_dropped_frames, x.queue_dropped_frames > 0), num(x.conditioner_dropped_frames, x.conditioner_dropped_frames > 0),

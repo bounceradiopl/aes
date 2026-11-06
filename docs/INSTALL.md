@@ -63,7 +63,7 @@ Każde wyjście to strumień stereo nadawany do sieci. Co na nie trafia, ustala 
 | ptime | 1 ms (standard AES67), 1,333 ms (jak Orban) lub 4 ms (dla odbiorników z małym buforem) |
 | Utrzymuj | nadawaj ciszę, gdy aplikacja ASIO nie gra (Axia: KEEP CHANNEL ACTIVE). Wyjścia zasilane z sieci lub z Windows nadają zawsze |
 | Źródło | aktualne połączenie z zakładki Routing |
-| **Usuń** (pierwsza kolumna) | od razu, po potwierdzeniu: wyłącza wyjście, rozłącza je i wycofuje ogłoszenie SAP; nazwa i adres wracają do domyślnych |
+| **Usuń** (na końcu wiersza) | od razu, po potwierdzeniu: wyłącza wyjście, rozłącza je i wycofuje ogłoszenie SAP; nazwa i adres wracają do domyślnych |
 
 ### Subskrypcje (1–32)
 Subskrypcja to odbierany strumień stereo z sieci (Orban, Omnia, konsola, inny komputer Bounce). **Dodaj źródło…** pokazuje strumienie ogłaszane w sieci (SAP); **Wklej SDP…** przyjmuje plik SDP, np. z Orbana.
@@ -72,9 +72,9 @@ Subskrypcja to odbierany strumień stereo z sieci (Orban, Omnia, konsola, inny k
 |---|---|
 | Aktywna | włącza odbiór |
 | Nazwa | nazwa w siatce routingu (domyślnie nazwa sesji z SDP) |
-| Źródło | nazwa i adres z SDP; kropka pokazuje, czy sygnał dociera; **SDP…** zmienia źródło |
+| Źródło | nazwa i adres z SDP; lampka pokazuje, czy sygnał dociera; **SDP…** zmienia źródło |
 | Opóźn. ms | opóźnienie odbioru: bufor na jitter sieci. Minimum to ptime źródła + 1 ms; panel sam podnosi zbyt małą wartość. Zacznij od 5 ms i zwiększ, jeśli rośnie licznik RxUnderrun |
-| **Usuń** (pierwsza kolumna) | od razu, po potwierdzeniu: usuwa subskrypcję i rozłącza wszystko, co zasilała (okno potwierdzenia wymienia te połączenia) |
+| **Usuń** (na końcu wiersza) | od razu, po potwierdzeniu: usuwa subskrypcję i rozłącza wszystko, co zasilała (okno potwierdzenia wymienia te połączenia) |
 
 Usuwanie i dodawanie (źródeł i wyjść) działa od razu, bez „Zapisz zmiany”; niezapisane zmiany w innych wierszach zostają. To samo okno otwiera się w zakładce **Routing** po kliknięciu nazwy subskrypcji (wiersz) albo wyjścia AoIP (kolumna): adres, połączenia, SDP i **Usuń**.
 
@@ -98,6 +98,9 @@ Ten sam plik pobierzesz później przyciskiem **SDP** przy wyjściu albo z okna 
 
 ### Aktualizacja z wersji 1.0
 Konfiguracja 1.0 przenosi się sama przy pierwszym uruchomieniu 1.1 (kopia: `config.json.v1.bak`). Urządzenie N staje się wyjściem N (zasilanym z ASIO N), subskrypcją N (jeśli miało źródło, połączoną z wejściem ASIO N) i nazwą pary ASIO N, więc wszystko gra tak jak wcześniej.
+
+### Co nowego w 1.2.3: nowy wygląd panelu
+Nowy wygląd panelu, bez zmian w działaniu (API, ustawienia i routing jak w 1.2.2). Zakładki są w górnym pasku, a stan usługi (PTP, ASIO, Audio Windows, nadające wyjścia, subskrypcje z sygnałem, karta sieciowa, czas działania) w pasku stanu na dole ekranu. Mierniki są segmentowe, ze skalą dBFS i szczytem zapamiętanym przez 1,5 s; różowy segment zapala się tylko przy przesterowaniu (od −1 dBFS). Pola wyboru są przełącznikami, a **Usuń** jest zwykłym przyciskiem tekstowym: na czerwono tylko w oknie potwierdzenia.
 
 ### Co nowego w 1.2.2: bezpieczeństwo panelu
 Panel dostał te same zabezpieczenia co Bounce Encoder 1.0; dźwięk, ASIO, bridge i routing działają bez zmian.
@@ -179,7 +182,7 @@ Rozpoznawane wirtualne karty (po nazwie sterownika, także po zmianie nazwy urz�
 3. PTP: przy roli „automatyczna” na obu komputerach jeden z nich zostaje masterem (decyduje identyfikator zegara), drugi się do niego synchronizuje. Jeśli w sieci jest urządzenie z lepszym zegarem (Orban, Omnia, konsola z priorytetem 128 lub lepszą klasą zegara), oba komputery są slave'ami. Gdy master zniknie, rolę przejmuje inny komputer w ciągu kilku sekund.
 
 ## 6. PTP: kto jest masterem
-- Pasek u góry panelu pokazuje **PTP: master** (ten komputer nadaje zegar) albo **PTP: slave** (podpowiedź pokazuje identyfikator mastera). Zakładka Statystyki pokazuje szczegóły.
+- Pasek stanu na dole panelu pokazuje **PTP: master** (ten komputer nadaje zegar) albo **PTP: slave** (podpowiedź pokazuje identyfikator mastera). Zakładka Statystyki pokazuje szczegóły.
 - Urządzenia AES67 (Orban, Omnia, konsole) zwykle mają priorytet 128 i lepszą klasę zegara niż komputer (248), więc wygrywają z komputerem w roli automatycznej.
 - Rola **preferowany master** jest przeznaczona dla sieci bez sprzętowego grandmastera. Ustaw ją na jednym komputerze.
 - Rola **tylko slave** jest właściwa, gdy zegar ma zawsze pochodzić z urządzenia, a komputer nie może go przejąć nawet na chwilę.

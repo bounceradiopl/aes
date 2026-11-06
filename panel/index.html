@@ -7,6 +7,7 @@
   <title>BounceAES Master</title>
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="common.css">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -49,34 +50,29 @@
   <div id="app" class="hidden">
     <header class="topbar">
       <div class="brand-slot"></div>
-      <div class="pills">
-        <span class="pill" id="pill-ptp" title="Synchronizacja zegara PTP"><i></i><b>PTP</b><span>—</span></span>
-        <span class="pill" id="pill-asio" title="Aplikacja ASIO"><i></i><b>ASIO</b><span>—</span></span>
-        <span class="pill" id="pill-win" title="Audio Windows (BounceAES Audio Bridge w sesji użytkownika)"><i></i><b>Windows</b><span>—</span></span>
-        <span class="pill plain" id="pill-iface" title="Karta sieciowa AoIP"><b>Sieć</b><span>—</span></span>
-        <button type="button" class="ghost" id="change-password">Zmień hasło</button>
-        <button class="ghost" id="logout">Wyloguj</button>
+      <nav class="tabs" role="tablist">
+        <a href="#routing" data-tab="routing" role="tab" aria-controls="tab-routing">Routing</a>
+        <a href="#config" data-tab="config" role="tab" aria-controls="tab-config">Konfiguracja</a>
+        <a href="#stats" data-tab="stats" role="tab" aria-controls="tab-stats">Statystyki</a>
+        <a href="#logs" data-tab="logs" role="tab" aria-controls="tab-logs">Logi</a>
+      </nav>
+      <div class="account">
+        <button type="button" class="ghost" id="change-password" data-icon="key">Zmień hasło</button>
+        <button type="button" class="ghost" id="logout" data-icon="logout">Wyloguj</button>
       </div>
     </header>
 
-    <nav class="tabs" role="tablist">
-      <a href="#routing" data-tab="routing">Routing</a>
-      <a href="#config" data-tab="config">Konfiguracja</a>
-      <a href="#stats" data-tab="stats">Statystyki</a>
-      <a href="#logs" data-tab="logs">Logi</a>
-    </nav>
-
     <main>
       <!-- ================= Routing ================= -->
-      <section id="tab-routing" class="tab">
+      <section id="tab-routing" role="tabpanel" class="tab">
         <div class="card">
           <div class="card-head">
             <h2>Routing</h2>
             <div class="head-tools">
               <label class="toggle"><input type="checkbox" id="only-used"> tylko używane</label>
-              <button type="button" class="ghost" id="open-virtual">Wirtualne karty…</button>
-              <button type="button" class="ghost" id="send-output">Nadawaj do urządzenia…</button>
-              <button type="button" class="ghost" id="add-source">Dodaj źródło…</button>
+              <button type="button" class="ghost" id="open-virtual" data-icon="plug">Wirtualne karty…</button>
+              <button type="button" class="ghost" id="send-output" data-icon="broadcast">Nadawaj do urządzenia…</button>
+              <button type="button" class="ghost" id="add-source" data-icon="plus">Dodaj źródło…</button>
             </div>
           </div>
           <p class="hint matrix-hint">Wiersze to źródła, kolumny to cele. Kliknięcie kratki łączy źródło z celem od razu; drugie kliknięcie rozłącza. Każdy cel ma jedno źródło. Kliknij nazwę subskrypcji albo wyjścia AoIP, aby zobaczyć jego SDP albo je usunąć.</p>
@@ -87,7 +83,7 @@
       </section>
 
       <!-- ================= Konfiguracja ================= -->
-      <section id="tab-config" class="tab hidden">
+      <section id="tab-config" role="tabpanel" class="tab hidden">
         <div class="card global">
           <h2>Ustawienia globalne</h2>
           <div class="grid">
@@ -134,22 +130,22 @@
             <h2>Wyjścia AoIP</h2>
             <div class="head-tools">
               <label class="toggle"><input type="checkbox" id="only-active"> tylko aktywne</label>
-              <button type="button" class="ghost" id="add-output">Nadawaj do urządzenia…</button>
+              <button type="button" class="ghost" id="add-output" data-icon="broadcast">Nadawaj do urządzenia…</button>
             </div>
           </div>
           <div class="table-wrap">
             <table class="devices">
               <thead>
                 <tr>
-                  <th class="c-del"><span class="sr-only">Usuń</span></th>
                   <th class="c-num">#</th>
-                  <th>Aktywne</th>
+                  <th class="c-sw">Aktywne</th>
                   <th>Nazwa</th>
                   <th>Adres multicast</th>
                   <th>ptime</th>
-                  <th title="Wysyłaj ciszę, gdy aplikacja ASIO nie gra (Axia: KEEP CHANNEL ACTIVE)">Utrzymuj</th>
+                  <th class="c-sw" title="Wysyłaj ciszę, gdy aplikacja ASIO nie gra (Axia: KEEP CHANNEL ACTIVE)">Utrzymuj</th>
                   <th>Źródło</th>
-                  <th>Poziom</th>
+                  <th class="c-meter">Poziom <span class="unit">dBFS</span> <span class="meter-scale" aria-hidden="true"><i>−40</i><i>−20</i><i>−10</i><i>0</i></span></th>
+                  <th class="c-del"><span class="sr-only">Usuń</span></th>
                 </tr>
               </thead>
               <tbody id="output-rows"></tbody>
@@ -160,19 +156,19 @@
         <div class="card">
           <div class="card-head">
             <h2>Subskrypcje</h2>
-            <button type="button" class="ghost" id="add-subscription">Dodaj źródło…</button>
+            <button type="button" class="ghost" id="add-subscription" data-icon="plus">Dodaj źródło…</button>
           </div>
           <div class="table-wrap">
             <table class="devices">
               <thead>
                 <tr>
-                  <th class="c-del"><span class="sr-only">Usuń</span></th>
                   <th class="c-num">#</th>
-                  <th>Aktywna</th>
+                  <th class="c-sw">Aktywna</th>
                   <th>Nazwa</th>
                   <th>Źródło</th>
-                  <th title="Opóźnienie odbioru">Opóźn. ms</th>
-                  <th>Poziom</th>
+                  <th title="Opóźnienie odbioru">Opóźn. <span class="unit">ms</span></th>
+                  <th class="c-meter">Poziom <span class="unit">dBFS</span> <span class="meter-scale" aria-hidden="true"><i>−40</i><i>−20</i><i>−10</i><i>0</i></span></th>
+                  <th class="c-del"><span class="sr-only">Usuń</span></th>
                 </tr>
               </thead>
               <tbody id="subscription-rows"></tbody>
@@ -188,7 +184,7 @@
       </section>
 
       <!-- ================= Statystyki ================= -->
-      <section id="tab-stats" class="tab hidden">
+      <section id="tab-stats" role="tabpanel" class="tab hidden">
         <div class="stats-top">
           <div class="card">
             <h2>Zegar PTP</h2>
@@ -202,7 +198,7 @@
         <div class="card">
           <div class="card-head">
             <h2>Wyjścia</h2>
-            <button class="ghost" id="reset-stats">Zeruj liczniki</button>
+            <button type="button" class="ghost" id="reset-stats" data-icon="reset">Zeruj liczniki</button>
           </div>
           <div class="table-wrap">
             <table class="stats">
@@ -220,7 +216,7 @@
               <thead>
                 <tr>
                   <th class="c-num">#</th><th>Nazwa</th>
-                  <th>RxPkts</th><th>RxBytes</th><th>RxUnderrun</th><th>RxOverrun</th><th>RxSeqErr</th><th>Jitter ms</th><th>Sygnał</th>
+                  <th>RxPkts</th><th>RxBytes</th><th>RxUnderrun</th><th>RxOverrun</th><th>RxSeqErr</th><th>Jitter <span class="unit">ms</span></th><th>Sygnał</th>
                 </tr>
               </thead>
               <tbody id="stats-sub-rows"></tbody>
@@ -230,11 +226,11 @@
       </section>
 
       <!-- ================= Logi ================= -->
-      <section id="tab-logs" class="tab hidden">
+      <section id="tab-logs" role="tabpanel" class="tab hidden">
         <div class="card">
           <div class="card-head">
             <h2>Dziennik zdarzeń</h2>
-            <button class="ghost" id="refresh-logs">Odśwież</button>
+            <button type="button" class="ghost" id="refresh-logs" data-icon="refresh">Odśwież</button>
           </div>
           <div class="table-wrap">
             <table class="logs"><tbody id="log-rows"></tbody></table>
@@ -243,12 +239,23 @@
       </section>
     </main>
 
-    <div class="savebar hidden" id="savebar">
-      <span>Niezapisane zmiany</span>
-      <button class="ghost" id="discard">Odrzuć</button>
-      <button class="primary" id="save">Zapisz zmiany</button>
+    <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+    <div class="dock">
+      <div class="savebar hidden" id="savebar">
+        <span>Niezapisane zmiany</span>
+        <button type="button" class="ghost" id="discard" data-icon="undo">Odrzuć</button>
+        <button type="button" class="primary" id="save">Zapisz zmiany</button>
+      </div>
+      <footer class="statusbar" aria-label="Stan usługi">
+        <span class="stat" id="pill-ptp" title="Synchronizacja zegara PTP"><i class="lamp"></i><b>PTP</b><span>—</span></span>
+        <span class="stat" id="pill-asio" title="Aplikacja ASIO"><i class="lamp"></i><b>ASIO</b><span>—</span></span>
+        <span class="stat" id="pill-win" title="Audio Windows (BounceAES Audio Bridge w sesji użytkownika)"><i class="lamp"></i><b>Windows</b><span>—</span></span>
+        <span class="stat" id="stat-outputs" title="Wyjścia AoIP, które nadają / aktywne"><b>Wyjścia</b><span>—</span></span>
+        <span class="stat" id="stat-subs" title="Subskrypcje z sygnałem / aktywne"><b data-short="Subskr.">Subskrypcje</b><span>—</span></span>
+        <span class="stat" id="pill-iface" title="Karta sieciowa AoIP"><b>Sieć</b><span>—</span></span>
+        <span class="stat end" id="stat-uptime" title="Czas działania usługi"><b data-short="Czas">Czas działania</b><span>—</span></span>
+      </footer>
     </div>
-    <div class="toasts" id="toasts"></div>
   </div>
 
   <!-- Dialogs -->
@@ -263,7 +270,7 @@
         </table>
       </div>
       <menu>
-        <button type="button" class="ghost" id="browse-paste">Wklej SDP…</button>
+        <button type="button" class="ghost" id="browse-paste" data-icon="paste">Wklej SDP…</button>
         <button value="cancel" class="primary">Zamknij</button>
       </menu>
     </form>
@@ -298,8 +305,8 @@
       <p class="hint" id="sdp-hint">Wczytaj plik w odbiorniku AES67 (np. Orban, Omnia), jeśli nie korzysta z SAP.</p>
       <textarea id="sdp-text" rows="16" readonly spellcheck="false"></textarea>
       <menu>
-        <button type="button" class="ghost" id="sdp-copy">Kopiuj</button>
-        <button type="button" class="ghost" id="sdp-download">Pobierz plik .sdp</button>
+        <button type="button" class="ghost" id="sdp-copy" data-icon="copy">Kopiuj</button>
+        <button type="button" class="ghost" id="sdp-download" data-icon="download">Pobierz plik .sdp</button>
         <button value="cancel" class="primary">Zamknij</button>
       </menu>
     </form>
@@ -323,8 +330,8 @@
       <menu>
         <button type="button" class="ghost" id="send-cancel">Anuluj</button>
         <button type="button" class="primary" id="send-create">Utwórz</button>
-        <button type="button" class="ghost" id="send-copy" hidden>Kopiuj</button>
-        <button type="button" class="primary" id="send-download" hidden>Pobierz plik .sdp</button>
+        <button type="button" class="ghost" id="send-copy" data-icon="copy" hidden>Kopiuj</button>
+        <button type="button" class="primary" id="send-download" data-icon="download" hidden>Pobierz plik .sdp</button>
       </menu>
     </form>
   </dialog>
