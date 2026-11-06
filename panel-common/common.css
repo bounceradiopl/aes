@@ -47,15 +47,15 @@ body { font: 13.5px/1.5 var(--sans); -webkit-font-smoothing: antialiased; font-v
 code, .mono { font-family: var(--mono); font-size: 12px; }
 
 /* Section headers: letter-spaced small capitals, like the legends on a console. */
-h2 {
-  margin: 0; color: var(--ink); font-size: 14px; font-weight: 650; line-height: 20px;
-  font-variant-caps: all-small-caps; letter-spacing: 0.09em;
+h2 {  /* 17 px small capitals: about the cap height of 12 px text, a clear step over the 13.5 px body */
+  margin: 0; color: var(--ink); font-size: 17px; font-weight: 650; line-height: 22px;
+  font-variant-caps: all-small-caps; letter-spacing: 0.08em;
 }
 h2 small, h3 small {
   margin-left: 8px; color: var(--muted); font-weight: 400; font-size: 12.5px;
   font-variant-caps: normal; letter-spacing: 0;
 }
-h3 { margin: 0; color: var(--ink); font-size: 15px; font-weight: 600; line-height: 22px; }
+h3 { margin: 0; color: var(--ink); font-size: 18px; font-weight: 600; line-height: 24px; letter-spacing: -0.005em; }
 
 /* ---- brand ---- */
 .brand { display: flex; align-items: center; gap: 12px; user-select: none; }
@@ -93,16 +93,17 @@ h3 { margin: 0; color: var(--ink); font-size: 15px; font-weight: 600; line-heigh
 .tabs a:focus-visible { outline-offset: -2px; }
 .account { margin-left: auto; display: flex; gap: 2px; flex: none; }
 
-/* ---- bottom status strip ---- */
+/* ---- bottom dock: the save bar over the status strip ---- */
+.dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; }
+/* The strip wraps onto a second line rather than cut a value. */
 .statusbar {
-  position: fixed; left: 0; right: 0; bottom: 0; z-index: 9; display: flex; align-items: stretch;
-  height: var(--strip); padding: 0 calc(var(--gutter) - 12px); background: var(--surface);
-  border-top: 1px solid var(--line-strong); font-size: 12px; white-space: nowrap; overflow: hidden;
+  display: flex; flex-wrap: wrap; align-items: stretch; min-height: var(--strip); padding: 0 calc(var(--gutter) - 12px);
+  background: var(--surface); border-top: 1px solid var(--line-strong); font-size: 12px; white-space: nowrap;
 }
-.stat { display: inline-flex; flex: none; align-items: center; gap: 7px; padding: 0 12px; border-right: 1px solid var(--line); }
+.stat { display: inline-flex; flex: none; align-items: center; gap: 7px; height: calc(var(--strip) - 1px); padding: 0 12px; border-right: 1px solid var(--line); }
 .stat b { color: var(--muted); font-weight: 600; font-size: 12.5px; font-variant-caps: all-small-caps; letter-spacing: 0.09em; }
-.stat > span { color: var(--ink); overflow: hidden; text-overflow: ellipsis; }
-.stat.end { flex: 0 1 auto; min-width: 0; margin-left: auto; border-right: 0; border-left: 1px solid var(--line); }  /* the only cell that may shrink */
+.stat > span { color: var(--ink); }
+.stat.end { margin-left: auto; border-right: 0; border-left: 1px solid var(--line); }
 .stat .lamp { width: 7px; height: 7px; border-radius: 1px; background: var(--led-off); flex: none; }
 .stat.ok .lamp { background: var(--led-green); box-shadow: 0 0 6px rgba(140, 192, 132, 0.55); }
 .stat.warn .lamp { background: transparent; box-shadow: inset 0 0 0 1.5px var(--warn-fg); border-radius: 50%; }
@@ -260,10 +261,12 @@ dl.facts dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
   background: linear-gradient(90deg, var(--led-green) 0 85%, var(--led-amber) 85% 100%);  /* amber from -9 dBFS */
   clip-path: inset(0 calc(100% - var(--v) * 100%) 0 0); transition: clip-path 80ms linear;
 }
-.meter span::before {
-  content: ""; position: absolute; top: 0; bottom: 0; width: 4px; z-index: 1; background: var(--ink);
-  left: calc(var(--p) * 100% - 4px);
-  left: calc(round(up, var(--p) * 100%, 4px) - 4px);
+.meter span::before {  /* the held peak: one segment, moved with transform (it changes at the live rate) */
+  content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 4px; z-index: 1; background: var(--ink);
+  transform: translateX(calc(var(--p) * var(--meter-w) - 4px));
+}
+@supports (transform: translateX(round(up, 1px, 4px))) {
+  .meter span::before { transform: translateX(calc(round(up, var(--p) * var(--meter-w), 4px) - 4px)); }  /* on the segment grid */
 }
 .meter span.clip::after { background: linear-gradient(90deg, var(--led-green) 0 85%, var(--led-amber) 85% calc(100% - 4px), var(--brand) calc(100% - 4px)); }
 .meter span.clip::before { background: var(--brand); }
@@ -290,23 +293,24 @@ dl.facts dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
 .tally {
   display: inline-flex; align-items: center; flex: none; height: 18px; padding: 0 7px; border-radius: 2px;
   background: var(--tally); color: #fff; font-size: 10.5px; font-weight: 700; letter-spacing: 0.09em; line-height: 1;
-  box-shadow: 0 0 10px rgba(214, 58, 38, 0.45);
 }
 
 /* ---- save bar, toasts ---- */
 .savebar {
-  position: fixed; left: 0; right: 0; bottom: var(--strip); z-index: 10; display: flex; gap: 6px; align-items: center;
+  display: flex; gap: 6px; align-items: center;
   justify-content: flex-end; padding: 9px var(--gutter); background: var(--raised); border-top: 1px solid var(--line-strong);
 }
 .savebar span { margin-right: auto; color: var(--text); }
 .savebar span::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 10px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--warn-fg); vertical-align: 1px; }
 .toasts { position: fixed; right: var(--gutter); top: calc(var(--bar) + 12px); z-index: 20; display: grid; gap: 6px; max-width: min(420px, calc(100% - 32px)); }
 .toast {
-  padding: 9px 14px; background: var(--raised); border: 1px solid var(--line-strong); border-left: 3px solid var(--ok-fg);
+  display: flex; align-items: baseline; gap: 10px; padding: 9px 14px; background: var(--raised); border: 1px solid var(--line-strong);
   border-radius: var(--r); color: var(--ink); font-size: 12.5px;
 }
-.toast.warn { border-left-color: var(--warn-fg); }
-.toast.err { border-left-color: var(--err-fg); }
+/* the same marks as the states: a lit LED (done), a ring (warning), an outlined square (error) */
+.toast::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 1px; background: var(--led-green); transform: translateY(-1px); }
+.toast.warn::before { background: transparent; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--warn-fg); }
+.toast.err::before { background: transparent; box-shadow: inset 0 0 0 1.5px var(--err-fg); }
 
 /* ---- dialogs ---- */
 dialog {
@@ -318,13 +322,15 @@ dialog form { display: grid; gap: 14px; padding: 18px 22px 16px; }
 dialog h3 { padding-bottom: 10px; border-bottom: 1px solid var(--line); }
 dialog menu { display: flex; justify-content: flex-end; align-items: center; gap: 6px; margin: 4px 0 0; padding: 12px 0 0; border-top: 1px solid var(--line); }
 dialog menu .spacer { flex: 1; }
-p.confirm { margin: 0; padding: 10px 14px; border-left: 3px solid var(--err-fg); background: var(--err-bg); color: var(--ink); line-height: 1.5; }
+p.confirm { margin: 0; padding: 10px 14px; border: 1px solid rgba(232, 133, 122, 0.35); border-radius: var(--r); background: var(--err-bg); color: var(--ink); line-height: 1.5; }
 
 @media (max-width: 1100px) {
   :root { --gutter: 16px; }
   .topbar { gap: 20px; }
   .tabs { gap: 16px; }
   .stat { padding: 0 8px; gap: 6px; }
+  .stat b[data-short] { font-size: 0; letter-spacing: 0; }  /* a shorter label; the full one stays in the cell's title */
+  .stat b[data-short]::before { content: attr(data-short); font-size: 12.5px; letter-spacing: 0.09em; }
 }
 @media (max-width: 720px) {
   .topbar { height: auto; flex-wrap: wrap; row-gap: 0; padding-top: 8px; }
@@ -333,7 +339,7 @@ p.confirm { margin: 0; padding: 10px 14px; border-left: 3px solid var(--err-fg);
   .account button { padding: 0 6px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  * { transition: none !important; }
+  *, *::before, *::after { transition: none !important; }
 }
 
 /* ---- icons ---- */

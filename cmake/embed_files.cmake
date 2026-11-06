@@ -2,7 +2,8 @@
 include_guard(GLOBAL)
 # bam_embed_files(<dir> <output.cpp> <header> <namespace> <struct> <table> <count> [<shared dir>...])
 # Embeds every file in <dir>/ and in each <shared dir>/ (relative to the source tree) into a C++
-# source defining `const <struct> <table>[]` and `const size_t <count>` in <namespace>; all files are
+# source defining `const <struct> <table>[]` and `const size_t <count>` in <namespace>; all files but
+# hidden ones (".DS_Store") are
 # served from the root ("/<name>"), so a name may appear in only one of the directories. Re-runs
 # when a file changes.
 function(bam_embed_files dir output header ns struct table count)
@@ -12,6 +13,9 @@ function(bam_embed_files dir output header ns struct table count)
     file(GLOB _dir_files CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${_dir}/*)
     foreach(_file ${_dir_files})
       get_filename_component(_name ${_file} NAME)
+      if(_name MATCHES "^\\.")
+        continue()  # .DS_Store and other hidden files are never served
+      endif()
       if(_name IN_LIST _names)
         message(FATAL_ERROR "bam_embed_files: ${_name} is in more than one of: ${dir} ${ARGN}")
       endif()

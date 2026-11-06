@@ -63,7 +63,7 @@ Każde wyjście to strumień stereo nadawany do sieci. Co na nie trafia, ustala 
 | ptime | 1 ms (standard AES67), 1,333 ms (jak Orban) lub 4 ms (dla odbiorników z małym buforem) |
 | Utrzymuj | nadawaj ciszę, gdy aplikacja ASIO nie gra (Axia: KEEP CHANNEL ACTIVE). Wyjścia zasilane z sieci lub z Windows nadają zawsze |
 | Źródło | aktualne połączenie z zakładki Routing |
-| **Usuń** (pierwsza kolumna) | od razu, po potwierdzeniu: wyłącza wyjście, rozłącza je i wycofuje ogłoszenie SAP; nazwa i adres wracają do domyślnych |
+| **Usuń** (na końcu wiersza) | od razu, po potwierdzeniu: wyłącza wyjście, rozłącza je i wycofuje ogłoszenie SAP; nazwa i adres wracają do domyślnych |
 
 ### Subskrypcje (1–32)
 Subskrypcja to odbierany strumień stereo z sieci (Orban, Omnia, konsola, inny komputer Bounce). **Dodaj źródło…** pokazuje strumienie ogłaszane w sieci (SAP); **Wklej SDP…** przyjmuje plik SDP, np. z Orbana.
@@ -74,7 +74,7 @@ Subskrypcja to odbierany strumień stereo z sieci (Orban, Omnia, konsola, inny k
 | Nazwa | nazwa w siatce routingu (domyślnie nazwa sesji z SDP) |
 | Źródło | nazwa i adres z SDP; lampka pokazuje, czy sygnał dociera; **SDP…** zmienia źródło |
 | Opóźn. ms | opóźnienie odbioru: bufor na jitter sieci. Minimum to ptime źródła + 1 ms; panel sam podnosi zbyt małą wartość. Zacznij od 5 ms i zwiększ, jeśli rośnie licznik RxUnderrun |
-| **Usuń** (pierwsza kolumna) | od razu, po potwierdzeniu: usuwa subskrypcję i rozłącza wszystko, co zasilała (okno potwierdzenia wymienia te połączenia) |
+| **Usuń** (na końcu wiersza) | od razu, po potwierdzeniu: usuwa subskrypcję i rozłącza wszystko, co zasilała (okno potwierdzenia wymienia te połączenia) |
 
 Usuwanie i dodawanie (źródeł i wyjść) działa od razu, bez „Zapisz zmiany”; niezapisane zmiany w innych wierszach zostają. To samo okno otwiera się w zakładce **Routing** po kliknięciu nazwy subskrypcji (wiersz) albo wyjścia AoIP (kolumna): adres, połączenia, SDP i **Usuń**.
 

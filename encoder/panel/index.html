@@ -188,20 +188,21 @@
       </section>
     </main>
 
-    <div class="savebar hidden" id="savebar">
-      <span id="savebar-text">Niezapisane zmiany</span>
-      <button type="button" class="ghost" id="discard" data-icon="undo">Odrzuć</button>
-      <button type="button" class="primary" id="save">Zapisz stację</button>
-    </div>
     <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
-
-    <footer class="statusbar" aria-label="Stan usługi">
-      <span class="stat" id="pill-ptp" title="Zegar PTP"><i class="lamp"></i><b>PTP</b><span>—</span></span>
-      <span class="stat" id="pill-inputs" title="Wejścia AES67 z sygnałem"><i class="lamp"></i><b>Wejścia</b><span>—</span></span>
-      <span class="stat" id="pill-streams" title="Strumienie Icecast, które nadają"><i class="lamp"></i><b>Strumienie</b><span>—</span></span>
-      <span class="stat" id="pill-iface" title="Karta sieciowa AoIP"><b>Sieć</b><span>—</span></span>
-      <span class="stat end" id="stat-uptime" title="Czas działania usługi"><b>Czas działania</b><span>—</span></span>
-    </footer>
+    <div class="dock">
+      <div class="savebar hidden" id="savebar">
+        <span id="savebar-text">Niezapisane zmiany</span>
+        <button type="button" class="ghost" id="discard" data-icon="undo">Odrzuć</button>
+        <button type="button" class="primary" id="save">Zapisz stację</button>
+      </div>
+      <footer class="statusbar" aria-label="Stan usługi">
+        <span class="stat" id="pill-ptp" title="Zegar PTP"><i class="lamp"></i><b>PTP</b><span>—</span></span>
+        <span class="stat" id="pill-inputs" title="Wejścia AES67 z sygnałem"><i class="lamp"></i><b>Wejścia</b><span>—</span></span>
+        <span class="stat" id="pill-streams" title="Strumienie Icecast, które nadają"><i class="lamp"></i><b>Strumienie</b><span>—</span></span>
+        <span class="stat" id="pill-iface" title="Karta sieciowa AoIP"><b>Sieć</b><span>—</span></span>
+        <span class="stat end" id="stat-uptime" title="Czas działania usługi"><b data-short="Czas">Czas działania</b><span>—</span></span>
+      </footer>
+    </div>
   </div>
 
   <!-- Dialogs -->

@@ -196,7 +196,7 @@ test("new items have the defaults of the configuration", () => {
 });
 
 test("live states in Polish", () => {
-  assert.deepEqual(L.streamState({ enabled: true, codec_available: true, state: "streaming", kbps: 128.2 }, true), { kind: "on", text: "nadaje · 128,2 kb/s" });
+  assert.deepEqual(L.streamState({ enabled: true, codec_available: true, state: "streaming", kbps: 128.2 }, true), { kind: "on", text: "nadaje · 128,2 kb/s", kbps: 128.2 });
   assert.deepEqual(L.streamState({ enabled: true, codec_available: true, state: "error", error: "serwer nieosiągalny" }, true), { kind: "err", text: "serwer nieosiągalny" });
   assert.equal(L.streamState({ enabled: true, codec_available: true, state: "connecting" }, true).kind, "warn");
   assert.equal(L.streamState({ enabled: true, codec_available: false, state: "idle" }, true).text, "kodek niedostępny");

@@ -112,12 +112,13 @@ function stateBox(key) {
 }
 
 function setState(box, s, tally = false) {
-  const onAir = tally && s.kind === "on";
+  const onAir = tally && s.kind === "on" && s.kbps != null;
   const [mark, txt] = box.children;
   box.className = `state ${s.kind}`;
+  box.title = s.text;  // the whole text, also when the row cuts it short
   mark.className = onAir ? "tally" : `dot ${s.kind}`;
   mark.textContent = onAir ? "NA ANTENIE" : "";
-  txt.textContent = onAir ? s.text.replace(/^nadaje · /, "") : s.text;
+  txt.textContent = onAir ? L.fmtKbps(s.kbps) : s.text;
 }
 
 function setPill(id, text, kind, title) {
@@ -323,18 +324,21 @@ function stationCard(st, i) {
       .map((row, k) => { if (k === 0) row.prepend(el("th", { class: "legend", scope: "rowgroup", rowSpan: Math.max(1, rows.length) }, legend)); return row; }));
   const inputs = st.inputs.map((inp, j) => {
     const info = L.sdpInfo(inp.sdp);
+    const name = inp.name || info?.name || `Wejście ${j + 1}`;
+    const addr = info?.address ? `${info.address}:${info.port}` : "brak SDP";
+    const set = `gain ${L.fmtGain(inp.gain_db)} · opóźnienie ${L.fmtDelay(inp.delay_s)}`;
     return el("tr", { class: inp.enabled ? "" : "off" },
       el("td", { class: "c-num" }, L.pad2(j + 1)),
-      el("td", { class: "c-name" }, inp.name || info?.name || `Wejście ${j + 1}`),
-      el("td", { class: "c-addr" }, info?.address ? `${info.address}:${info.port}` : "brak SDP"),
-      el("td", { class: "c-set" }, `gain ${L.fmtGain(inp.gain_db)} · opóźnienie ${L.fmtDelay(inp.delay_s)}`),
+      el("td", { class: "c-name", title: name }, name),
+      el("td", { class: "c-addr", title: addr }, addr),
+      el("td", { class: "c-set", title: set }, set),
       el("td", { class: "c-meter" }, meter(`in:${st.id}:${j}`)),
       el("td", { class: "c-state" }, stateBox(`in:${st.id}:${j}`)));
   });
   const streams = st.streams.map((s, k) => el("tr", { class: s.enabled ? "" : "off" },
     el("td", { class: "c-num" }, L.pad2(k + 1)),
-    el("td", { class: "c-name" }, streamTitle(s)),
-    el("td", { class: "c-addr" }, streamTarget(s)),
+    el("td", { class: "c-name", title: streamTitle(s) }, streamTitle(s)),
+    el("td", { class: "c-addr", title: streamTarget(s) }, streamTarget(s)),
     el("td", { class: "c-set" }, `gain ${L.fmtGain(s.gain_db)}`),
     el("td", { class: "c-meter" }, meter(`str:${st.id}:${s.id}`)),
     el("td", { class: "c-state" }, stateBox(`str:${st.id}:${s.id}`))));

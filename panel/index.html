@@ -51,10 +51,10 @@
     <header class="topbar">
       <div class="brand-slot"></div>
       <nav class="tabs" role="tablist">
-        <a href="#routing" data-tab="routing">Routing</a>
-        <a href="#config" data-tab="config">Konfiguracja</a>
-        <a href="#stats" data-tab="stats">Statystyki</a>
-        <a href="#logs" data-tab="logs">Logi</a>
+        <a href="#routing" data-tab="routing" role="tab" aria-controls="tab-routing">Routing</a>
+        <a href="#config" data-tab="config" role="tab" aria-controls="tab-config">Konfiguracja</a>
+        <a href="#stats" data-tab="stats" role="tab" aria-controls="tab-stats">Statystyki</a>
+        <a href="#logs" data-tab="logs" role="tab" aria-controls="tab-logs">Logi</a>
       </nav>
       <div class="account">
         <button type="button" class="ghost" id="change-password" data-icon="key">Zmień hasło</button>
@@ -64,7 +64,7 @@
 
     <main>
       <!-- ================= Routing ================= -->
-      <section id="tab-routing" class="tab">
+      <section id="tab-routing" role="tabpanel" class="tab">
         <div class="card">
           <div class="card-head">
             <h2>Routing</h2>
@@ -83,7 +83,7 @@
       </section>
 
       <!-- ================= Konfiguracja ================= -->
-      <section id="tab-config" class="tab hidden">
+      <section id="tab-config" role="tabpanel" class="tab hidden">
         <div class="card global">
           <h2>Ustawienia globalne</h2>
           <div class="grid">
@@ -184,7 +184,7 @@
       </section>
 
       <!-- ================= Statystyki ================= -->
-      <section id="tab-stats" class="tab hidden">
+      <section id="tab-stats" role="tabpanel" class="tab hidden">
         <div class="stats-top">
           <div class="card">
             <h2>Zegar PTP</h2>
@@ -226,7 +226,7 @@
       </section>
 
       <!-- ================= Logi ================= -->
-      <section id="tab-logs" class="tab hidden">
+      <section id="tab-logs" role="tabpanel" class="tab hidden">
         <div class="card">
           <div class="card-head">
             <h2>Dziennik zdarzeń</h2>
@@ -239,22 +239,23 @@
       </section>
     </main>
 
-    <div class="savebar hidden" id="savebar">
-      <span>Niezapisane zmiany</span>
-      <button type="button" class="ghost" id="discard" data-icon="undo">Odrzuć</button>
-      <button type="button" class="primary" id="save">Zapisz zmiany</button>
-    </div>
     <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
-
-    <footer class="statusbar" aria-label="Stan usługi">
-      <span class="stat" id="pill-ptp" title="Synchronizacja zegara PTP"><i class="lamp"></i><b>PTP</b><span>—</span></span>
-      <span class="stat" id="pill-asio" title="Aplikacja ASIO"><i class="lamp"></i><b>ASIO</b><span>—</span></span>
-      <span class="stat" id="pill-win" title="Audio Windows (BounceAES Audio Bridge w sesji użytkownika)"><i class="lamp"></i><b>Windows</b><span>—</span></span>
-      <span class="stat" id="stat-outputs" title="Wyjścia AoIP, które nadają / aktywne"><b>Wyjścia</b><span>—</span></span>
-      <span class="stat" id="stat-subs" title="Subskrypcje z sygnałem / aktywne"><b>Subskrypcje</b><span>—</span></span>
-      <span class="stat" id="pill-iface" title="Karta sieciowa AoIP"><b>Sieć</b><span>—</span></span>
-      <span class="stat end" id="stat-uptime" title="Czas działania usługi"><b>Czas działania</b><span>—</span></span>
-    </footer>
+    <div class="dock">
+      <div class="savebar hidden" id="savebar">
+        <span>Niezapisane zmiany</span>
+        <button type="button" class="ghost" id="discard" data-icon="undo">Odrzuć</button>
+        <button type="button" class="primary" id="save">Zapisz zmiany</button>
+      </div>
+      <footer class="statusbar" aria-label="Stan usługi">
+        <span class="stat" id="pill-ptp" title="Synchronizacja zegara PTP"><i class="lamp"></i><b>PTP</b><span>—</span></span>
+        <span class="stat" id="pill-asio" title="Aplikacja ASIO"><i class="lamp"></i><b>ASIO</b><span>—</span></span>
+        <span class="stat" id="pill-win" title="Audio Windows (BounceAES Audio Bridge w sesji użytkownika)"><i class="lamp"></i><b>Windows</b><span>—</span></span>
+        <span class="stat" id="stat-outputs" title="Wyjścia AoIP, które nadają / aktywne"><b>Wyjścia</b><span>—</span></span>
+        <span class="stat" id="stat-subs" title="Subskrypcje z sygnałem / aktywne"><b data-short="Subskr.">Subskrypcje</b><span>—</span></span>
+        <span class="stat" id="pill-iface" title="Karta sieciowa AoIP"><b>Sieć</b><span>—</span></span>
+        <span class="stat end" id="stat-uptime" title="Czas działania usługi"><b data-short="Czas">Czas działania</b><span>—</span></span>
+      </footer>
+    </div>
   </div>
 
   <!-- Dialogs -->

@@ -177,7 +177,10 @@ function currentTab() {
 
 function showTab() {
   const valid = currentTab();
-  for (const a of $$(".tabs a")) a.classList.toggle("active", a.dataset.tab === valid);
+  for (const a of $$(".tabs a")) {
+    a.classList.toggle("active", a.dataset.tab === valid);
+    a.setAttribute("aria-selected", String(a.dataset.tab === valid));
+  }
   for (const s of $$(".tab")) s.classList.toggle("hidden", s.id !== `tab-${valid}`);
   if (valid === "logs") loadLogs();
   if (valid === "routing") startRoutingPoll(); else stopRoutingPoll();

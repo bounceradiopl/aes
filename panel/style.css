@@ -3,6 +3,8 @@
    ASIO names, the virtual-card and mix dialogs). Colours, type, controls, meters, tables and dialogs
    come from common.css, shared with Bounce Encoder. */
 
+input, select, textarea { scroll-margin-top: 96px; scroll-margin-bottom: 120px; }  /* clear of the top bar, save bar and strip */
+
 /* ---- global settings ---- */
 .global .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 18px 24px; align-items: start; max-width: 1180px; }
 .global .wide { grid-column: span 2; }
@@ -24,6 +26,7 @@ table.devices input[type=text], table.devices input[type=number], table.devices 
 }
 table.devices input[type=text]:hover, table.devices input[type=number]:hover, table.devices select:hover { border-color: var(--line-strong); background-color: var(--surface); }
 table.devices input:focus, table.devices select:focus { border-color: var(--ink); background-color: var(--surface); }
+table.devices input.invalid, table.devices select.invalid { border-color: var(--err-fg); background-color: var(--err-bg); }
 table.devices input[type=text] { min-width: 110px; color: var(--ink); }
 table.devices .addr { min-width: 120px; font-family: var(--mono); font-size: 12px; }
 table.devices .lat { width: 64px; font-family: var(--mono); font-size: 12px; }

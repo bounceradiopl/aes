@@ -240,7 +240,8 @@
   L.newStation = () => ({ name: "", enabled: true, inputs: [L.newInput()], streams: [] });
 
   // ---------------------------------------------------------------- live states (/api/live)
-  // { kind: "" | "on" | "warn" | "err", text }: the dot colour and the Polish state.
+  // { kind: "" | "on" | "warn" | "err", text }: the dot colour and the Polish state (a stream on air
+  // also carries its kbps, for the "NA ANTENIE" lamp).
   L.stationState = (st) => {
     if (!st) return { kind: "", text: "—" };
     if (!st.enabled) return { kind: "", text: "wyłączona" };
@@ -264,7 +265,7 @@
     if (!str.codec_available) return { kind: "err", text: "kodek niedostępny" };
     if (str.encoder_failed) return { kind: "err", text: `błąd kodera: ${str.encoder_error}` };
     switch (str.state) {
-      case "streaming": return { kind: "on", text: `nadaje · ${L.fmtKbps(str.kbps)}` };
+      case "streaming": return { kind: "on", text: `nadaje · ${L.fmtKbps(str.kbps)}`, kbps: str.kbps };
       case "connecting": return { kind: "warn", text: "łączenie…" };
       case "error": return { kind: "err", text: str.error || "błąd połączenia" };
       default: return { kind: "", text: "czeka" };
