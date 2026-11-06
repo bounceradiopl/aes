@@ -7,6 +7,7 @@
   <title>Bounce Encoder</title>
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="common.css">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -49,22 +50,17 @@
   <div id="app" class="hidden">
     <header class="topbar">
       <div class="brand-slot"></div>
-      <div class="pills">
-        <span class="pill" id="pill-ptp" title="Zegar PTP"><b>PTP</b><span>—</span></span>
-        <span class="pill" id="pill-inputs" title="Wejścia AES67 z sygnałem"><b>Wejścia</b><span>—</span></span>
-        <span class="pill" id="pill-streams" title="Strumienie Icecast, które nadają"><b>Strumienie</b><span>—</span></span>
-        <span class="pill plain" id="pill-iface" title="Karta sieciowa AoIP"><b>Sieć</b><span>—</span></span>
-        <button type="button" class="ghost" id="change-password">Zmień hasło</button>
-        <button type="button" class="ghost" id="logout">Wyloguj</button>
+      <nav class="tabs" role="tablist">
+        <a href="#stations" data-tab="stations" role="tab" aria-controls="tab-stations">Stacje</a>
+        <a href="#edit" data-tab="edit" role="tab" aria-controls="tab-edit">Edycja stacji</a>
+        <a href="#stats" data-tab="stats" role="tab" aria-controls="tab-stats">Statystyki</a>
+        <a href="#logs" data-tab="logs" role="tab" aria-controls="tab-logs">Logi</a>
+      </nav>
+      <div class="account">
+        <button type="button" class="ghost" id="change-password" data-icon="key">Zmień hasło</button>
+        <button type="button" class="ghost" id="logout" data-icon="logout">Wyloguj</button>
       </div>
     </header>
-
-    <nav class="tabs" role="tablist">
-      <a href="#stations" data-tab="stations" role="tab" aria-controls="tab-stations">Stacje</a>
-      <a href="#edit" data-tab="edit" role="tab" aria-controls="tab-edit">Edycja stacji</a>
-      <a href="#stats" data-tab="stats" role="tab" aria-controls="tab-stats">Statystyki</a>
-      <a href="#logs" data-tab="logs" role="tab" aria-controls="tab-logs">Logi</a>
-    </nav>
 
     <main>
       <!-- ================= Stacje ================= -->
@@ -73,8 +69,8 @@
           <div class="card-head">
             <h2>Stacje <small id="station-count"></small></h2>
             <div class="head-tools">
-              <button type="button" class="ghost" id="open-settings">Ustawienia…</button>
-              <button type="button" class="primary" id="add-station">Dodaj stację</button>
+              <button type="button" class="ghost" id="open-settings" data-icon="sliders">Ustawienia…</button>
+              <button type="button" class="primary" id="add-station" data-icon="plus">Dodaj stację</button>
             </div>
           </div>
           <div id="station-list"></div>
@@ -89,7 +85,7 @@
             <label class="toggle">Stacja
               <select id="edit-pick" aria-label="Wybierz stację do edycji"></select>
             </label>
-            <button type="button" class="mini danger" id="edit-delete">Usuń stację</button>
+            <button type="button" class="mini danger" id="edit-delete" data-icon="trash">Usuń stację</button>
           </div>
         </div>
         <ul class="form-error" id="edit-general" tabindex="-1" hidden></ul>
@@ -105,7 +101,7 @@
         <div class="card">
           <div class="card-head">
             <h2>Wejścia AES67 <small id="input-count"></small></h2>
-            <button type="button" class="ghost" id="add-input">Dodaj wejście</button>
+            <button type="button" class="ghost" id="add-input" data-icon="plus">Dodaj wejście</button>
           </div>
           <p class="hint">Wejścia stacji są sumowane. SDP źródła wklej albo wczytaj z pliku (np. z Orbana, konsoli albo BounceAES Master). Opóźnienie przesuwa wejście w czasie (0–60 s, co 0,1 s).</p>
           <p class="field-error" id="inputs-error"></p>
@@ -114,7 +110,7 @@
         <div class="card">
           <div class="card-head">
             <h2>Strumienie Icecast <small id="stream-count"></small></h2>
-            <button type="button" class="ghost" id="add-stream">Dodaj strumień</button>
+            <button type="button" class="ghost" id="add-stream" data-icon="plus">Dodaj strumień</button>
           </div>
           <p class="field-error" id="streams-error"></p>
           <div class="blocks" id="edit-streams"></div>
@@ -152,7 +148,7 @@
           <div class="table-wrap">
             <table class="stats">
               <thead>
-                <tr><th class="l">Stacja</th><th class="l">Wejście</th><th class="l">Adres</th><th>Pakiety</th><th>Bajty</th><th title="Brak pakietu, gdy był potrzebny">Niedobory</th><th title="Pakiety, które nie zmieściły się w buforze">Przepełnienia</th><th title="Pakiety zgubione lub poza kolejnością">Błędy sekw.</th><th>Jitter ms</th><th class="l">Sygnał</th></tr>
+                <tr><th class="l">Stacja</th><th class="l">Wejście</th><th class="l">Adres</th><th>Pakiety</th><th>Bajty</th><th title="Brak pakietu, gdy był potrzebny">Niedobory</th><th title="Pakiety, które nie zmieściły się w buforze">Przepełnienia</th><th title="Pakiety zgubione lub poza kolejnością">Błędy sekw.</th><th>Jitter <span class="unit">ms</span></th><th class="l">Sygnał</th></tr>
               </thead>
               <tbody id="stats-input-rows"></tbody>
             </table>
@@ -165,7 +161,7 @@
               <thead>
                 <tr>
                   <th class="l">Stacja</th><th class="l">Strumień</th><th class="l">Serwer</th><th class="l">Stan</th>
-                  <th>Wysłano</th><th>kb/s</th><th title="Ponowne połączenia z serwerem">Ponowienia</th>
+                  <th>Wysłano</th><th><span class="unit">kb/s</span></th><th title="Ponowne połączenia z serwerem">Ponowienia</th>
                   <th title="Dane odrzucone, gdy serwer nie nadążał (kolejka 5 s)">Odrzucone</th>
                   <th title="Ramki audio odrzucone w kolejce kodera">Ramki: kolejka</th>
                   <th title="Ramki audio odrzucone przez resampler (błąd lub brak miejsca przy przeliczaniu częstotliwości)">Ramki: resampler</th>
@@ -183,7 +179,7 @@
         <div class="card">
           <div class="card-head">
             <h2>Dziennik zdarzeń</h2>
-            <button type="button" class="ghost" id="refresh-logs">Odśwież</button>
+            <button type="button" class="ghost" id="refresh-logs" data-icon="refresh">Odśwież</button>
           </div>
           <div class="table-wrap">
             <table class="logs"><tbody id="log-rows"></tbody></table>
@@ -194,10 +190,18 @@
 
     <div class="savebar hidden" id="savebar">
       <span id="savebar-text">Niezapisane zmiany</span>
-      <button type="button" class="ghost" id="discard">Odrzuć</button>
+      <button type="button" class="ghost" id="discard" data-icon="undo">Odrzuć</button>
       <button type="button" class="primary" id="save">Zapisz stację</button>
     </div>
     <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+
+    <footer class="statusbar" aria-label="Stan usługi">
+      <span class="stat" id="pill-ptp" title="Zegar PTP"><i class="lamp"></i><b>PTP</b><span>—</span></span>
+      <span class="stat" id="pill-inputs" title="Wejścia AES67 z sygnałem"><i class="lamp"></i><b>Wejścia</b><span>—</span></span>
+      <span class="stat" id="pill-streams" title="Strumienie Icecast, które nadają"><i class="lamp"></i><b>Strumienie</b><span>—</span></span>
+      <span class="stat" id="pill-iface" title="Karta sieciowa AoIP"><b>Sieć</b><span>—</span></span>
+      <span class="stat end" id="stat-uptime" title="Czas działania usługi"><b>Czas działania</b><span>—</span></span>
+    </footer>
   </div>
 
   <!-- Dialogs -->
