@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <windows.h>
 
-1 ICON "../tray/bounce.ico"
+1 ICON "../encoder_tray/encoder.ico"
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION 1,0,2,0

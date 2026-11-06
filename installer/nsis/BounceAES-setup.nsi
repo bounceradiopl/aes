@@ -235,6 +235,9 @@ Section "BounceAES Master" SecMain
     MessageBox MB_OK|MB_ICONEXCLAMATION "$(PtpWarn)"
   ${EndIf}
 
+  ; new icons: let Explorer drop its cached copies (shortcuts, Apps list)
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
+
   nsExec::ExecToLog 'sc.exe start ${SERVICE}'
   Pop $0
 SectionEnd

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <windows.h>
 
-1 ICON "../tray/bounce.ico"
-2 ICON "../tray/status-ok.ico"
-3 ICON "../tray/status-warn.ico"
-4 ICON "../tray/status-down.ico"
+1 ICON "encoder.ico"
+2 ICON "status-ok.ico"
+3 ICON "status-warn.ico"
+4 ICON "status-down.ico"
 #ifdef __GNUC__
 // MinGW: embed the manifest here. MSVC gets it through the linker (encoder_tray.manifest listed as a source).
 1 24 "encoder_tray.manifest"
