@@ -11,8 +11,9 @@
 //   gain 0.5, latency 512 (frames; both copied into an instance when it is created),
 //   version 11070, license_valid 1, create_fails 0, create_throws 0 (a C++ exception whose text
 //   holds the key), process_throws 0 (a C++ exception), process_crashes 0 (Windows: an access
-//   violation, a structured exception), process_sleep_us 0, save_fails 0, sts_rejects -1 (the
-//   .sts index SetStsValue refuses).
+//   violation, a structured exception), process_sleep_us 0, create_sleep_us 0 (inside Create3),
+//   version_crashes 0 / bind_crashes 0 (Windows: an access violation in GetSoftwareVersion /
+//   global_setBindIp), save_fails 0, sts_rejects -1 (the .sts index SetStsValue refuses).
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -68,6 +69,7 @@ struct State {
     options = {{"gain", 0.5},          {"latency", 512},      {"version", 11070},
                {"license_valid", 1},   {"create_fails", 0},   {"create_throws", 0},
                {"process_throws", 0},  {"process_crashes", 0}, {"process_sleep_us", 0},
+               {"create_sleep_us", 0}, {"version_crashes", 0}, {"bind_crashes", 0},
                {"save_fails", 0},      {"sts_rejects", -1}};
     values.clear();
     texts.clear();
@@ -95,7 +97,8 @@ State& state() {
   throw std::runtime_error("fake Create3 failure, key " + key);
 }
 
-void crash_process() {
+// Raised with no lock held (see stereoTool_Process).
+void crash() {
 #ifdef _WIN32
   RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
 #endif
@@ -109,23 +112,37 @@ const char* kUnlicensed = "Fake: Declipper, Fake: Multiband";
 
 FAKE_ST_EXPORT void stereoTool_global_setBindIp(const char* web, const char* uecp) {
   auto& s = state();
-  std::lock_guard<std::mutex> lock(s.mutex);
-  ++s.values["bind_calls"];
-  s.values["bind_create_calls"] = s.values["create_calls"];  // Create3 calls (since reset) before it
-  s.text("bind_web", web);
-  s.text("bind_uecp", uecp);
+  bool crashes = false;
+  {
+    std::lock_guard<std::mutex> lock(s.mutex);
+    ++s.values["bind_calls"];
+    s.values["bind_create_calls"] = s.values["create_calls"];  // Create3 calls (since reset) before it
+    s.text("bind_web", web);
+    s.text("bind_uecp", uecp);
+    crashes = s.opt("bind_crashes") != 0;
+  }
+  if (crashes) crash();
 }
 
 FAKE_ST_EXPORT int stereoTool_GetSoftwareVersion() {
   auto& s = state();
-  std::lock_guard<std::mutex> lock(s.mutex);
-  return int(s.opt("version"));
+  int version = 0;
+  bool crashes = false;
+  {
+    std::lock_guard<std::mutex> lock(s.mutex);
+    ++s.values["version_calls"];
+    version = int(s.opt("version"));
+    crashes = s.opt("version_crashes") != 0;
+  }
+  if (crashes) crash();
+  return version;
 }
 
 FAKE_ST_EXPORT gStereoTool* stereoTool_Create3(const bool has_gui, const char* key, const char* st_name,
                                                const char* home_path, bool load_ini) {
   auto& s = state();
   bool throws = false;
+  long long sleep_us = 0;
   {
     std::lock_guard<std::mutex> lock(s.mutex);
     ++s.values["create_calls"];
@@ -135,7 +152,9 @@ FAKE_ST_EXPORT gStereoTool* stereoTool_Create3(const bool has_gui, const char* k
     s.text("create_name", st_name);
     s.text("create_home", home_path);
     throws = s.opt("create_throws") != 0;
+    sleep_us = (long long)s.opt("create_sleep_us");
   }
+  if (sleep_us > 0) std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
   if (throws) fail_create(key ? key : "");  // no lock held (see stereoTool_Process)
   std::lock_guard<std::mutex> lock(s.mutex);
   if (s.opt("create_fails") != 0) return nullptr;
@@ -181,7 +200,7 @@ FAKE_ST_EXPORT void stereoTool_Process(gStereoTool* st, float* samples, int32_t 
   }
   // thrown with no lock held: MSVC (/EHsc) need not unwind an extern "C" function's locals
   if (throws) fail_process();
-  if (crashes) crash_process();
+  if (crashes) crash();
   if (sleep_us > 0) std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
   if (channels != st->channels) {
     st->channels = channels;

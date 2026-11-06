@@ -7,11 +7,13 @@
 #ifdef BAM_FAKE_STEREOTOOL_PATH
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "../encoder/src/stereotool_api.hpp"  // the parameter indices the binding uses (11.07)
@@ -419,6 +421,50 @@ TEST_CASE("stereotool: after an abandoned instance no further instance is create
   auto st = make("station-after-restart");
 }
 
+TEST_CASE("stereotool: a create waiting for another one re-checks the abandoned cap before Create3") {
+  UseFake use;
+  fake().set("create_sleep_us", 300000);  // the first Create3 holds the API mutex for 0.3 s
+  std::unique_ptr<be::StereoToolInstance> a, b;
+  std::string err_a, err_b;
+  std::thread first([&] { a = be::StereoToolInstance::create("", "station-race-a", "", &err_a); });
+  for (int i = 0; i < 400 && fake().value("create_calls") < 1; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  REQUIRE(fake().value("create_calls") == 1);
+  // the second create passes the early check (nothing abandoned yet) and waits for the mutex
+  std::thread second([&] { b = be::StereoToolInstance::create("", "station-race-b", "", &err_b); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  be::testing::set_stereotool_abandoned(1);  // meanwhile another station's instance crashed
+  first.join();
+  second.join();
+  CHECK_MESSAGE(a, err_a);  // already inside Create3 when the crash happened
+  CHECK(b == nullptr);
+  CHECK_MESSAGE(err_b.find("Stereo Tool uległ awarii") != std::string::npos, err_b);
+  CHECK(fake().value("create_calls") == 1);  // the waiting create never reached the library
+  a.reset();
+}
+
+#ifdef _MSC_VER
+TEST_CASE("stereotool: a crash while loading the library counts as an abandoned instance") {
+  for (const char* option : {"version_crashes", "bind_crashes"}) {
+    CAPTURE(option);
+    UseFake use;
+    fake().set(option, 1);
+    auto info = be::stereotool_info();
+    CHECK_FALSE(info.available);
+    CHECK_MESSAGE(info.error.find("wyjątek systemowy 0xC0000005") != std::string::npos, info.error);
+    CHECK(info.abandoned == 1);
+    // no reload into a library that just crashed
+    fake().set(option, 0);
+    const long long versions = fake().value("version_calls");
+    info = be::stereotool_reload();
+    CHECK_FALSE(info.available);
+    CHECK(fake().value("version_calls") == versions);
+    std::string err;
+    CHECK(be::StereoToolInstance::create("", "station-load-crash", "", &err) == nullptr);
+    CHECK(fake().value("create_calls") == 0);
+  }
+}
+#endif
+
 TEST_CASE("stereotool: only version 11.07 is used (the parameter indices are those of 11.07)") {
   UseFake use;
   fake().set("version", 11080);
@@ -433,7 +479,8 @@ TEST_CASE("stereotool: only version 11.07 is used (the parameter indices are tho
   CHECK(fake().value("create_calls") == 0);
   CHECK(fake().value("bind_calls") == 0);  // nothing but the version asked of a wrong library
 
-  // a failed load stays cached, until a reload (e.g. "restart processing" after replacing the DLL)
+  // a failed load stays cached until a reload; here the same (fake) file answers 11070 now. A real
+  // DLL of another version stays loaded in the process, so it needs a service restart instead
   fake().set("version", 11070);
   CHECK_FALSE(be::stereotool_info().available);
   info = be::stereotool_reload();

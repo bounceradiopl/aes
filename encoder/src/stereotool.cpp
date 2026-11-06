@@ -193,7 +193,11 @@ ApiPtr load(const std::vector<std::string>& dirs, std::vector<ApiPtr>& kept, Ste
   // the parameter indices (stereotool_api.hpp) are those of 11.07: another version is not used
   std::string reason;
   auto version = [&] { api->version = api->get_software_version(); };
-  if (guarded("stereoTool_GetSoftwareVersion", version, &reason) != Outcome::Ok) {
+  Outcome outcome = guarded("stereoTool_GetSoftwareVersion", version, &reason);
+  if (outcome != Outcome::Ok) {
+    // a crash leaves the library's state unknown: as for an abandoned instance, nothing more is
+    // created in it and it is not loaded again (stereotool_reload) until the service restarts
+    if (outcome == Outcome::Crash) ++g_abandoned;
     info.error = reason;
     return nullptr;
   }
@@ -206,7 +210,9 @@ ApiPtr load(const std::vector<std::string>& dirs, std::vector<ApiPtr>& kept, Ste
   // before any instance exists: the web interface and UECP servers listen on 127.0.0.1 only; a
   // library that cannot be told so is not used
   auto bind = [&] { api->set_bind_ip(kBindIp, kBindIp); };
-  if (guarded("stereoTool_global_setBindIp", bind, &reason) != Outcome::Ok) {
+  outcome = guarded("stereoTool_global_setBindIp", bind, &reason);
+  if (outcome != Outcome::Ok) {
+    if (outcome == Outcome::Crash) ++g_abandoned;  // see GetSoftwareVersion above
     info.error = reason;
     return nullptr;
   }
@@ -215,9 +221,10 @@ ApiPtr load(const std::vector<std::string>& dirs, std::vector<ApiPtr>& kept, Ste
   return api;
 }
 
-// Loaded once per search-dir setting (stereotool_reload() retries a failed load). A library once
-// opened is never unloaded (Stereo Tool may keep threads of its own running after its last
-// instance): `kept` is never destroyed.
+// Loaded once per search-dir setting (stereotool_reload() retries a load that failed, which helps
+// only when the library was missing or could not be opened). A library once opened is never
+// unloaded (Stereo Tool may keep threads of its own running after its last instance): `kept` is
+// never destroyed.
 struct Cache {
   std::mutex mutex;
   bool dirs_set = false;
@@ -275,7 +282,8 @@ StereoToolInfo stereotool_info() {
 StereoToolInfo stereotool_reload() {
   auto& c = cache();
   std::lock_guard<std::mutex> lock(c.mutex);
-  // a loaded library is kept; after an abandoned instance nothing is loaded again
+  // a loaded library is kept; after an abandoned instance (or a crash while loading) nothing is
+  // loaded again
   if (!c.api && g_abandoned.load() == 0) c.tried = false;
   c.ensure_loaded();
   return c.current();
@@ -330,8 +338,9 @@ std::unique_ptr<StereoToolInstance> StereoToolInstance::create(const std::string
     if (error) *error = info.error;
     return nullptr;
   }
+  const char* const crashed = "Stereo Tool uległ awarii — uruchom ponownie usługę Bounce Encoder (do tego czasu bez processingu)";
   if (g_abandoned.load() >= kStereoToolMaxAbandoned) {
-    if (error) *error = "Stereo Tool uległ awarii — uruchom ponownie usługę Bounce Encoder (do tego czasu bez processingu)";
+    if (error) *error = crashed;
     return nullptr;
   }
   gStereoTool* st = nullptr;
@@ -344,6 +353,12 @@ std::unique_ptr<StereoToolInstance> StereoToolInstance::create(const std::string
   Outcome outcome;
   {
     std::lock_guard<std::mutex> lock(g_api_mutex);
+    // checked again here: while this thread waited for the mutex, a call of another instance
+    // may have crashed (it counts g_abandoned without the mutex, Process for one)
+    if (g_abandoned.load() >= kStereoToolMaxAbandoned) {
+      if (error) *error = crashed;
+      return nullptr;
+    }
     outcome = guarded("stereoTool_Create3", create3, &reason);
   }
   if (outcome != Outcome::Ok) {

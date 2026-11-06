@@ -22,7 +22,7 @@ struct StereoToolApi;  // stereotool.cpp
 inline constexpr int32_t kStereoToolRate = 48000;
 inline constexpr int32_t kStereoToolChannels = 2;
 inline constexpr int kStereoToolVersion = 11070;     // the only version used (parameter indices of 11.07)
-inline constexpr int kStereoToolMaxAbandoned = 1;    // see StereoToolInstance
+inline constexpr int kStereoToolMaxAbandoned = 1;    // abandoned instances before create() refuses (StereoToolInstance)
 
 struct StereoToolInfo {
   bool available = false;
@@ -49,8 +49,11 @@ void set_stereotool_library_dirs(std::vector<std::string> dirs);
 // The full paths searched for the current dir setting (absolute dirs only, never a bare name).
 std::vector<std::string> stereotool_library_candidates();
 
-// Tries again to load a library that failed to load (e.g. "restart processing" after the DLL
-// was replaced); a library that is loaded, or one holding an abandoned instance, is kept.
+// Tries again to load a library that could not be loaded because it was missing or could not be
+// opened (e.g. "restart processing" after the DLL was put in place). A library of another version
+// stays loaded in the process (a library is never unloaded), so replacing a wrong-version DLL
+// needs a service restart. A library that is loaded, holds an abandoned instance or crashed while
+// loading is kept as it is.
 StereoToolInfo stereotool_reload();
 
 namespace testing {
@@ -70,8 +73,9 @@ void set_stereotool_abandoned(int count);
 // - a structured exception (an access violation, a stack overflow, ...; caught by MSVC builds
 //   only): its state is unknown, so it is abandoned, never deleted. Its memory stays taken and so
 //   does its web interface port (that station's web interface stays off until the service
-//   restarts). At most kStereoToolMaxAbandoned instance is abandoned per process: after that
-//   create() refuses ("uruchom ponownie usługę Bounce Encoder") and processing stays bypassed.
+//   restarts). After the first abandoned instance no new instance is created: create() refuses
+//   ("uruchom ponownie usługę Bounce Encoder"; a create already waiting for the API mutex too)
+//   and processing stays bypassed. A crash while the library is loaded counts the same way.
 // MinGW builds (development only; releases are built with MSVC) catch no structured exception,
 // nor a C++ exception of the MSVC-built real DLL: a crash there ends the process.
 class StereoToolInstance {
