@@ -937,6 +937,12 @@ void set_login_verified_hook(std::function<void()> hook) {
 }  // namespace testing
 
 bool write_panel_file(const std::string& path, const std::string& bind, int port, std::string* error) {
+  // the public folder (paths.hpp): created by the installer with its ACL, here only when missing
+  const auto sep = path.find_last_of("/\\");
+  if (sep != std::string::npos && sep > 0 && !platform::ensure_directory(path.substr(0, sep))) {
+    if (error) *error = "nie można utworzyć folderu " + path.substr(0, sep);
+    return false;
+  }
   const std::string tmp = path + ".tmp";
   {
     std::ofstream out(tmp, std::ios::binary | std::ios::trunc);

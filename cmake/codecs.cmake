@@ -109,3 +109,21 @@ bam_add_codec_subprojects()
 # EXCLUDE_FROM_ALL, so nothing else of the subprojects is built).
 add_custom_target(bam_codec_libs ALL)
 add_dependencies(bam_codec_libs mp3lame fdk-aac)
+
+# Licence texts of the code that ships in Bounce Encoder binaries (LGPL for LAME, the FDK AAC
+# licence, the BSD notices), next to the codec libraries in encoder-licenses/ for the installer
+# and the CI artifact. $<TARGET_FILE_DIR> also covers the per-configuration folder of MSVC.
+set(BAM_ENCODER_LICENSES
+  "${bam_lame_SOURCE_DIR}/COPYING|LAME-COPYING.txt"
+  "${bam_fdkaac_SOURCE_DIR}/NOTICE|fdk-aac-NOTICE.txt"
+  "${bam_ogg_SOURCE_DIR}/COPYING|libogg-COPYING.txt"
+  "${bam_flac_SOURCE_DIR}/COPYING.Xiph|flac-COPYING.Xiph.txt"
+  "${PROJECT_SOURCE_DIR}/third_party/libsamplerate/COPYING|libsamplerate-COPYING.txt")
+set(_bam_license_commands COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:mp3lame>/encoder-licenses")
+foreach(entry IN LISTS BAM_ENCODER_LICENSES)
+  string(REPLACE "|" ";" entry "${entry}")
+  list(GET entry 0 _src)
+  list(GET entry 1 _dst)
+  list(APPEND _bam_license_commands COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_src}" "$<TARGET_FILE_DIR:mp3lame>/encoder-licenses/${_dst}")
+endforeach()
+add_custom_command(TARGET bam_codec_libs POST_BUILD ${_bam_license_commands} VERBATIM)

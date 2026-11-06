@@ -64,8 +64,9 @@ class EncoderHttpServer {
 EncoderConfig load_startup_config(const std::string& path);
 
 // The panel address for the tray, which may not read config.json (administrators and the service
-// only): writes {"bind": "<address>", "port": <n>} to `path` (panel.json next to config.json)
-// atomically (a temporary file, then a rename over it). Nothing secret is in it.
+// only): writes {"bind": "<address>", "port": <n>} to `path` (panel_file_path() in paths.hpp:
+// public\panel.json next to config.json) atomically (a temporary file, then a rename over it).
+// The parent folder is created when missing (one level). Nothing secret is in it.
 bool write_panel_file(const std::string& path, const std::string& bind, int port, std::string* error);
 
 namespace testing {

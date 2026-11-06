@@ -51,6 +51,17 @@ Instrukcja: [docs/INSTALL.md](docs/INSTALL.md). W skrócie:
 5. W zakładce **Routing** połącz źródła z celami.
 6. W mAirList wybierz sterownik ASIO **BounceAES Master**.
 
+## Bounce Encoder
+
+Osobny program z tego samego repozytorium (wspólny rdzeń AES67/PTP): **enkoder AES67 → Icecast** dla Windows 10/11 x64. BounceAES Master działa bez zmian obok niego.
+
+- Do **16 stacji**, każda z do **3 wejściami AES67** (SDP wklejony albo z pliku; gain −60…+12 dB; opóźnienie 0–60 s co 0,1 s), sumowanymi w sygnał stacji.
+- Do **8 strumieni Icecast** na stację: **MP3** (LAME), **AAC-LC**, **HE-AAC**, **HE-AACv2** (Fraunhofer FDK AAC), **FLAC** (Ogg); 48 / 44,1 / 32 / 24 / 22,05 kHz; każdy z własnym serwerem, mountpointem, gainem i ponawianiem połączenia.
+- Panel WWW z logowaniem (port **8070**): stacje z miernikami, edycja, odpowiedniki bitrate'ów AAC ↔ MP3, statystyki, logi. Usługa Windows `BounceEncoder`, ikona w zasobniku, instalator `BounceEncoder-setup.exe`.
+- Bez processingu, RDS i metadanych; PTP tylko jako slave.
+
+Instrukcja: [docs/ENCODER-INSTALL.md](docs/ENCODER-INSTALL.md), testy i odbiór: [docs/ENCODER-TESTING.md](docs/ENCODER-TESTING.md), specyfikacja: [docs/superpowers/specs/2026-11-05-bounce-encoder-design.md](docs/superpowers/specs/2026-11-05-bounce-encoder-design.md). Licencja fdk-aac nie jest zgodna z GPL, a AAC jest objęty patentami: instalator z kodekiem AAC jest do użytku wewnętrznego ([LICENSING.md](LICENSING.md)).
+
 ## Budowanie
 
 Wymagania: CMake ≥ 3.24, kompilator C++20 (MSVC 2022, GCC 12+, Clang 15+).
@@ -62,6 +73,7 @@ ctest --test-dir build --output-on-failure
 ```
 
 - **Windows (MSVC):** `cmake -S . -B build -A x64 && cmake --build build --config Release` (Visual Studio 2022 lub nowsze). Instalator buduje NSIS, z katalogu `installer/nsis`: `makensis -DPAYLOAD=<bezwzględna ścieżka do plików .exe/.dll> BounceAES-setup.nsi` (działa też na macOS/Linuksie, `brew install makensis`; bez `-DPAYLOAD` bierze `build-win`).
+- **Bounce Encoder:** buildy 64-bitowe pobierają i budują kodeki (LAME, fdk-aac, libogg, libFLAC; `BAM_WITH_CODECS`, `cmake/codecs.cmake`) i tworzą `BounceEncoder` oraz `BounceEncoderTray` (Windows). Instalator: `makensis -DPAYLOAD=<folder z BounceEncoder.exe> BounceEncoder-setup.nsi` w `installer/nsis`.
 - **Kompilacja skrośna z macOS/Linuksa:** `cmake -S . -B build-win -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake -DCMAKE_BUILD_TYPE=Release`.
 - **macOS/Linux:** usługę można uruchomić do testów: `build/BounceAESService --console --config moja.json`. Sterownik ASIO i aplikacja w zasobniku powstają tylko na Windows.
 
@@ -81,6 +93,8 @@ Panel pokazuje logotyp Bounce ([panel/logo.svg](panel/logo.svg), biała wersja) 
 | `tray/` | aplikacja w zasobniku |
 | `bridge/` | BounceAES Audio Bridge: WASAPI, przechwytywanie procesów, resampling |
 | `panel/` | panel WWW (HTML/CSS/JS) |
+| `encoder/` | Bounce Encoder: kodeki, bufor opóźnienia, miks stacji, klient Icecast, silnik, API i panel WWW (`encoder/panel/`) |
+| `encoder_service/`, `encoder_tray/` | Bounce Encoder: usługa Windows / `--console` i ikona w zasobniku |
 | `tools/` | `bounceaes-test` (test pętli), `ptp-sim` (testowy master PTP) |
 | `installer/` | instalator NSIS (`nsis/`), skrypty PowerShell |
 | `tests/` | testy jednostkowe i integracyjne (doctest) |
@@ -88,5 +102,7 @@ Panel pokazuje logotyp Bounce ([panel/logo.svg](panel/logo.svg), biała wersja) 
 ## Licencja
 
 GPL-3.0-or-later. ASIO SDK firmy Steinberg jest wykorzystywane na licencji GPLv3 (podwójna licencja SDK 2.3.4). ASIO jest znakiem towarowym Steinberg Media Technologies GmbH. Projekt nie zawiera kodu ani plików binarnych Telos/Axia.
+
+Bounce Encoder dodaje kodeki pobierane przy budowaniu: LAME 3.100 (LGPL), Fraunhofer FDK AAC 2.0.3 (licencja Fraunhofera, niezgodna z GPL), libogg 1.3.5 i libFLAC 1.4.3 (BSD-3-Clause); szczegóły w [LICENSING.md](LICENSING.md).
 
 Zależności: [doctest](https://github.com/doctest/doctest) (MIT), [nlohmann/json](https://github.com/nlohmann/json) (MIT), [cpp-httplib](https://github.com/yhirose/cpp-httplib) (MIT), [libsamplerate](https://github.com/libsndfile/libsamplerate) 0.2.2 (BSD-2-Clause). VB-CABLE (VB-Audio, donationware) nie jest częścią projektu; instaluje się go osobno, jeśli jest potrzebny.

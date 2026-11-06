@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <nlohmann/json.hpp>
@@ -21,6 +22,7 @@
 #include "bam/auth.hpp"
 #include "bam/encoder/engine.hpp"
 #include "bam/encoder/http_server.hpp"
+#include "bam/encoder/paths.hpp"
 #include "bam/platform/process.hpp"
 #include "bam/platform/tcp.hpp"
 #include "bam/platform/time.hpp"
@@ -988,6 +990,34 @@ TEST_CASE("encoder service: the panel address file for the tray") {
   CHECK(j["port"] == 8071);
   CHECK_FALSE(exists(path + ".tmp"));
   std::remove(path.c_str());
+}
+
+TEST_CASE("encoder service: panel.json lives in the public folder next to the configuration") {
+  // the installer gives Users inheritable read access to public\ only (config.json stays private)
+  CHECK(be::panel_file_path("C:\\ProgramData\\Bounce Encoder\\config.json") ==
+        "C:\\ProgramData\\Bounce Encoder\\public\\panel.json");
+  CHECK(be::panel_public_dir("C:\\ProgramData\\Bounce Encoder\\config.json") == "C:\\ProgramData\\Bounce Encoder\\public");
+  CHECK(be::panel_file_path("/var/lib/enc/config.json") == "/var/lib/enc/public/panel.json");
+  CHECK(be::panel_file_path("bounce-encoder-config.json") == "./public/panel.json");
+  CHECK(be::panel_file_path("D:/test/moja.json") == "D:/test/public/panel.json");
+  // the tray builds the same path from these names (%ProgramData% + data dir + public + file)
+  CHECK(std::string(be::kEncoderDataDirName) == "Bounce Encoder");
+  CHECK(std::string(be::kPanelPublicDirName) + "/" + be::kPanelFileName == "public/panel.json");
+
+  // write_panel_file creates the missing public folder and replaces the file in it
+  const std::string dir = "bam_enc_pubtest_" + std::to_string(bp::current_pid());
+  REQUIRE(bp::ensure_directory(dir));
+  const std::string config_path = dir + "/config.json";
+  const std::string path = be::panel_file_path(config_path);
+  std::string err;
+  REQUIRE_MESSAGE(be::write_panel_file(path, "10.0.0.5", 8070, &err), err);
+  REQUIRE_MESSAGE(be::write_panel_file(path, "10.0.0.6", 8071, &err), err);
+  const json j = json::parse(read_file(path));
+  CHECK(j == json({{"bind", "10.0.0.6"}, {"port", 8071}}));
+  CHECK_FALSE(exists(path + ".tmp"));
+  CHECK_FALSE(exists(dir + "/panel.json"));  // never next to config.json itself
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
 }
 
 TEST_CASE("encoder HTTP: a request hidden in a refused request's body is never executed") {

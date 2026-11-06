@@ -16,6 +16,7 @@
 #include <string>
 
 #include "bam/encoder/config.hpp"
+#include "bam/encoder/paths.hpp"
 
 namespace {
 
@@ -42,10 +43,10 @@ std::wstring program_data() {
   return (n > 0 && n < MAX_PATH) ? std::wstring(buf) : std::wstring(L"C:\\ProgramData");
 }
 
-// Where the panel listens: the service writes %ProgramData%\Bounce Encoder\panel.json at start
-// ({"bind": "...", "port": n}; config.json itself is for administrators and the service only).
-// A specific bind address is used as it is; 0.0.0.0, a missing file or anything unexpected means
-// 127.0.0.1:8070.
+// Where the panel listens: the service writes %ProgramData%\Bounce Encoder\public\panel.json at
+// start ({"bind": "...", "port": n}; config.json itself is for administrators and the service only,
+// see bam/encoder/paths.hpp). A specific bind address is used as it is; 0.0.0.0, a missing or
+// unreadable file or anything unexpected means 127.0.0.1:8070.
 struct PanelAddress {
   std::wstring host = L"127.0.0.1";
   uint16_t port = bam::encoder::kDefaultEncoderHttpPort;
@@ -53,7 +54,9 @@ struct PanelAddress {
 
 PanelAddress panel_address() {
   PanelAddress a;
-  std::ifstream f(std::filesystem::path(program_data() + L"\\Bounce Encoder\\panel.json"), std::ios::binary);
+  std::ifstream f(std::filesystem::path(program_data()) / bam::encoder::kEncoderDataDirName / bam::encoder::kPanelPublicDirName /
+                      bam::encoder::kPanelFileName,
+                  std::ios::binary);
   if (!f) return a;
   try {
     std::stringstream ss;

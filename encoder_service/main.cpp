@@ -13,6 +13,7 @@
 
 #include "bam/encoder/engine.hpp"
 #include "bam/encoder/http_server.hpp"
+#include "bam/encoder/paths.hpp"
 #include "bam/encoder/version.hpp"
 #include "bam/log.hpp"
 #include "bam/platform/process.hpp"
@@ -100,8 +101,9 @@ int run(const std::string& config_path, std::atomic<bool>& stop) {
     bam::log_error("Nie można uruchomić usługi: " + err);
     return 1;
   }
-  // the tray reads the panel address from here: config.json is for administrators and the service only
-  if (!be::write_panel_file(dir_of(config_path) + kSep + "panel.json", cfg.http_bind, cfg.http_port, &err))
+  // the tray reads the panel address from public\panel.json: config.json is for administrators and
+  // the service only (paths.hpp)
+  if (!be::write_panel_file(be::panel_file_path(config_path), cfg.http_bind, cfg.http_port, &err))
     bam::log_warning("Nie można zapisać adresu panelu dla ikony w zasobniku: " + err);
   be::EncoderHttpServer http(engine, config_path);
   if (!http.start(cfg.http_bind, static_cast<uint16_t>(cfg.http_port), &err))
