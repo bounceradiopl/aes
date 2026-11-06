@@ -8,9 +8,12 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <nlohmann/json.hpp>
+#include <regex>
+#include <set>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -325,6 +328,61 @@ TEST_CASE("encoder HTTP: login, sessions and 401 without a session") {
   CHECK(index->get_header_value("Content-Type").find("text/html") == 0);
   CHECK(index->body.find("Bounce Encoder") != std::string::npos);
   CHECK(f.client->Get("/brak.js")->status == 404);
+}
+
+// The panel (task 9) is a set of embedded files: each is served with its type and the panel CSP,
+// everything index.html loads is embedded, and nothing in it runs inline (the CSP forbids that).
+TEST_CASE("encoder HTTP: the embedded panel files") {
+  Fixture f;
+  auto expected_type = [](const std::string& path) -> std::string {
+    const std::string ext = path.substr(path.rfind('.'));
+    if (ext == ".html") return "text/html; charset=utf-8";
+    if (ext == ".js") return "text/javascript; charset=utf-8";
+    if (ext == ".css") return "text/css; charset=utf-8";
+    if (ext == ".svg") return "image/svg+xml";
+    if (ext == ".png") return "image/png";
+    return "";
+  };
+  std::set<std::string> embedded;
+  for (size_t i = 0; i < be::kEncoderPanelAssetCount; ++i) {
+    const be::EncoderPanelAsset& a = be::kEncoderPanelAssets[i];
+    CAPTURE(a.path);
+    embedded.insert(a.path);
+    CHECK(std::string(a.mime) == expected_type(a.path));  // no file of an unknown type in encoder/panel/
+    auto r = f.client->Get(a.path);
+    REQUIRE(r);
+    CHECK(r->status == 200);
+    CHECK(r->get_header_value("Content-Type") == a.mime);
+    CHECK(r->get_header_value("X-Content-Type-Options") == "nosniff");
+    CHECK(r->get_header_value("Content-Security-Policy").find("default-src 'self'") == 0);
+    CHECK(r->body.size() == a.size);
+    CHECK(std::memcmp(r->body.data(), a.data, a.size) == 0);
+  }
+  for (const char* need : {"/index.html", "/app.js", "/logic.js", "/style.css", "/logo.svg", "/favicon.png", "/apple-touch-icon.png"})
+    CHECK_MESSAGE(embedded.count(need) == 1, need);
+
+  // the logo the login screen and the top bar show
+  CHECK(json::parse(f.client->Get("/api/auth-state")->body)["logo"] == "logo.svg");
+
+  // every file index.html refers to is embedded; scripts only from files, the helpers first
+  auto index = f.client->Get("/");
+  REQUIRE(index);
+  const std::string html = index->body;
+  CHECK(html.find("<title>Bounce Encoder</title>") != std::string::npos);
+  CHECK(html.find("Encoder</span>") != std::string::npos);  // the brand caption
+  const std::regex ref(R"re((?:src|href)="([^"#:]+)")re");
+  int refs = 0;
+  for (auto it = std::sregex_iterator(html.begin(), html.end(), ref); it != std::sregex_iterator(); ++it, ++refs)
+    CHECK_MESSAGE(embedded.count("/" + (*it)[1].str()) == 1, (*it)[1].str());
+  CHECK(refs >= 5);
+  const std::regex script(R"(<script\b([^>]*)>)");
+  std::vector<std::string> scripts;
+  for (auto it = std::sregex_iterator(html.begin(), html.end(), script); it != std::sregex_iterator(); ++it) scripts.push_back((*it)[1].str());
+  REQUIRE(scripts.size() == 2);
+  CHECK(scripts[0] == R"( src="logic.js")");
+  CHECK(scripts[1] == R"( src="app.js")");
+  CHECK_FALSE(std::regex_search(html, std::regex(R"(\son[a-z]+\s*=)")));  // no inline event handlers
+  CHECK(html.find("javascript:") == std::string::npos);
 }
 
 TEST_CASE("encoder HTTP: config get and put, passwords never leave the server") {
