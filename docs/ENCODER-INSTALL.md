@@ -48,9 +48,9 @@ Ostrzeżenia i błędy trafiają też do Dziennika zdarzeń Windows (Aplikacja, 
 $d = 'C:\ProgramData\Bounce Encoder'
 takeown /F $d /A
 icacls $d /setowner '*S-1-5-32-544' /T /C /Q
-$a = Get-Acl -LiteralPath $d
+$a = New-Object System.Security.AccessControl.DirectorySecurity
 $a.SetSecurityDescriptorSddlForm('D:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)', 'Access')
-Set-Acl -LiteralPath $d -AclObject $a
+(Get-Item -LiteralPath $d).SetAccessControl($a)
 icacls "$d\*" /reset /T /C /Q
 New-Item -ItemType Directory -Force "$d\public" | Out-Null
 icacls "$d\public" /grant:r '*S-1-5-32-545:(OI)(CI)RX'
@@ -58,7 +58,7 @@ icacls "$d\public" /grant:r '*S-1-5-32-545:(OI)(CI)RX'
 
 Kolejno:
 1. Administratorzy przejmują folder i wszystko w nim (właściciel folderu może zawsze zmienić jego uprawnienia).
-2. Folder dostaje jednym poleceniem docelowe uprawnienia: tylko Administratorzy (`BA`) i SYSTEM (`SY`), pełna kontrola dziedziczona przez wszystko w środku, bez dziedziczenia z `C:\ProgramData`. Folder ani na chwilę nie dziedziczy dostępu Użytkowników z `C:\ProgramData`.
+2. Folder dostaje jednym poleceniem docelowe uprawnienia (zapisywana jest tylko lista uprawnień, bez właściciela): tylko Administratorzy (`BA`) i SYSTEM (`SY`), pełna kontrola dziedziczona przez wszystko w środku, bez dziedziczenia z `C:\ProgramData`. Folder ani na chwilę nie dziedziczy dostępu Użytkowników z `C:\ProgramData`.
 3. Wszystko w folderze traci uprawnienia dodane ręcznie i dziedziczy tylko te z punktu 2.
 4. Podfolder `public` dostaje odczyt dla Użytkowników.
 

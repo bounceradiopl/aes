@@ -192,7 +192,9 @@ Section "Bounce Encoder" SecMain
   ;       3. everything inside goes back to inherited ACEs only (explicit ACEs removed), and so
   ;          inherits exactly step 2 - only after step 2 succeeded;
   ;       4. Users may read public\.
-  ;     Step 2 uses Windows PowerShell (Set-Acl with an SDDL); if that fails, icacls grants first
+  ;     Step 2 uses Windows PowerShell: a DirectorySecurity built from the SDDL holds only the DACL,
+  ;     so SetAccessControl writes only the DACL (Set-Acl would also rewrite owner, group and SACL,
+  ;     which can fail on an update for no reason); if that fails, icacls grants first
   ;     and then cuts inheritance, which never widens the access either. $1 keeps the first error
   ;     code for the warning. ---
   CreateDirectory "$APPDATA\Bounce Encoder"
@@ -205,7 +207,7 @@ Section "Bounce Encoder" SecMain
   ${If} $0 != 0
     StrCpy $1 $0
   ${EndIf}
-  nsExec::ExecToLog `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$ErrorActionPreference = 'Stop'; $$d = '$APPDATA\Bounce Encoder'; $$a = Get-Acl -LiteralPath $$d; $$a.SetSecurityDescriptorSddlForm('${FOLDER_SDDL}', 'Access'); Set-Acl -LiteralPath $$d -AclObject $$a"`
+  nsExec::ExecToLog `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$ErrorActionPreference = 'Stop'; $$d = '$APPDATA\Bounce Encoder'; $$a = New-Object System.Security.AccessControl.DirectorySecurity; $$a.SetSecurityDescriptorSddlForm('${FOLDER_SDDL}', 'Access'); (Get-Item -LiteralPath $$d).SetAccessControl($$a)"`
   Pop $0
   ${If} $0 != 0
     ${If} $1 == 0

@@ -144,6 +144,21 @@ RawExchange raw_exchange(uint16_t port, const std::string& request, int timeout_
   return x;
 }
 
+// A request answered while bytes it sent are still unread (a body refused on its headers, or a
+// request after the first one): the server closes after the answer (one request per connection),
+// and Windows answers unread bytes at close with a reset that can destroy the answer before the
+// client reads it. There, "no answer" counts as refused too; the security checks around these
+// calls (nothing executed, the connection closed) are the same on every platform.
+#ifdef _WIN32
+constexpr bool kResetMayLoseAnswer = true;
+#else
+constexpr bool kResetMayLoseAnswer = false;
+#endif
+bool status_or_reset(int status, int expected) { return status == expected || (kResetMayLoseAnswer && status == 0); }
+bool statuses_or_reset(const std::vector<int>& statuses, int expected) {
+  return statuses == std::vector<int>{expected} || (kResetMayLoseAnswer && statuses.empty());
+}
+
 // The reviewer's attack: a complete first-password request hidden in another request's body.
 std::string smuggled_setup(const std::string& password) {
   const std::string body = json{{"password", password}}.dump();
@@ -781,18 +796,20 @@ TEST_CASE("encoder HTTP: bodies without a length, chunked or too large are refus
   const uint16_t port = f.server->port();
 
   // public endpoint, chunked: refused, the handler never ran
-  CHECK(raw_status(port, chunked_request("POST", "/api/setup", json{{"password", kPassword}}.dump())) == 411);
+  CHECK(status_or_reset(raw_status(port, chunked_request("POST", "/api/setup", json{{"password", kPassword}}.dump())), 411));
   CHECK(json::parse(f.client->Get("/api/auth-state")->body)["password_set"] == false);
   // no Content-Length at all (the body would run until the connection closes)
-  CHECK(raw_status(port, "POST /api/login HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n"
-                         "{\"password\":\"zlehaslo123\"}") == 411);
+  CHECK(status_or_reset(raw_status(port, "POST /api/login HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n"
+                                         "{\"password\":\"zlehaslo123\"}"),
+                        411));
   // a 3 MB chunk announced: refused on the headers
-  CHECK(raw_status(port, "POST /api/login HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
-                         "Transfer-Encoding: chunked\r\n\r\n300000\r\n" + std::string(65536, 'a')) == 411);
+  CHECK(status_or_reset(raw_status(port, "POST /api/login HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+                                         "Transfer-Encoding: chunked\r\n\r\n300000\r\n" + std::string(65536, 'a')),
+                        411));
 
   // with a session the same
   f.setup_and_login();
-  CHECK(raw_status(port, chunked_request("PUT", "/api/config", R"({"ptp_domain":7})", f.cookie())) == 411);
+  CHECK(status_or_reset(raw_status(port, chunked_request("PUT", "/api/config", R"({"ptp_domain":7})", f.cookie())), 411));
   CHECK(f.file()["ptp_domain"] == 0);
   // a Content-Length over 1 MB: 413 at once, without waiting for (or skipping) the body
   CHECK(raw_status(port, "PUT /api/config HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nCookie: " +
@@ -811,6 +828,12 @@ TEST_CASE("encoder HTTP: a body must be JSON (no cross-origin simple requests)")
   CHECK(f.client->Post("/api/setup", "password=tajnehaslo1", "application/x-www-form-urlencoded")->status == 415);
   CHECK(json::parse(f.client->Get("/api/auth-state")->body)["password_set"] == false);
   CHECK(f.client->Post("/api/login", json{{"password", kPassword}}.dump(), "text/plain")->status == 415);
+  // a bounded body is read before the answer, so the client always gets the whole answer (with
+  // bytes left unread at the close, Windows would reset the connection and lose it)
+  auto big = f.client->Post("/api/setup", std::string(200000, 'x'), "text/plain");
+  REQUIRE(big);
+  CHECK(big->status == 415);
+  CHECK(json::parse(big->body)["error"].get<std::string>().find("application/json") != std::string::npos);
 
   f.setup_and_login();
   CHECK(f.client->Put("/api/config", f.auth, R"({"ptp_domain":3})", "text/plain")->status == 415);
@@ -1059,7 +1082,7 @@ TEST_CASE("encoder HTTP: a request hidden in a refused request's body is never e
       const auto head = [](size_t n) { return head_with_length("POST", "/api/setup", "text/plain", n); };
       const RawExchange x = raw_exchange(port, hiding_request(head, offset, kLastRequest));
       CHECK(x.closed);
-      CHECK(x.statuses == std::vector<int>{415});  // one request per connection: nothing after it is read
+      CHECK(statuses_or_reset(x.statuses, 415));  // one request per connection: nothing after it is read
       CHECK_FALSE(password_set());
     }
   }
@@ -1069,8 +1092,8 @@ TEST_CASE("encoder HTTP: a request hidden in a refused request's body is never e
       const auto head = [](size_t n) { return head_with_length("POST", "/api/setup", "application/json", n, "", "2000000"); };
       const RawExchange x = raw_exchange(port, hiding_request(head, offset, kLastRequest));
       CHECK(x.closed);
-      CHECK(x.statuses == std::vector<int>{413});
-      CHECK(x.text.find("za duża") != std::string::npos);  // the client gets the whole answer before the close
+      CHECK(statuses_or_reset(x.statuses, 413));
+      if (!x.statuses.empty()) CHECK(x.text.find("za duża") != std::string::npos);  // the whole answer before the close
       CHECK_FALSE(password_set());
     }
   }
@@ -1085,13 +1108,13 @@ TEST_CASE("encoder HTTP: a request hidden in a refused request's body is never e
       };
       RawExchange x = raw_exchange(port, hiding_request(chunked, offset, "\r\n0\r\n\r\n" + kLastRequest));
       CHECK(x.closed);
-      CHECK(x.statuses == std::vector<int>{411});
+      CHECK(statuses_or_reset(x.statuses, 411));
       const auto no_length = [](size_t) {
         return std::string("POST /api/login HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n");
       };
       x = raw_exchange(port, hiding_request(no_length, offset, kLastRequest));
       CHECK(x.closed);
-      CHECK(x.statuses == std::vector<int>{411});
+      CHECK(statuses_or_reset(x.statuses, 411));
       CHECK_FALSE(password_set());
     }
   }
@@ -1103,7 +1126,7 @@ TEST_CASE("encoder HTTP: a request hidden in a refused request's body is never e
         const auto head = [&](size_t n) { return head_with_length(path == "/api/config" ? "PUT" : "POST", path, "application/json", n); };
         const RawExchange x = raw_exchange(port, hiding_request(head, offset, kLastRequest));
         CHECK(x.closed);
-        CHECK(x.statuses == std::vector<int>{401});
+        CHECK(statuses_or_reset(x.statuses, 401));
         CHECK_FALSE(password_set());
       }
     }
@@ -1260,9 +1283,11 @@ TEST_CASE("encoder HTTP: methods, encodings, ranges and body types outside the a
   const uint16_t port = f.server->port();
   CHECK(raw_status(port, "HEAD /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n") == 405);
   CHECK(raw_status(port, "OPTIONS /api/setup HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://example.com\r\n\r\n") == 405);
-  CHECK(raw_status(port, "PATCH /api/config HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}") == 405);
-  CHECK(raw_status(port, "POST /api/setup HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Encoding: identity\r\n"
-                         "Content-Length: 2\r\n\r\n{}") == 415);
+  CHECK(status_or_reset(
+      raw_status(port, "PATCH /api/config HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"), 405));
+  CHECK(status_or_reset(raw_status(port, "POST /api/setup HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+                                         "Content-Encoding: identity\r\nContent-Length: 2\r\n\r\n{}"),
+                        415));
   CHECK(raw_status(port, "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=0-10\r\n\r\n") == 416);
   // the JSON media type exactly; a charset parameter is fine, anything else is not
   auto setup = [&](const std::string& type) {
@@ -1275,7 +1300,7 @@ TEST_CASE("encoder HTTP: methods, encodings, ranges and body types outside the a
   CHECK(setup("application/json;charset=utf-8") == 400);
   CHECK(setup("application/jsonx") == 415);
   CHECK(setup("application/json; boundary=x") == 415);
-  CHECK(setup("multipart/form-data; boundary=x") == 415);
+  CHECK(status_or_reset(setup("multipart/form-data; boundary=x"), 415));  // refused on its headers (body unread)
   CHECK(setup("text/plain") == 415);
   CHECK(json::parse(f.client->Get("/api/auth-state")->body)["password_set"] == false);
   // the panel files still answer, and the live feed still runs on its own connection

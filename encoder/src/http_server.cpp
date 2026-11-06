@@ -502,12 +502,14 @@ struct EncoderHttpServer::Impl {
     return true;
   }
 
-  // The request allowlist, checked on the headers before httplib reads anything else. Only what
-  // the panel sends gets through: GET, POST, PUT and DELETE; no Content-Encoding; no Range on the
-  // API; a body only with one plain Content-Length of at most kMaxApiBodyBytes (no chunked body,
-  // nothing httplib would read until the connection closes); a body only as JSON (a form, multipart
-  // or text/plain POST is what another web site could send cross-origin without a CORS
-  // preflight), and /api/setup always as JSON. true: refused (answered).
+  // The request allowlist, checked on the headers before httplib reads anything else: only what
+  // cannot be read safely is refused here. GET, POST, PUT and DELETE only; no Content-Encoding; no
+  // Range on the API; a body only with one plain Content-Length of at most kMaxApiBodyBytes (no
+  // chunked body, nothing httplib would read until the connection closes); no multipart body
+  // (httplib would parse it before any handler). true: refused
+  // (answered). Everything with a bounded body is answered after httplib has read that body
+  // (guard(): JSON type, session): a server that closes on unread bytes makes Windows reset the
+  // connection, and the reset destroys the answer before the client can read it.
   static bool refuse(const httplib::Request& req, httplib::Response& res) {
     const std::string& m = req.method;
     if (m != "GET" && m != "POST" && m != "PUT" && m != "DELETE") {
@@ -543,16 +545,31 @@ struct EncoderHttpServer::Impl {
       send_error(res, 411, "treść żądania musi mieć nagłówek Content-Length");
       return true;
     }
-    if ((length > 0 || req.path == "/api/setup") && !is_json_type(req.get_header_value("Content-Type"))) {
+    // multipart bodies are not just read but parsed by httplib (files, boundaries) before any
+    // handler: never let them in
+    std::string type = req.get_header_value("Content-Type");
+    for (char& c : type) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (type.find("multipart/") != std::string::npos) {
       send_error(res, 415, "oczekiwano treści typu application/json");
       return true;
     }
     return false;
   }
 
-  // The session (kSession), checked after the body was read.
+  // A body only as JSON (a form, multipart or text/plain POST is what another web site could send
+  // cross-origin without a CORS preflight), and /api/setup always as JSON. Checked after the body
+  // was read (its length was bounded by refuse()); with one request per connection nothing that
+  // body contains is ever parsed as a request.
+  static bool wrong_body_type(const httplib::Request& req) {
+    const uint64_t length = req.get_header_value_u64("Content-Length");
+    return (length > 0 || req.path == "/api/setup") && !is_json_type(req.get_header_value("Content-Type"));
+  }
+
+  // The body type (415) and the session (kSession, 401), checked after the body was read; the
+  // handler runs only when both pass.
   httplib::Server::Handler guard(Access access, httplib::Server::Handler handler) {
     return [this, access, handler = std::move(handler)](const httplib::Request& req, httplib::Response& res) {
+      if (wrong_body_type(req)) return send_error(res, 415, "oczekiwano treści typu application/json");
       if (access == kSession && !authorized(req)) return send_error(res, 401, "wymagane logowanie");
       handler(req, res);
     };
@@ -579,8 +596,9 @@ struct EncoderHttpServer::Impl {
       return httplib::Server::HandlerResponse::Handled;
     });
 
-    // Runs on the headers, before any body is read: the allowlist (refuse). The connection closes
-    // after every answer (one request per connection), so an unread body is never parsed.
+    // Runs on the headers, before any body is read: what cannot be read safely (refuse). The
+    // connection closes after every answer (one request per connection), so an unread body is never
+    // parsed; bounded bodies are read first and answered by guard().
     server.set_pre_routing_handler([](const httplib::Request& req, httplib::Response& res) {
       res.set_header("X-Frame-Options", "DENY");
       res.set_header("X-Content-Type-Options", "nosniff");

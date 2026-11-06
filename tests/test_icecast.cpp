@@ -384,7 +384,9 @@ TEST_CASE("Icecast: a queue overflow while streaming discards the queue and rest
   const auto st = client.status();
   REQUIRE(st.dropped_bytes > 0);
   MESSAGE(n << " pieces pushed, " << sent_at_overflow << " bytes sent, " << st.dropped_bytes << " bytes dropped");
-  CHECK(sent_at_overflow > 4 * kLimit);  // the client kept up until the reader stalled it
+  // the client kept sending until the reader stalled it; how much the kernel buffers before that
+  // depends on the platform (about 128 KB on Windows, several times more on Linux and macOS)
+  CHECK(sent_at_overflow >= 2 * kPiece);
   CHECK(st.dropped_bytes % kPiece == 0);         // the whole queue plus the piece that overflowed it
   CHECK(st.dropped_bytes <= kLimit + kPiece);
   REQUIRE(wait_for([&] { return starts.load() == 2; }));  // fired while the send is stuck

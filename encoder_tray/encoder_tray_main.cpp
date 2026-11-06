@@ -181,6 +181,14 @@ void open_panel(const wchar_t* fragment) {
   if (!shell_open(L"msedge", args.c_str())) shell_open(url.c_str(), nullptr);
 }
 
+// For a process that only opens the panel and exits (--open-panel, a second start): the shell may
+// hand the launch to COM objects, so COM is initialised around it.
+void open_panel_and_exit() {
+  const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+  open_panel(L"");
+  if (SUCCEEDED(com)) CoUninitialize();
+}
+
 void add_icon(HWND hwnd) {
   g_nid = {};
   g_nid.cbSize = sizeof(g_nid);
@@ -302,10 +310,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdline, int) {
   // --open-panel (the Start-menu "Panel Bounce Encoder" entry): open the panel at the address in
   // public\panel.json and exit, whether or not the tray runs.
   if (cmdline && wcsstr(cmdline, L"--open-panel") != nullptr) {
-    // the shell may hand the launch to COM objects: initialise COM for ShellExecuteEx
-    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-    open_panel(L"");
-    if (SUCCEEDED(com)) CoUninitialize();
+    open_panel_and_exit();
     return 0;
   }
   // Shortcuts pass --panel; the logon autostart entry does not, so logging in opens no window.
@@ -313,9 +318,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdline, int) {
   HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\BounceEncoderTray");
   if (GetLastError() == ERROR_ALREADY_EXISTS) {
     // Already running (e.g. started again from a shortcut): just open the panel.
-    open_panel(L"");
+    open_panel_and_exit();
+    if (single) CloseHandle(single);
     return 0;
   }
+  // the tray thread opens the panel with ShellExecuteEx as well: COM for the whole run
+  const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
   if (want_panel) open_panel(L"");
   g_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
   g_icons[static_cast<int>(Health::Ok)] = load_status_icon(2);
@@ -337,6 +345,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdline, int) {
     DispatchMessageW(&msg);
   }
   for (HICON i : g_icons) DestroyIcon(i);
+  if (SUCCEEDED(com)) CoUninitialize();
   if (single) CloseHandle(single);
   return 0;
 }
