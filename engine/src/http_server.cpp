@@ -4,10 +4,15 @@
 #include <httplib.h>
 
 #include <atomic>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <thread>
 
 #include "bam/auth.hpp"
 #include "bam/engine.hpp"
+#include "bam/http/guard.hpp"
+#include "bam/http/login_throttle.hpp"
 #include "bam/log.hpp"
 #include "bam/platform/time.hpp"
 #include "bam/platform/udp.hpp"
@@ -21,35 +26,10 @@ using api::json;
 constexpr const char* kCookie = "bam_session";
 constexpr int kHttpThreads = 32;  // every open panel tab holds one thread for its SSE feed
 
-void send_json(httplib::Response& res, const json& j, int status = 200) {
-  res.status = status;
-  res.set_content(j.dump(), "application/json; charset=utf-8");
-}
+using http::send_error;
+using http::send_json;
 
-void send_error(httplib::Response& res, int status, const std::string& message) {
-  send_json(res, {{"error", message}}, status);
-}
-
-std::string session_cookie(const httplib::Request& req) {
-  const std::string cookies = req.get_header_value("Cookie");
-  const std::string key = std::string(kCookie) + "=";
-  size_t pos = 0;
-  while (pos < cookies.size()) {
-    while (pos < cookies.size() && (cookies[pos] == ' ' || cookies[pos] == ';')) ++pos;
-    if (cookies.compare(pos, key.size(), key) == 0) {
-      const size_t end = cookies.find(';', pos);
-      return cookies.substr(pos + key.size(), end == std::string::npos ? std::string::npos : end - pos - key.size());
-    }
-    const size_t next = cookies.find(';', pos);
-    if (next == std::string::npos) break;
-    pos = next + 1;
-  }
-  return {};
-}
-
-bool is_local(const httplib::Request& req) {
-  return req.remote_addr == "127.0.0.1" || req.remote_addr == "::1" || req.remote_addr == "::ffff:127.0.0.1";
-}
+std::string session_cookie(const httplib::Request& req) { return http::session_cookie(req, kCookie); }
 
 std::optional<json> parse_body(const httplib::Request& req, httplib::Response& res) {
   try {
@@ -59,16 +39,84 @@ std::optional<json> parse_body(const httplib::Request& req, httplib::Response& r
     return std::nullopt;
   }
 }
+
+// The number a route's (\d+) matched; 0 when it is too large for any output or subscription
+// (std::stoi would throw, and httplib would answer 500): the handlers answer 404.
+int path_number(const std::string& digits) {
+  int n = 0;
+  for (char c : digits) {
+    if (c < '0' || c > '9') return 0;
+    n = n * 10 + (c - '0');
+    if (n > 1'000'000) return 0;
+  }
+  return n;
+}
+
+// A text field of a request body; "" when missing or not text.
+std::string text(const json& body, const char* key) {
+  if (!body.is_object()) return {};
+  const auto it = body.find(key);
+  return it != body.end() && it->is_string() ? it->get<std::string>() : std::string();
+}
+
+std::atomic<int64_t> g_clock_offset_ns{0};  // testing::set_http_clock_offset_ns
+std::mutex g_hook_mutex;
+std::function<void()> g_login_verified_hook;  // testing::set_login_verified_hook
+
+int64_t now_ns() { return platform::monotonic_ns() + g_clock_offset_ns.load(); }
 }  // namespace
 
 struct HttpServer::Impl {
   Engine& engine;
   httplib::Server server;
-  SessionStore sessions;
+  std::mutex sessions_mutex;
+  std::shared_ptr<SessionStore> sessions_ = std::make_shared<SessionStore>();  // replaced on a password change
+  uint64_t sessions_generation_ = 0;  // counts the replacements (sessions_mutex)
+  http::LoginThrottle throttle;
+  std::mutex password_mutex;  // the first password and password changes, one at a time
   std::thread thread;
   std::atomic<bool> stopping{false};
+  std::atomic<bool> listen_returned{false};  // the listen thread is past listen_after_bind()
+  uint16_t port = 0;
 
   explicit Impl(Engine& e) : engine(e) {}
+
+  std::shared_ptr<SessionStore> sessions() {
+    std::lock_guard lock(sessions_mutex);
+    return sessions_;
+  }
+
+  uint64_t sessions_generation() {
+    std::lock_guard lock(sessions_mutex);
+    return sessions_generation_;
+  }
+
+  // A new session, unless the sessions were restarted (password change) since `generation` was
+  // read: a login that checked the old password must not outlive the change. Empty = refused.
+  std::string create_session(uint64_t generation) {
+    std::lock_guard lock(sessions_mutex);
+    if (generation != sessions_generation_) return {};
+    return sessions_->create(now_ns());
+  }
+
+  // Every session ends except a new one, returned (its token), for whoever changed the password.
+  std::string restart_sessions() {
+    auto fresh = std::make_shared<SessionStore>();
+    std::string token = fresh->create(now_ns());
+    std::lock_guard lock(sessions_mutex);
+    sessions_ = std::move(fresh);
+    ++sessions_generation_;
+    return token;
+  }
+
+  enum class PasswordResult { Saved, AlreadySet, SaveFailed };
+  // `first`: only when no password is set yet, checked under the lock (two first-time setups
+  // cannot both win).
+  PasswordResult set_password_hash(const std::string& hash, bool first) {
+    std::lock_guard lock(password_mutex);
+    if (first && !engine.config().password_hash.empty()) return PasswordResult::AlreadySet;
+    return engine.set_password_hash(hash) ? PasswordResult::Saved : PasswordResult::SaveFailed;
+  }
 
   void set_session_cookie(httplib::Response& res, const std::string& token, bool clear = false) {
     std::string c = std::string(kCookie) + "=" + (clear ? "" : token) + "; Path=/; HttpOnly; SameSite=Strict";
@@ -78,7 +126,7 @@ struct HttpServer::Impl {
 
   bool authorized(const httplib::Request& req) {
     const std::string token = session_cookie(req);
-    return !token.empty() && sessions.valid(token, platform::monotonic_ns());
+    return !token.empty() && sessions()->valid(token, now_ns());
   }
 
   // Applies a JSON merge patch on top of the current configuration.
@@ -98,20 +146,31 @@ struct HttpServer::Impl {
     send_json(res, out, r.ok ? 200 : 400);
   }
 
+  using Access = http::Access;
+  static constexpr Access kPublic = Access::Public;
+  static constexpr Access kSession = Access::Session;
+
+  // The body type (415) and the session (kSession, 401), checked after the body was read; the
+  // handler runs only when both pass (bam/http/guard.hpp).
+  httplib::Server::Handler guard(Access access, httplib::Server::Handler handler) {
+    return http::guard(access, [this](const httplib::Request& req) { return authorized(req); }, std::move(handler));
+  }
+
   void routes() {
-    server.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
-      res.set_header("X-Frame-Options", "DENY");
-      res.set_header("X-Content-Type-Options", "nosniff");
-      res.set_header("Cache-Control", "no-store");
-      const bool open = req.path == "/api/health" || req.path == "/api/login" || req.path == "/api/setup" ||
-                        req.path == "/api/auth-state" || req.path.rfind("/api/", 0) != 0;
-      if (open || authorized(req)) return httplib::Server::HandlerResponse::Unhandled;
-      send_error(res, 401, "wymagane logowanie");
-      return httplib::Server::HandlerResponse::Handled;
-    });
+    // One request per connection, the request allowlist on the headers (before any body is read)
+    // and JSON answers for httplib's own refusals: bam/http/guard.hpp.
+    http::install_request_guard(server);
+
+    // Every route goes through guard(): the body type (415) and the session (kSession, 401), both
+    // checked after the body was read.
+    using Handler = httplib::Server::Handler;
+    auto get = [&](const std::string& pattern, Access a, Handler h) { server.Get(pattern, guard(a, std::move(h))); };
+    auto post = [&](const std::string& pattern, Access a, Handler h) { server.Post(pattern, guard(a, std::move(h))); };
+    auto put = [&](const std::string& pattern, Access a, Handler h) { server.Put(pattern, guard(a, std::move(h))); };
+    auto del = [&](const std::string& pattern, Access a, Handler h) { server.Delete(pattern, guard(a, std::move(h))); };
 
     // ---- public ----
-    server.Get("/api/health", [this](const httplib::Request&, httplib::Response& res) {
+    get("/api/health", kPublic, [this](const httplib::Request&, httplib::Response& res) {
       const auto st = engine.status();
       send_json(res, {{"service", "ok"},
                       {"product", kProductName},
@@ -123,7 +182,7 @@ struct HttpServer::Impl {
                       {"bridge_connected", st.bridge_connected}});
     });
 
-    server.Get("/api/auth-state", [this](const httplib::Request& req, httplib::Response& res) {
+    get("/api/auth-state", kPublic, [this](const httplib::Request& req, httplib::Response& res) {
       json logo = nullptr;
       for (size_t i = 0; i < kPanelAssetCount; ++i) {
         const std::string path = kPanelAssets[i].path;
@@ -131,61 +190,86 @@ struct HttpServer::Impl {
       }
       send_json(res, {{"password_set", !engine.config().password_hash.empty()},
                       {"logged_in", authorized(req)},
-                      {"local", is_local(req)},
+                      {"local", http::is_local(req)},  // the address and a loopback Host, as /api/setup checks
                       {"logo", logo}});
     });
 
-    server.Post("/api/setup", [this](const httplib::Request& req, httplib::Response& res) {
+    post("/api/setup", kPublic, [this](const httplib::Request& req, httplib::Response& res) {
       if (!engine.config().password_hash.empty()) return send_error(res, 409, "hasło jest już ustawione");
-      if (!is_local(req)) return send_error(res, 403, "pierwsze hasło można ustawić tylko z tego komputera (127.0.0.1)");
+      if (!http::is_local_address(req))
+        return send_error(res, 403, "pierwsze hasło można ustawić tylko z tego komputera (127.0.0.1)");
+      if (!http::is_loopback_host(req))
+        return send_error(res, 403,
+                          "pierwsze hasło można ustawić tylko z panelu otwartego pod adresem http://127.0.0.1 lub http://localhost "
+                          "(nie przez nazwę komputera ani inną nazwę domeny)");
       auto body = parse_body(req, res);
       if (!body) return;
-      const std::string pw = body->value("password", "");
+      const std::string pw = text(*body, "password");
       if (pw.size() < 8) return send_error(res, 400, "hasło musi mieć co najmniej 8 znaków");
-      if (!engine.set_password_hash(make_password_hash(pw))) return send_error(res, 500, "nie można zapisać hasła");
+      switch (set_password_hash(make_password_hash(pw), true)) {
+        case PasswordResult::AlreadySet: return send_error(res, 409, "hasło jest już ustawione");
+        case PasswordResult::SaveFailed: return send_error(res, 500, "nie można zapisać hasła");
+        case PasswordResult::Saved: break;
+      }
       log_info("Ustawiono hasło panelu");
-      set_session_cookie(res, sessions.create(platform::monotonic_ns()));
+      set_session_cookie(res, sessions()->create(now_ns()));
       send_json(res, {{"ok", true}});
     });
 
-    server.Post("/api/login", [this](const httplib::Request& req, httplib::Response& res) {
+    post("/api/login", kPublic, [this](const httplib::Request& req, httplib::Response& res) {
       auto body = parse_body(req, res);
       if (!body) return;
+      const uint64_t generation = sessions_generation();  // before the hash: see create_session
       const std::string stored = engine.config().password_hash;
       if (stored.empty()) return send_error(res, 409, "hasło nie jest jeszcze ustawione");
-      if (!verify_password(body->value("password", ""), stored)) {
+      // guessing is limited by counting failures (429), not by holding a request thread; the ticket
+      // counts this attempt until it ends, so attempts sent at once cannot all get past the limit
+      auto attempt = throttle.attempt(req.remote_addr, now_ns());
+      if (!attempt) return send_error(res, 429, "zbyt wiele nieudanych prób, spróbuj za chwilę");
+      if (!verify_password(text(*body, "password"), stored)) {
+        attempt.failed(now_ns());
         log_warning("Nieudane logowanie do panelu z " + req.remote_addr);
-        platform::sleep_ns(500'000'000);  // slows down guessing
         return send_error(res, 401, "nieprawidłowe hasło");
       }
-      set_session_cookie(res, sessions.create(platform::monotonic_ns()));
+      attempt.succeeded();
+      {
+        std::lock_guard hook(g_hook_mutex);
+        if (g_login_verified_hook) g_login_verified_hook();
+      }
+      const std::string token = create_session(generation);
+      if (token.empty()) return send_error(res, 401, "hasło zostało właśnie zmienione, zaloguj się ponownie");
+      set_session_cookie(res, token);
       send_json(res, {{"ok", true}});
     });
 
     // ---- authorized ----
-    server.Post("/api/logout", [this](const httplib::Request& req, httplib::Response& res) {
-      sessions.remove(session_cookie(req));
+    post("/api/logout", kSession, [this](const httplib::Request& req, httplib::Response& res) {
+      sessions()->remove(session_cookie(req));
       set_session_cookie(res, "", true);
       send_json(res, {{"ok", true}});
     });
 
-    server.Post("/api/password", [this](const httplib::Request& req, httplib::Response& res) {
+    post("/api/password", kSession, [this](const httplib::Request& req, httplib::Response& res) {
       auto body = parse_body(req, res);
       if (!body) return;
-      if (!verify_password(body->value("current", ""), engine.config().password_hash))
+      if (!body->is_object()) return send_error(res, 400, "oczekiwano obiektu JSON");
+      if (!verify_password(text(*body, "current"), engine.config().password_hash))
         return send_error(res, 403, "obecne hasło jest nieprawidłowe");
-      const std::string pw = body->value("password", "");
+      const std::string pw = text(*body, "password");
       if (pw.size() < 8) return send_error(res, 400, "hasło musi mieć co najmniej 8 znaków");
-      if (!engine.set_password_hash(make_password_hash(pw))) return send_error(res, 500, "nie można zapisać hasła");
+      if (set_password_hash(make_password_hash(pw), false) != PasswordResult::Saved)
+        return send_error(res, 500, "nie można zapisać hasła");
+      // every other session (other tabs, other computers) ends; this one goes on with a new cookie
+      set_session_cookie(res, restart_sessions());
       log_info("Zmieniono hasło panelu");
       send_json(res, {{"ok", true}});
     });
 
-    server.Get("/api/config", [this](const httplib::Request&, httplib::Response& res) {
+    get("/api/config", kSession, [this](const httplib::Request&, httplib::Response& res) {
       send_json(res, api::config_json(engine.config()));
     });
 
-    server.Put("/api/config", [this](const httplib::Request& req, httplib::Response& res) {
+    put("/api/config", kSession, [this](const httplib::Request& req, httplib::Response& res) {
       auto body = parse_body(req, res);
       if (!body) return;
       if (!body->is_object()) return send_error(res, 400, "oczekiwano obiektu JSON");
@@ -218,15 +302,15 @@ struct HttpServer::Impl {
     });
 
     auto output_sdp = [this](const httplib::Request& req, httplib::Response& res) {
-      const int n = std::stoi(req.matches[1]);
+      const int n = path_number(req.matches[1]);
       if (n < 1 || n > kDeviceCount) return send_error(res, 404, "brak wyjścia");
       res.set_content(engine.output_sdp(n), "application/sdp");
     };
-    server.Get(R"(/api/outputs/(\d+)/sdp)", output_sdp);
-    server.Get(R"(/api/devices/(\d+)/sdp)", output_sdp);  // 1.0 path
+    get(R"(/api/outputs/(\d+)/sdp)", kSession, output_sdp);
+    get(R"(/api/devices/(\d+)/sdp)", kSession, output_sdp);  // 1.0 path
 
     // "Nadawaj do urządzenia…": a new output with its source, answered with its SDP
-    server.Post("/api/outputs", [this](const httplib::Request& req, httplib::Response& res) {
+    post("/api/outputs", kSession, [this](const httplib::Request& req, httplib::Response& res) {
       auto body = parse_body(req, res);
       if (!body) return;
       if (!body->is_object()) return send_error(res, 400, "oczekiwano obiektu JSON");
@@ -248,8 +332,8 @@ struct HttpServer::Impl {
       send_json(res, out, r.ok ? 200 : 400);
     });
 
-    server.Delete(R"(/api/outputs/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
-      const int n = std::stoi(req.matches[1]);
+    del(R"(/api/outputs/(\d+))", kSession, [this](const httplib::Request& req, httplib::Response& res) {
+      const int n = path_number(req.matches[1]);
       if (n < 1 || n > kDeviceCount) return send_error(res, 404, "brak wyjścia");
       const ApplyResult r = engine.remove_output(n);
       json out = api::result_json(r);
@@ -260,11 +344,11 @@ struct HttpServer::Impl {
       send_json(res, out, r.ok ? 200 : 400);
     });
 
-    server.Get("/api/routing", [this](const httplib::Request&, httplib::Response& res) {
+    get("/api/routing", kSession, [this](const httplib::Request&, httplib::Response& res) {
       send_json(res, api::routing_json(engine.routing()));
     });
 
-    server.Put("/api/routing", [this](const httplib::Request& req, httplib::Response& res) {
+    put("/api/routing", kSession, [this](const httplib::Request& req, httplib::Response& res) {
       auto body = parse_body(req, res);
       if (!body) return;
       if (!body->is_object() || !body->contains("dst") || !(*body)["dst"].is_string())
@@ -280,7 +364,7 @@ struct HttpServer::Impl {
       send_json(res, out, r.ok ? 200 : 400);
     });
 
-    server.Put("/api/mixes", [this](const httplib::Request& req, httplib::Response& res) {
+    put("/api/mixes", kSession, [this](const httplib::Request& req, httplib::Response& res) {
       auto body = parse_body(req, res);
       if (!body) return;
       if (!body->is_object() || !body->contains("dst") || !(*body)["dst"].is_string() || !body->contains("enabled") ||
@@ -314,7 +398,7 @@ struct HttpServer::Impl {
       send_json(res, out, r.ok ? 200 : 400);
     });
 
-    server.Post("/api/subscriptions", [this](const httplib::Request& req, httplib::Response& res) {
+    post("/api/subscriptions", kSession, [this](const httplib::Request& req, httplib::Response& res) {
       auto body = parse_body(req, res);
       if (!body) return;
       std::string what;
@@ -333,8 +417,8 @@ struct HttpServer::Impl {
       send_json(res, out, r.ok ? 200 : 400);
     });
 
-    server.Delete(R"(/api/subscriptions/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
-      const int n = std::stoi(req.matches[1]);
+    del(R"(/api/subscriptions/(\d+))", kSession, [this](const httplib::Request& req, httplib::Response& res) {
+      const int n = path_number(req.matches[1]);
       if (n < 1 || n > kDeviceCount) return send_error(res, 404, "brak subskrypcji");
       const ApplyResult r = engine.remove_subscription(n);
       json out = api::result_json(r);
@@ -345,24 +429,24 @@ struct HttpServer::Impl {
       send_json(res, out, r.ok ? 200 : 400);
     });
 
-    server.Get("/api/streams", [this](const httplib::Request&, httplib::Response& res) {
+    get("/api/streams", kSession, [this](const httplib::Request&, httplib::Response& res) {
       send_json(res, api::streams_json(engine.discovered_streams()));
     });
 
     auto status_handler = [this](const httplib::Request&, httplib::Response& res) { send_json(res, api::status_json(engine.status())); };
-    server.Get("/api/status", status_handler);
-    server.Get("/api/stats", status_handler);
+    get("/api/status", kSession, status_handler);
+    get("/api/stats", kSession, status_handler);
 
-    server.Post("/api/stats/reset", [this](const httplib::Request&, httplib::Response& res) {
+    post("/api/stats/reset", kSession, [this](const httplib::Request&, httplib::Response& res) {
       engine.reset_stats();
       send_json(res, {{"ok", true}});
     });
 
-    server.Get("/api/logs", [](const httplib::Request&, httplib::Response& res) {
+    get("/api/logs", kSession, [](const httplib::Request&, httplib::Response& res) {
       send_json(res, api::logs_json(Logger::instance().recent()));
     });
 
-    server.Get("/api/interfaces", [](const httplib::Request&, httplib::Response& res) {
+    get("/api/interfaces", kSession, [](const httplib::Request&, httplib::Response& res) {
       json out = json::array();
       for (const auto& i : platform::list_interfaces()) {
         if (i.loopback) continue;
@@ -371,10 +455,12 @@ struct HttpServer::Impl {
       send_json(res, out);
     });
 
-    server.Get("/api/live", [this](const httplib::Request&, httplib::Response& res) {
+    // Server-sent events 10 times a second (meters). The session is checked before every event:
+    // logout, expiry or a password change ends the feed.
+    get("/api/live", kSession, [this](const httplib::Request& req, httplib::Response& res) {
       res.set_header("X-Accel-Buffering", "no");
-      res.set_chunked_content_provider("text/event-stream", [this](size_t, httplib::DataSink& sink) {
-        if (stopping) return false;
+      res.set_chunked_content_provider("text/event-stream", [this, token = session_cookie(req)](size_t, httplib::DataSink& sink) {
+        if (stopping || !sessions()->alive(token, now_ns())) return false;  // alive: an open feed does not extend the session
         const std::string msg = "event: live\ndata: " + api::live_json(engine.status()).dump() + "\n\n";
         if (!sink.write(msg.data(), msg.size())) return false;
         platform::sleep_ns(100'000'000);
@@ -383,7 +469,7 @@ struct HttpServer::Impl {
     });
 
     // ---- embedded panel ----
-    server.Get(R"(/(.*))", [](const httplib::Request& req, httplib::Response& res) {
+    get(R"(/(.*))", kPublic, [](const httplib::Request& req, httplib::Response& res) {
       std::string path = req.path == "/" ? "/index.html" : req.path;
       for (size_t i = 0; i < kPanelAssetCount; ++i) {
         if (path == kPanelAssets[i].path) {
@@ -405,14 +491,25 @@ HttpServer::~HttpServer() { stop(); }
 
 bool HttpServer::start(const std::string& bind, uint16_t port, std::string* error) {
   auto& m = *impl_;
+  if (m.thread.joinable()) {
+    if (error) *error = "panel już działa";
+    return false;
+  }
   m.server.new_task_queue = [] { return new httplib::ThreadPool(kHttpThreads); };
   m.routes();
-  if (!m.server.bind_to_port(bind, port)) {
+  const int bound = port == 0 ? m.server.bind_to_any_port(bind) : (m.server.bind_to_port(bind, port) ? port : -1);
+  if (bound <= 0) {
     if (error) *error = "nie można otworzyć portu panelu " + bind + ":" + std::to_string(port);
     return false;
   }
-  m.thread = std::thread([&m] { m.server.listen_after_bind(); });
-  log_info("Panel dostępny pod http://" + (bind == "0.0.0.0" ? std::string("127.0.0.1") : bind) + ":" + std::to_string(port));
+  m.port = static_cast<uint16_t>(bound);
+  m.listen_returned = false;
+  m.thread = std::thread([&m] {
+    m.server.listen_after_bind();
+    m.listen_returned = true;
+  });
+  http::wait_listening(m.server, m.listen_returned);  // a stop() right after this start must reach a running server
+  log_info("Panel dostępny pod http://" + (bind == "0.0.0.0" ? std::string("127.0.0.1") : bind) + ":" + std::to_string(m.port));
   return true;
 }
 
@@ -420,8 +517,19 @@ void HttpServer::stop() {
   auto& m = *impl_;
   if (!m.thread.joinable()) return;
   m.stopping = true;
+  http::wait_listening(m.server, m.listen_returned);  // httplib ignores a stop() before it listens
   m.server.stop();
   m.thread.join();
 }
+
+uint16_t HttpServer::port() const { return impl_->port; }
+
+namespace testing {
+void set_http_clock_offset_ns(int64_t offset_ns) { g_clock_offset_ns = offset_ns; }
+void set_login_verified_hook(std::function<void()> hook) {
+  std::lock_guard lock(g_hook_mutex);
+  g_login_verified_hook = std::move(hook);
+}
+}  // namespace testing
 
 }  // namespace bam

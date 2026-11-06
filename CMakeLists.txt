@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 cmake_minimum_required(VERSION 3.24)
-project(BounceAESMaster VERSION 1.2.1 LANGUAGES C CXX)
+project(BounceAESMaster VERSION 1.2.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -89,13 +89,22 @@ if(BAM_PLATFORM_SOURCES)
   endif()
 endif()
 
+# ---- panel HTTP hardening, shared by BounceAES Master and Bounce Encoder (every build) ----
+file(GLOB BAM_HTTP_SOURCES CONFIGURE_DEPENDS http/src/*.cpp)
+add_library(bam_http STATIC ${BAM_HTTP_SOURCES})
+target_include_directories(bam_http PUBLIC http/include)
+target_link_libraries(bam_http PUBLIC bam_core)
+if(WIN32)
+  target_link_libraries(bam_http PUBLIC ws2_32)
+endif()
+
 # ---- engine ----
 file(GLOB BAM_ENGINE_SOURCES CONFIGURE_DEPENDS engine/src/*.cpp)
 if(BAM_ENGINE_SOURCES)
   include(cmake/embed_files.cmake)
   add_library(bam_engine STATIC ${BAM_ENGINE_SOURCES} ${BAM_PANEL_ASSETS_CPP})
   target_include_directories(bam_engine PUBLIC engine/include)
-  target_link_libraries(bam_engine PUBLIC bam_platform)
+  target_link_libraries(bam_engine PUBLIC bam_platform bam_http)
 endif()
 
 # ---- Bounce Encoder: audio encoders (64-bit builds with the codecs) ----
@@ -113,7 +122,7 @@ if(BAM_WITH_CODECS)
     EncoderPanelAsset kEncoderPanelAssets kEncoderPanelAssetCount)
   add_library(bam_encoder STATIC ${BAM_ENCODER_SOURCES} ${BAM_ENCODER_PANEL_ASSETS_CPP})
   target_include_directories(bam_encoder PUBLIC encoder/include)
-  target_link_libraries(bam_encoder PUBLIC bam_platform PRIVATE bam_codec_headers FLAC::FLAC)
+  target_link_libraries(bam_encoder PUBLIC bam_platform bam_http PRIVATE bam_codec_headers FLAC::FLAC)
   # the shared codecs are loaded at run time; build them with anything that uses the encoder
   add_dependencies(bam_encoder mp3lame fdk-aac)
 endif()
@@ -211,9 +220,9 @@ if(BAM_BUILD_TESTS)
   if(TARGET bam_engine)
     target_link_libraries(bam_tests PRIVATE bam_engine)
   elseif(TARGET bam_platform)
-    target_link_libraries(bam_tests PRIVATE bam_platform)
+    target_link_libraries(bam_tests PRIVATE bam_platform bam_http)
   else()
-    target_link_libraries(bam_tests PRIVATE bam_core)
+    target_link_libraries(bam_tests PRIVATE bam_core bam_http)
   endif()
   target_compile_definitions(bam_tests PRIVATE BAM_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
   if(BAM_WITH_CODECS)

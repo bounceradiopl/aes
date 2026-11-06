@@ -315,8 +315,10 @@ Bounce Encoder jest na licencji GPL-3.0-or-later. Kodeki MP3 i AAC to osobne bib
 
 **Aktualizacja:** uruchom nowy instalator. Zatrzyma usługę i ikonę, wymieni pliki i uruchomi usługę ponownie. Konfiguracja zostaje.
 
+**Co nowego w 1.0.1:** blokada logowania działa też przy równoległych próbach: hasła sprawdzane w tej samej chwili liczą się do limitu, więc wiele prób wysłanych naraz nie obejdzie blokady po 5 błędnych hasłach (ani ogólnego limitu 20 błędnych haseł z sieci na minutę).
+
 **Odinstalowanie:** *Ustawienia → Aplikacje → Bounce Encoder → Odinstaluj* albo skrót *Odinstaluj Bounce Encoder* w menu Start. Deinstalator zatrzymuje i usuwa usługę, regułę zapory, źródło Dziennika zdarzeń, autostart, skróty i pliki programu. Na koniec pyta, czy usunąć konfigurację i logi (`C:\ProgramData\Bounce Encoder`); domyślnie (i przy deinstalacji cichej `/S`) zostają.
 
-**Podpisywanie plików:** jak w BounceAES Master (INSTALL.md, rozdział 10): `installer\sign.ps1 -Path <folder>` podpisuje pliki `.exe` i `.dll` (także biblioteki kodeków) i instalator własnym certyfikatem firmy. Nigdy nie używaj certyfikatu ani nazwy innego producenta.
+**Podpisywanie plików:** jak w BounceAES Master (INSTALL.md, rozdział 11): `installer\sign.ps1 -Path <folder>` podpisuje pliki `.exe` i `.dll` (także biblioteki kodeków) i instalator własnym certyfikatem firmy. Nigdy nie używaj certyfikatu ani nazwy innego producenta.
 
 **Budowanie ze źródeł** (README.md, rozdział o kompilacji): konfiguracja 64-bitowego buildu z kodekami pobiera archiwa źródeł LAME, fdk-aac, libogg i libFLAC (sourceforge.net, github.com, xiph.org, sprawdzane po SHA-256), więc potrzebuje dostępu do sieci, chyba że kodeki są wyłączone (`-DBAM_WITH_CODECS=OFF`, wtedy bez Bounce Encodera). `-DBAM_CODEC_CACHE=<folder>` zachowuje archiwa i przy kolejnych konfiguracjach używa ich bez sieci.

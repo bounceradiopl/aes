@@ -18,6 +18,7 @@ const state = {
   issues: [],
   logo: null,    // URL of panel logo file, when present
   source: null,  // EventSource
+  liveRetry: null,  // timer of the next live feed attempt after it closed for good
   pasteTarget: null,  // null = add a new subscription, number = edit that subscription (0-based)
   collapsed: new Set(),  // "src:net", "dst:asio", ...
   routingTimer: null,
@@ -127,6 +128,7 @@ function renderBrand() {
 // ---------------------------------------------------------------- auth
 async function showAuth() {
   if (state.source) { state.source.close(); state.source = null; }
+  clearTimeout(state.liveRetry);
   stopRoutingPoll();
   $("#app").classList.add("hidden");
   $("#auth").classList.remove("hidden");
@@ -1252,8 +1254,12 @@ $("#reset-stats").addEventListener("click", async () => {
   toast("Liczniki wyzerowane");
 });
 
+// The feed ends on logout (here or in another tab), session expiry, a password change made
+// elsewhere or a service restart. The browser reconnects by itself unless the answer was an error
+// (401); after every break the panel asks whether it is still logged in: if not, the login screen.
 function connectLive() {
   if (state.source) state.source.close();
+  clearTimeout(state.liveRetry);
   const src = new EventSource("/api/live");
   src.addEventListener("live", (e) => {
     const bridgeBefore = state.live?.bridge?.connected;
@@ -1261,7 +1267,18 @@ function connectLive() {
     applyLive();
     if (bridgeBefore !== state.live.bridge?.connected && currentTab() === "routing") renderMatrix();
   });
-  src.onerror = () => setPill("#pill-ptp", "brak połączenia z usługą", "err");
+  src.onerror = async () => {
+    setPill("#pill-ptp", "brak połączenia z usługą", "err");
+    if (state.source !== src) return;
+    try {
+      const { data } = await api("/api/auth-state");
+      if (state.source !== src) return;
+      if (data && !data.logged_in) { showAuth(); return; }
+    } catch { /* the service is not answering: the browser tries again */ }
+    if (src.readyState !== EventSource.CLOSED || state.source !== src || $("#app").classList.contains("hidden")) return;
+    state.source = null;  // closed for good (an error answer) while still logged in: try again
+    state.liveRetry = setTimeout(connectLive, 2000);
+  };
   state.source = src;
 }
 

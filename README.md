@@ -51,6 +51,10 @@ Instrukcja: [docs/INSTALL.md](docs/INSTALL.md). W skrócie:
 5. W zakładce **Routing** połącz źródła z celami.
 6. W mAirList wybierz sterownik ASIO **BounceAES Master**.
 
+## Co nowego w 1.2.2
+
+Bezpieczeństwo panelu, z zabezpieczeniami przetestowanymi w Bounce Encoder 1.0 (dźwięk, ASIO i routing bez zmian): jedno żądanie na połączenie, treść żądań tylko jako JSON (do 1 MB), pierwsze hasło tylko z `127.0.0.1`/`localhost`, blokada po 5 nieudanych logowaniach zamiast spowalniania, zmiana hasła wylogowuje inne sesje, a podgląd na żywo kończy się z sesją. Własne skrypty korzystające z API muszą wysyłać JSON z `Content-Type: application/json` (panel i ikona w zasobniku już to robią). Szczegóły: [docs/INSTALL.md](docs/INSTALL.md) (rozdziały 4 i 10).
+
 ## Bounce Encoder
 
 Osobny program z tego samego repozytorium (wspólny rdzeń AES67/PTP): **enkoder AES67 → Icecast** dla Windows 10/11 x64. BounceAES Master działa bez zmian obok niego.
@@ -59,6 +63,7 @@ Osobny program z tego samego repozytorium (wspólny rdzeń AES67/PTP): **enkoder
 - Do **8 strumieni Icecast** na stację: **MP3** (LAME), **AAC-LC**, **HE-AAC**, **HE-AACv2** (Fraunhofer FDK AAC), **FLAC** (Ogg); 48 / 44,1 / 32 / 24 / 22,05 kHz; każdy z własnym serwerem, mountpointem, gainem i ponawianiem połączenia.
 - Panel WWW z logowaniem (port **8070**): stacje z miernikami, edycja, odpowiedniki bitrate'ów AAC ↔ MP3, statystyki, logi. Usługa Windows `BounceEncoder`, ikona w zasobniku, instalator `BounceEncoder-setup.exe`.
 - Bez processingu, RDS i metadanych; PTP tylko jako slave.
+- Wersja 1.0.1: blokada logowania działa też przy równoległych próbach (wspólna poprawka z BounceAES Master 1.2.2).
 
 Instrukcja: [docs/ENCODER-INSTALL.md](docs/ENCODER-INSTALL.md), testy i odbiór: [docs/ENCODER-TESTING.md](docs/ENCODER-TESTING.md), specyfikacja: [docs/superpowers/specs/2026-11-05-bounce-encoder-design.md](docs/superpowers/specs/2026-11-05-bounce-encoder-design.md). Licencja fdk-aac nie jest zgodna z GPL, a AAC jest objęty patentami: instalator z kodekiem AAC jest do użytku wewnętrznego ([LICENSING.md](LICENSING.md)).
 
