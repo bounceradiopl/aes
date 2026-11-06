@@ -16,8 +16,8 @@ namespace bam {
 namespace {
 using json = nlohmann::ordered_json;
 
-constexpr uint32_t kMinLatencyUs = 1000;
-constexpr uint32_t kMaxLatencyUs = 1'000'000;
+constexpr uint32_t kMinLatencyUs = kMinRxLatencyUs;
+constexpr uint32_t kMaxLatencyUs = kMaxRxLatencyUs;
 constexpr size_t kMaxNameBytes = 40;
 
 std::string two_digits(int n) {
@@ -31,9 +31,7 @@ void read_field(const json& j, const char* key, T& out) {
   if (j.contains(key)) out = j.at(key).get<T>();
 }
 
-uint32_t min_latency_for(const SdpStream& s) {
-  return static_cast<uint32_t>(std::ceil(s.ptime_ms * 1000.0 - 1e-6)) + 1000;
-}
+uint32_t min_latency_for(const SdpStream& s) { return min_rx_latency_us(s); }
 
 // 1.0 → 1.1: every "device" becomes an output, a subscription and an ASIO pair name, wired the
 // way 1.0 worked (ASIO N plays to output N, subscription N is recorded on ASIO N).
@@ -345,6 +343,10 @@ std::vector<std::string> normalize_config(Config& c) {
   }
   c.mixes = std::move(mixes);
   return notices;
+}
+
+uint32_t min_rx_latency_us(const SdpStream& s) {
+  return static_cast<uint32_t>(std::ceil(s.ptime_ms * 1000.0 - 1e-6)) + 1000;
 }
 
 uint32_t ptime_us_to_frames(uint32_t us) { return static_cast<uint32_t>(std::lround(us * (kSampleRate / 1000.0) / 1000.0)); }

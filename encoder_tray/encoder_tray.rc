@@ -1,0 +1,35 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#include <windows.h>
+
+1 ICON "../tray/bounce.ico"
+2 ICON "../tray/status-ok.ico"
+3 ICON "../tray/status-warn.ico"
+4 ICON "../tray/status-down.ico"
+#ifdef __GNUC__
+// MinGW: embed the manifest here. MSVC gets it through the linker (encoder_tray.manifest listed as a source).
+1 24 "encoder_tray.manifest"
+#endif
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION 1,0,0,0
+PRODUCTVERSION 1,0,0,0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "041504B0"
+    BEGIN
+      VALUE "CompanyName", "Bounce"
+      VALUE "FileDescription", "Bounce Encoder - zasobnik"
+      VALUE "FileVersion", "1.0.0"
+      VALUE "ProductName", "Bounce Encoder"
+      VALUE "ProductVersion", "1.0.0"
+      VALUE "LegalCopyright", "GPL-3.0-or-later"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0415, 1200
+  END
+END

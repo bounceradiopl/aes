@@ -43,7 +43,7 @@ void RxStream::on_packet(std::span<const uint8_t> bytes, uint64_t now_sample, in
   const bool fresh = seq_delta > 0;
 
   const uint64_t ts = unwrap_rtp_timestamp(pkt->header.timestamp, now_sample);
-  const int64_t deadline = static_cast<int64_t>(now_sample) - latency_;
+  const int64_t deadline = static_cast<int64_t>(now_sample) - latency_.load(std::memory_order_relaxed);
   if (static_cast<int64_t>(ts + frames) <= deadline ||
       static_cast<int64_t>(ts) > static_cast<int64_t>(now_sample) + kMaxFutureFrames) {
     if (fresh) {
@@ -90,8 +90,9 @@ void RxStream::on_packet(std::span<const uint8_t> bytes, uint64_t now_sample, in
 }
 
 void RxStream::on_tick(uint64_t now_sample) {
-  if (!started_ || now_sample < latency_) return;
-  const uint64_t deadline = now_sample - latency_;
+  const uint32_t latency = latency_.load(std::memory_order_relaxed);
+  if (!started_ || now_sample < latency) return;
+  const uint64_t deadline = now_sample - latency;
   const uint64_t from = std::max(highest_end_, checked_until_);
   if (deadline > from && deadline - highest_end_ <= kSourceGoneFrames) {
     const uint64_t missing = deadline - from;

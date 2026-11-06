@@ -1,0 +1,28 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Minimal LAME config.h for the CMake build (cmake/lame/CMakeLists.txt): replaces the autoconf
+   one on every platform, MSVC included. Only what libmp3lame and mpglib actually test. */
+#ifndef LAME_CONFIG_H
+#define LAME_CONFIG_H
+
+#define STDC_HEADERS 1
+#define HAVE_ERRNO_H 1
+#define HAVE_FCNTL_H 1
+#define HAVE_LIMITS_H 1
+#define HAVE_STDINT_H 1
+#define HAVE_STRCHR 1
+#define HAVE_MEMCPY 1
+
+/* mpglib is part of the library: hip_decode_* (used by the encoder tests) */
+#define HAVE_MPGLIB 1
+
+/* faster log implementation with less but enough precision */
+#define USE_FAST_LOG 1
+
+#define LAME_LIBRARY_BUILD 1
+#define PACKAGE "lame"
+#define VERSION "@LAME_VERSION@"
+
+typedef float ieee754_float32_t;
+typedef double ieee754_float64_t;
+
+#endif /* LAME_CONFIG_H */

@@ -204,4 +204,21 @@ std::string computer_name() {
   return narrow(buf);
 }
 
+std::string executable_dir() {
+  std::wstring buf(MAX_PATH, L'\0');
+  for (;;) {
+    const DWORD n = GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+    if (n == 0) return {};
+    if (n < buf.size()) {
+      buf.resize(n);
+      break;
+    }
+    buf.resize(buf.size() * 2);  // truncated: long path
+  }
+  const auto sep = buf.find_last_of(L"\\/");
+  if (sep == std::wstring::npos) return {};
+  buf.resize(sep);
+  return narrow(buf.c_str());
+}
+
 }  // namespace bam::platform

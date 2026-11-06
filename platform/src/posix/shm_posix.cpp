@@ -6,7 +6,11 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
+#include <climits>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -193,6 +197,26 @@ std::string computer_name() {
   std::string s(buf);
   if (const auto dot = s.find('.'); dot != std::string::npos) s.resize(dot);
   return s;
+}
+
+std::string executable_dir() {
+  std::string path;
+#ifdef __APPLE__
+  uint32_t size = 0;
+  _NSGetExecutablePath(nullptr, &size);
+  std::string raw(size, '\0');
+  if (_NSGetExecutablePath(raw.data(), &size) != 0) return {};
+  char resolved[PATH_MAX];
+  path = realpath(raw.c_str(), resolved) ? resolved : raw.c_str();
+#else
+  char buf[PATH_MAX];
+  const ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+  if (n <= 0) return {};
+  path.assign(buf, static_cast<size_t>(n));
+#endif
+  const auto slash = path.rfind('/');
+  if (slash == std::string::npos) return {};
+  return slash == 0 ? "/" : path.substr(0, slash);
 }
 
 }  // namespace bam::platform

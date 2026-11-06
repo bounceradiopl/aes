@@ -4,3 +4,4 @@ build*/
 .vs/
 out/
 installer/nsis/*.exe
+codec-cache/

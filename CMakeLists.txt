@@ -12,6 +12,14 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 option(BAM_BUILD_TESTS "Build unit tests" ON)
 option(BAM_BUILD_TOOLS "Build test tools" ON)
+# Bounce Encoder codecs (LAME, fdk-aac, libogg, libFLAC from pinned tarballs, cmake/codecs.cmake).
+# The encoder ships 64-bit only, so a 32-bit build (the ASIO driver for 32-bit hosts) skips them.
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+  set(BAM_WITH_CODECS_DEFAULT ON)
+else()
+  set(BAM_WITH_CODECS_DEFAULT OFF)
+endif()
+option(BAM_WITH_CODECS "Fetch and build the Bounce Encoder codec libraries" ${BAM_WITH_CODECS_DEFAULT})
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /utf-8 /EHsc)
@@ -53,6 +61,11 @@ else()
   endif()
 endif()
 
+# Bounce Encoder codecs: mp3lame, fdk-aac (shared, loaded at run time), ogg + FLAC (static)
+if(BAM_WITH_CODECS)
+  include(cmake/codecs.cmake)
+endif()
+
 # ---- core ----
 file(GLOB BAM_CORE_SOURCES CONFIGURE_DEPENDS core/src/*.cpp)
 add_library(bam_core STATIC ${BAM_CORE_SOURCES})
@@ -85,6 +98,26 @@ if(BAM_ENGINE_SOURCES)
   target_link_libraries(bam_engine PUBLIC bam_platform)
 endif()
 
+# ---- Bounce Encoder: audio encoders (64-bit builds with the codecs) ----
+if(BAM_WITH_CODECS)
+  # LAME and fdk-aac headers only, for the run-time loaded function types and constants
+  add_library(bam_codec_headers INTERFACE)
+  target_include_directories(bam_codec_headers SYSTEM INTERFACE
+    $<TARGET_PROPERTY:mp3lame,INTERFACE_INCLUDE_DIRECTORIES>
+    $<TARGET_PROPERTY:fdk-aac,INTERFACE_INCLUDE_DIRECTORIES>)
+  file(GLOB BAM_ENCODER_SOURCES CONFIGURE_DEPENDS encoder/src/*.cpp)
+  # Bounce Encoder panel: encoder/panel/ -> bam::encoder::kEncoderPanelAssets
+  include(cmake/embed_files.cmake)
+  set(BAM_ENCODER_PANEL_ASSETS_CPP ${CMAKE_CURRENT_BINARY_DIR}/encoder_panel_assets.cpp)
+  bam_embed_files(encoder/panel ${BAM_ENCODER_PANEL_ASSETS_CPP} "bam/encoder/http_server.hpp" bam::encoder
+    EncoderPanelAsset kEncoderPanelAssets kEncoderPanelAssetCount)
+  add_library(bam_encoder STATIC ${BAM_ENCODER_SOURCES} ${BAM_ENCODER_PANEL_ASSETS_CPP})
+  target_include_directories(bam_encoder PUBLIC encoder/include)
+  target_link_libraries(bam_encoder PUBLIC bam_platform PRIVATE bam_codec_headers FLAC::FLAC)
+  # the shared codecs are loaded at run time; build them with anything that uses the encoder
+  add_dependencies(bam_encoder mp3lame fdk-aac)
+endif()
+
 # ---- service ----
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/service/main.cpp)
   set(BAM_SERVICE_SOURCES service/main.cpp)
@@ -93,6 +126,19 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/service/main.cpp)
   endif()
   add_executable(BounceAESService ${BAM_SERVICE_SOURCES})
   target_link_libraries(BounceAESService PRIVATE bam_engine)
+endif()
+
+# ---- Bounce Encoder service (64-bit builds with the codecs) ----
+if(TARGET bam_encoder)
+  set(BAM_ENCODER_SERVICE_SOURCES encoder_service/main.cpp)
+  if(WIN32)
+    list(APPEND BAM_ENCODER_SERVICE_SOURCES service/win_service.cpp encoder_service/encoder.rc)
+  endif()
+  add_executable(BounceEncoder ${BAM_ENCODER_SERVICE_SOURCES})
+  target_include_directories(BounceEncoder PRIVATE service)
+  target_link_libraries(BounceEncoder PRIVATE bam_encoder)
+  # the run-time codec libraries go next to the executable (set_codec_library_dirs default)
+  add_dependencies(BounceEncoder mp3lame fdk-aac)
 endif()
 
 # ---- Windows-only apps ----
@@ -122,6 +168,17 @@ if(WIN32)
     endif()
     if(MINGW)
       target_link_options(BounceAESTray PRIVATE -municode)
+    endif()
+  endif()
+  if(TARGET bam_encoder)
+    add_executable(BounceEncoderTray WIN32 encoder_tray/encoder_tray_main.cpp encoder_tray/encoder_tray.rc)
+    target_include_directories(BounceEncoderTray PRIVATE encoder/include)  # constants only, nothing linked
+    target_link_libraries(BounceEncoderTray PRIVATE bam_core winhttp shell32 user32 gdi32 comctl32 ole32)
+    if(MSVC)
+      target_sources(BounceEncoderTray PRIVATE encoder_tray/encoder_tray.manifest)  # merged by the linker (/MANIFESTINPUT)
+    endif()
+    if(MINGW)
+      target_link_options(BounceEncoderTray PRIVATE -municode)
     endif()
   endif()
 endif()
@@ -159,5 +216,21 @@ if(BAM_BUILD_TESTS)
     target_link_libraries(bam_tests PRIVATE bam_core)
   endif()
   target_compile_definitions(bam_tests PRIVATE BAM_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
+  if(BAM_WITH_CODECS)
+    # the shared codecs are loaded at run time from where the build put them
+    target_compile_definitions(bam_tests PRIVATE BAM_WITH_CODECS
+      BAM_MP3LAME_PATH="$<TARGET_FILE:mp3lame>" BAM_FDKAAC_PATH="$<TARGET_FILE:fdk-aac>")
+    target_link_libraries(bam_tests PRIVATE bam_encoder bam_codec_headers FLAC::FLAC)
+    add_dependencies(bam_tests mp3lame fdk-aac)
+  endif()
   add_test(NAME bam_tests COMMAND bam_tests)
+  # a hanging test must not hold ctest (or CI) for ever; with the progress output of
+  # tests/test_main.cpp a timeout names the test that hung
+  set_tests_properties(bam_tests PROPERTIES TIMEOUT 1200 ENVIRONMENT BAM_TEST_PROGRESS=1)
+  # the Bounce Encoder panel's pure helpers (encoder/panel/logic.js), with node's built-in test runner
+  find_program(BAM_NODE node)
+  if(BAM_NODE)
+    add_test(NAME encoder_panel_logic COMMAND ${BAM_NODE} --test ${CMAKE_CURRENT_SOURCE_DIR}/tests/panel/encoder_panel_logic.test.js)
+    set_tests_properties(encoder_panel_logic PROPERTIES TIMEOUT 120)
+  endif()
 endif()

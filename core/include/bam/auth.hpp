@@ -25,7 +25,8 @@ bool verify_password(std::string_view password, std::string_view stored);
 class SessionStore {
  public:
   std::string create(int64_t now_ns);
-  bool valid(std::string_view token, int64_t now_ns);
+  bool valid(std::string_view token, int64_t now_ns);  // and extends the session by 12 h
+  bool alive(std::string_view token, int64_t now_ns);  // like valid(), without extending it
   void remove(std::string_view token);
 
  private:

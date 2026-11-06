@@ -15,12 +15,36 @@ jobs:
         run: |
           sudo ip link set lo multicast on
           sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0
+      # the codec source tarballs (cmake/codecs.cmake) from the cache, so a download outage at
+      # sourceforge or xiph.org does not break the build; saved right after the configure step
+      # (also when a later step fails)
+      - name: Restore the codec source tarballs
+        id: codecs
+        uses: actions/cache/restore@v4
+        with:
+          path: codec-cache
+          key: codecs-${{ runner.os }}-${{ hashFiles('cmake/codecs.cmake') }}
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBAM_WITH_CODECS=ON -DBAM_CODEC_CACHE=codec-cache
+      - name: Save the codec source tarballs
+        if: steps.codecs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: codec-cache
+          key: codecs-${{ runner.os }}-${{ hashFiles('cmake/codecs.cmake') }}
       - name: Build
         run: cmake --build build
       - name: Unit and integration tests
-        run: ctest --test-dir build --output-on-failure
+        # bam_tests directly, with every test case printed as it starts and ends (a hang names its
+        # test); ctest for the rest (the panel logic under node)
+        timeout-minutes: 25
+        env:
+          BAM_TEST_PROGRESS: 1
+        # from build/: the tests write their temporary files to the working directory
+        working-directory: build
+        run: |
+          ./bam_tests
+          ctest --output-on-failure -E '^bam_tests$'
       - name: Loopback test (32 pairs, PTP simulator, 20 s)
         run: |
           mkdir run && cd run
@@ -33,26 +57,77 @@ jobs:
           ../build/bounceaes-test --configure-loopback --devices 32 --password ci-haslo-123 --interface 127.0.0.1
           sleep 3
           ../build/bounceaes-test --loopback --seconds 20 --devices 32
+      - name: Bounce Encoder starts and finds its codecs next to the executable (127.0.0.1 only)
+        run: |
+          mkdir run-encoder && cd run-encoder
+          printf '{"version":1,"interface_ip":"127.0.0.1","http_bind":"127.0.0.1","http_port":8070,"stations":[]}' > cfg.json
+          # loopback only: refuse to start with anything else in the configuration
+          jq -e '.interface_ip == "127.0.0.1" and .http_bind == "127.0.0.1" and .stations == []' cfg.json
+          ../build/BounceEncoder --version
+          ../build/BounceEncoder --console --config cfg.json > encoder.log 2>&1 &
+          enc=$!
+          sleep 2
+          curl -sf -c jar -H 'Content-Type: application/json' -d '{"password":"ci-haslo-123"}' http://127.0.0.1:8070/api/setup
+          curl -sf -b jar http://127.0.0.1:8070/api/codecs > codecs.json
+          jq -r '.codecs[] | "\(.id) \(.available) \(.library)"' codecs.json
+          jq -e 'all(.codecs[]; .available)' codecs.json
+          curl -sf -b jar http://127.0.0.1:8070/api/status > status.json
+          jq -e '.interface_ip == "127.0.0.1"' status.json
+          test -f public/panel.json
+          kill $enc
       - name: Service log
         if: always()
-        run: cat run/service.log || true
+        run: |
+          cat run/service.log || true
+          cat run-encoder/encoder.log || true
 
   windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Restore the codec source tarballs
+        id: codecs
+        uses: actions/cache/restore@v4
+        with:
+          path: codec-cache
+          key: codecs-${{ runner.os }}-${{ hashFiles('cmake/codecs.cmake') }}
       - name: Configure (MSVC x64, newest Visual Studio on the runner)
-        run: cmake -S . -B build -A x64
+        run: cmake -S . -B build -A x64 -DBAM_WITH_CODECS=ON -DBAM_CODEC_CACHE=codec-cache
+      - name: Save the codec source tarballs
+        if: steps.codecs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: codec-cache
+          key: codecs-${{ runner.os }}-${{ hashFiles('cmake/codecs.cmake') }}
       - name: Build
         run: cmake --build build --config Release
       - name: Tests
-        run: ctest --test-dir build -C Release --output-on-failure
+        # bam_tests directly, with every test case printed as it starts and ends (a hang names its
+        # test); ctest for the rest (the panel logic under node)
+        timeout-minutes: 25
+        env:
+          BAM_TEST_PROGRESS: 1
+        # from build\: the tests write their temporary files to the working directory
+        working-directory: build
+        run: |
+          & Release\bam_tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest -C Release --output-on-failure -E '^bam_tests$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Configure and build 32-bit (ASIO driver for 32-bit hosts such as 32-bit mAirList)
         run: |
-          cmake -S . -B build32 -A Win32
+          cmake -S . -B build32 -A Win32 -DBAM_WITH_CODECS=OFF
           cmake --build build32 --config Release
       - name: Tests (32-bit)
-        run: ctest --test-dir build32 -C Release --output-on-failure
+        timeout-minutes: 25
+        env:
+          BAM_TEST_PROGRESS: 1
+        working-directory: build32
+        run: |
+          & Release\bam_tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest -C Release --output-on-failure -E '^bam_tests$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: ASIO driver as 64-bit and 32-bit hosts see it, 32-bit client with the 64-bit service (no network)
         shell: pwsh
         run: |
@@ -81,6 +156,37 @@ jobs:
             Start-Process -Wait "$env:WINDIR\SysWOW64\regsvr32.exe" -ArgumentList '/s', '/u', "`"$b32\BounceAESAsio.dll`""
             Get-Content service.log -Tail 30 -ErrorAction SilentlyContinue
           }
+      - name: Bounce Encoder starts and loads its codecs from its own folder (127.0.0.1 only, no network)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $b64 = (Resolve-Path build\Release).Path
+          & "$b64\BounceEncoder.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw 'BounceEncoder --version' }
+          New-Item -ItemType Directory encoder-check | Out-Null
+          Set-Location encoder-check
+          '{"version":1,"interface_ip":"127.0.0.1","http_bind":"127.0.0.1","http_port":8070,"stations":[]}' | Set-Content -Encoding ascii cfg.json
+          # loopback only: refuse to start with anything else in the configuration
+          $cfg = Get-Content -Raw cfg.json | ConvertFrom-Json
+          if ($cfg.interface_ip -ne '127.0.0.1' -or $cfg.http_bind -ne '127.0.0.1' -or @($cfg.stations).Count -ne 0) { throw 'cfg.json is not loopback-only' }
+          $enc = Start-Process -PassThru -NoNewWindow -RedirectStandardOutput encoder.out -RedirectStandardError encoder.log "$b64\BounceEncoder.exe" -ArgumentList '--console', '--config', 'cfg.json'
+          try {
+            Start-Sleep 3
+            Invoke-RestMethod -Method Post -ContentType 'application/json' -Body '{"password":"ci-haslo-123"}' -SessionVariable web http://127.0.0.1:8070/api/setup | Out-Null
+            $codecs = (Invoke-RestMethod -WebSession $web http://127.0.0.1:8070/api/codecs).codecs
+            $codecs | Format-Table id, available, library -AutoSize | Out-String | Write-Host
+            $missing = @($codecs | Where-Object { -not $_.available })
+            if ($missing.Count -gt 0) { throw "codecs not available: $($missing.id -join ', ')" }
+            foreach ($c in $codecs | Where-Object { $_.id -ne 'flac' }) {
+              if (-not $c.library.StartsWith($b64, [System.StringComparison]::OrdinalIgnoreCase)) { throw "codec $($c.id) loaded from $($c.library)" }
+            }
+            if (-not (Test-Path public\panel.json)) { throw 'public\panel.json was not written' }
+            $status = Invoke-RestMethod -WebSession $web http://127.0.0.1:8070/api/status
+            if ($status.interface_ip -ne '127.0.0.1') { throw "the service runs on $($status.interface_ip), not 127.0.0.1" }
+          } finally {
+            Stop-Process $enc -ErrorAction SilentlyContinue
+            Get-Content encoder.log -Tail 30 -ErrorAction SilentlyContinue
+          }
       - name: Build NSIS installer
         shell: pwsh
         run: |
@@ -90,6 +196,13 @@ jobs:
           Set-Location installer\nsis
           & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /V2 "/DPAYLOAD=$payload" "/DPAYLOAD32=$payload32" BounceAES-setup.nsi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build Bounce Encoder installer
+        shell: pwsh
+        run: |
+          $payload = Join-Path $PWD 'build\Release'
+          Set-Location installer\nsis
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /V2 "/DPAYLOAD=$payload" BounceEncoder-setup.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Collect binaries
         shell: pwsh
         run: |
@@ -98,6 +211,15 @@ jobs:
           Copy-Item build32\Release\BounceAESAsio.dll dist\BounceAESAsio32.dll
           Copy-Item build32\Release\asio-probe.exe dist\asio-probe32.exe
           Copy-Item installer\install.ps1, installer\uninstall.ps1, LICENSE dist\
+      - name: Collect Bounce Encoder binaries
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist-encoder | Out-Null
+          Copy-Item build\Release\BounceEncoder.exe, build\Release\BounceEncoderTray.exe, build\Release\libmp3lame.dll, build\Release\libfdk-aac-2.dll dist-encoder\
+          Copy-Item -Recurse build\Release\encoder-licenses dist-encoder\licencje
+          Copy-Item LICENSE, LICENSING.md dist-encoder\
+          Copy-Item docs\ENCODER-INSTALL.md dist-encoder\INSTRUKCJA.md
+          Copy-Item docs\ENCODER-TESTING.md dist-encoder\TESTY.md
       - uses: actions/upload-artifact@v4
         with:
           name: BounceAES-Master-setup
@@ -106,3 +228,11 @@ jobs:
         with:
           name: BounceAES-Master-binaries
           path: dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BounceEncoder-setup
+          path: installer/nsis/BounceEncoder-setup.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BounceEncoder-binaries
+          path: dist-encoder

@@ -14,5 +14,6 @@ bool replace_file(const std::string& from, const std::string& to);
 // Copies `from` to `to`, overwriting it.
 bool copy_file(const std::string& from, const std::string& to);
 std::string computer_name();  // UTF-8; empty when unknown
+std::string executable_dir();  // UTF-8 directory of the running executable, no trailing separator; empty when unknown
 
 }  // namespace bam::platform

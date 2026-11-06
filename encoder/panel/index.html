@@ -1,0 +1,259 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bounce Encoder</title>
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <template id="brand-template">
+    <div class="brand">
+      <span class="brand-word">bounce</span>
+      <span class="brand-sub">Encoder</span>
+    </div>
+  </template>
+
+  <!-- Login / first-run password -->
+  <section id="auth" class="auth hidden">
+    <div class="auth-card">
+      <div class="brand-slot"></div>
+      <form id="login-form" class="hidden">
+        <label>Hasło
+          <input type="password" id="login-password" autocomplete="current-password" required>
+        </label>
+        <button type="submit" class="primary">Zaloguj</button>
+        <p class="form-error" id="login-error"></p>
+      </form>
+      <form id="setup-form" class="hidden">
+        <p class="hint">Pierwsze uruchomienie: ustaw hasło do panelu (co najmniej 8 znaków).</p>
+        <label>Nowe hasło
+          <input type="password" id="setup-password" autocomplete="new-password" minlength="8" required>
+        </label>
+        <label>Powtórz hasło
+          <input type="password" id="setup-password2" autocomplete="new-password" minlength="8" required>
+        </label>
+        <button type="submit" class="primary">Ustaw hasło</button>
+        <p class="form-error" id="setup-error"></p>
+      </form>
+      <p id="setup-remote" class="hint hidden">
+        Hasło do panelu nie jest jeszcze ustawione. Ustawia się je przy pierwszym otwarciu panelu na komputerze,
+        na którym działa usługa (adres <code id="setup-remote-url">http://127.0.0.1:8070</code>).
+      </p>
+    </div>
+  </section>
+
+  <div id="app" class="hidden">
+    <header class="topbar">
+      <div class="brand-slot"></div>
+      <div class="pills">
+        <span class="pill" id="pill-ptp" title="Zegar PTP"><b>PTP</b><span>—</span></span>
+        <span class="pill" id="pill-inputs" title="Wejścia AES67 z sygnałem"><b>Wejścia</b><span>—</span></span>
+        <span class="pill" id="pill-streams" title="Strumienie Icecast, które nadają"><b>Strumienie</b><span>—</span></span>
+        <span class="pill plain" id="pill-iface" title="Karta sieciowa AoIP"><b>Sieć</b><span>—</span></span>
+        <button type="button" class="ghost" id="change-password">Zmień hasło</button>
+        <button type="button" class="ghost" id="logout">Wyloguj</button>
+      </div>
+    </header>
+
+    <nav class="tabs" role="tablist">
+      <a href="#stations" data-tab="stations" role="tab" aria-controls="tab-stations">Stacje</a>
+      <a href="#edit" data-tab="edit" role="tab" aria-controls="tab-edit">Edycja stacji</a>
+      <a href="#stats" data-tab="stats" role="tab" aria-controls="tab-stats">Statystyki</a>
+      <a href="#logs" data-tab="logs" role="tab" aria-controls="tab-logs">Logi</a>
+    </nav>
+
+    <main>
+      <!-- ================= Stacje ================= -->
+      <section id="tab-stations" role="tabpanel" class="tab">
+        <div class="card">
+          <div class="card-head">
+            <h2>Stacje <small id="station-count"></small></h2>
+            <div class="head-tools">
+              <button type="button" class="ghost" id="open-settings">Ustawienia…</button>
+              <button type="button" class="primary" id="add-station">Dodaj stację</button>
+            </div>
+          </div>
+          <div id="station-list"></div>
+        </div>
+      </section>
+
+      <!-- ================= Edycja stacji ================= -->
+      <section id="tab-edit" role="tabpanel" class="tab hidden">
+        <div class="card">
+          <div class="edit-head">
+            <h2 id="edit-title">Nowa stacja</h2>
+            <label class="toggle">Stacja
+              <select id="edit-pick" aria-label="Wybierz stację do edycji"></select>
+            </label>
+            <button type="button" class="mini danger" id="edit-delete">Usuń stację</button>
+          </div>
+        </div>
+        <ul class="form-error" id="edit-general" tabindex="-1" hidden></ul>
+        <div class="card">
+          <div class="grid station-grid">
+            <label>Nazwa stacji
+              <input type="text" id="edit-name" maxlength="64" placeholder="np. Radio Bounce" autocomplete="off">
+              <p class="field-error" id="edit-name-error"></p>
+            </label>
+            <label class="toggle"><input type="checkbox" id="edit-enabled"> stacja włączona</label>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h2>Wejścia AES67 <small id="input-count"></small></h2>
+            <button type="button" class="ghost" id="add-input">Dodaj wejście</button>
+          </div>
+          <p class="hint">Wejścia stacji są sumowane. SDP źródła wklej albo wczytaj z pliku (np. z Orbana, konsoli albo BounceAES Master). Opóźnienie przesuwa wejście w czasie (0–60 s, co 0,1 s).</p>
+          <p class="field-error" id="inputs-error"></p>
+          <div class="blocks" id="edit-inputs"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h2>Strumienie Icecast <small id="stream-count"></small></h2>
+            <button type="button" class="ghost" id="add-stream">Dodaj strumień</button>
+          </div>
+          <p class="field-error" id="streams-error"></p>
+          <div class="blocks" id="edit-streams"></div>
+          <details class="eq-table" id="eq-table">
+            <summary>Tabela: AAC a MP3</summary>
+            <table><thead><tr><th>AAC</th><th>≈ MP3</th></tr></thead><tbody id="eq-rows"></tbody></table>
+            <p class="hint" id="eq-text"></p>
+          </details>
+        </div>
+      </section>
+
+      <!-- ================= Statystyki ================= -->
+      <section id="tab-stats" role="tabpanel" class="tab hidden">
+        <div class="stats-top">
+          <div class="card">
+            <h2>Zegar PTP</h2>
+            <dl class="kv" id="ptp-kv"></dl>
+          </div>
+          <div class="card">
+            <h2>Usługa</h2>
+            <dl class="kv" id="svc-kv"></dl>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Stacje</h2>
+          <div class="table-wrap">
+            <table class="stats">
+              <thead><tr><th class="l">Stacja</th><th class="l">Stan</th><th>Czas działania</th><th title="Ramki pominięte przy nadrabianiu opóźnienia">Pominięte ramki</th></tr></thead>
+              <tbody id="stats-station-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Wejścia</h2>
+          <div class="table-wrap">
+            <table class="stats">
+              <thead>
+                <tr><th class="l">Stacja</th><th class="l">Wejście</th><th class="l">Adres</th><th>Pakiety</th><th>Bajty</th><th title="Brak pakietu, gdy był potrzebny">Niedobory</th><th title="Pakiety, które nie zmieściły się w buforze">Przepełnienia</th><th title="Pakiety zgubione lub poza kolejnością">Błędy sekw.</th><th>Jitter ms</th><th class="l">Sygnał</th></tr>
+              </thead>
+              <tbody id="stats-input-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Strumienie</h2>
+          <div class="table-wrap">
+            <table class="stats">
+              <thead>
+                <tr>
+                  <th class="l">Stacja</th><th class="l">Strumień</th><th class="l">Serwer</th><th class="l">Stan</th>
+                  <th>Wysłano</th><th>kb/s</th><th title="Ponowne połączenia z serwerem">Ponowienia</th>
+                  <th title="Dane odrzucone, gdy serwer nie nadążał (kolejka 5 s)">Odrzucone</th>
+                  <th title="Ramki audio odrzucone w kolejce kodera">Ramki: kolejka</th>
+                  <th title="Ramki audio odrzucone przez resampler (błąd lub brak miejsca przy przeliczaniu częstotliwości)">Ramki: resampler</th>
+                  <th title="Czas od nawiązania obecnego połączenia z serwerem">Połączony</th>
+                </tr>
+              </thead>
+              <tbody id="stats-stream-rows"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= Logi ================= -->
+      <section id="tab-logs" role="tabpanel" class="tab hidden">
+        <div class="card">
+          <div class="card-head">
+            <h2>Dziennik zdarzeń</h2>
+            <button type="button" class="ghost" id="refresh-logs">Odśwież</button>
+          </div>
+          <div class="table-wrap">
+            <table class="logs"><tbody id="log-rows"></tbody></table>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div class="savebar hidden" id="savebar">
+      <span id="savebar-text">Niezapisane zmiany</span>
+      <button type="button" class="ghost" id="discard">Odrzuć</button>
+      <button type="button" class="primary" id="save">Zapisz stację</button>
+    </div>
+    <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+  </div>
+
+  <!-- Dialogs -->
+  <dialog id="dlg-confirm">
+    <form method="dialog">
+      <h3 id="confirm-title"></h3>
+      <p class="confirm" id="confirm-text"></p>
+      <menu>
+        <button value="cancel" class="ghost">Anuluj</button>
+        <button value="ok" class="danger solid" id="confirm-ok">Usuń</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-settings">
+    <form method="dialog" id="settings-form">
+      <h3>Ustawienia <small>wspólne dla wszystkich stacji</small></h3>
+      <div class="settings-grid">
+        <label class="wide">Karta sieciowa AoIP
+          <select id="set-iface"></select>
+          <small>Na tej karcie usługa odbiera strumienie AES67 i zegar PTP.</small>
+        </label>
+        <label>Domena PTP
+          <input type="number" id="set-domain" min="0" max="127" step="1">
+        </label>
+        <label>Port panelu
+          <input type="number" id="set-port" min="1" max="65535" step="1">
+        </label>
+        <label class="wide">Adres panelu
+          <input type="text" id="set-bind" autocomplete="off" spellcheck="false">
+          <small>0.0.0.0: panel dostępny ze wszystkich kart sieciowych; 127.0.0.1: tylko z tego komputera. Adres i port zmieniają się po ponownym uruchomieniu usługi.</small>
+        </label>
+      </div>
+      <ul class="form-error" id="set-error" hidden></ul>
+      <menu>
+        <button type="button" class="ghost" data-close>Anuluj</button>
+        <button type="submit" class="primary" id="set-save">Zapisz</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-password">
+    <form method="dialog" id="password-form">
+      <h3>Zmień hasło panelu</h3>
+      <label>Obecne hasło <input type="password" id="pw-current" autocomplete="current-password"></label>
+      <label>Nowe hasło <input type="password" id="pw-new" autocomplete="new-password" minlength="8"></label>
+      <label>Powtórz nowe hasło <input type="password" id="pw-new2" autocomplete="new-password" minlength="8"></label>
+      <p class="form-error" id="pw-error"></p>
+      <menu>
+        <button type="button" class="ghost" data-close>Anuluj</button>
+        <button type="submit" class="primary" id="pw-save">Zmień</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <script src="logic.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

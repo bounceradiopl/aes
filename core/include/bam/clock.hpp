@@ -35,6 +35,8 @@ class MediaClock {
 class ClockSource {
  public:
   MediaClock get() const;
+  // The mapping together with the step generation it belongs to (one consistent pair).
+  MediaClock get(uint64_t* step_generation) const;
   void set(const MediaClock& c, bool stepped);
   uint64_t step_generation() const { return generation_.load(std::memory_order_acquire); }
 
