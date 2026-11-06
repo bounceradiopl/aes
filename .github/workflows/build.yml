@@ -20,7 +20,14 @@ jobs:
       - name: Build
         run: cmake --build build
       - name: Unit and integration tests
-        run: ctest --test-dir build --output-on-failure
+        # bam_tests directly, with every test case printed as it starts and ends (a hang names its
+        # test); ctest for the rest (the panel logic under node)
+        timeout-minutes: 25
+        env:
+          BAM_TEST_PROGRESS: 1
+        run: |
+          ./build/bam_tests
+          ctest --test-dir build --output-on-failure -E '^bam_tests$'
       - name: Loopback test (32 pairs, PTP simulator, 20 s)
         run: |
           mkdir run && cd run
@@ -66,13 +73,29 @@ jobs:
       - name: Build
         run: cmake --build build --config Release
       - name: Tests
-        run: ctest --test-dir build -C Release --output-on-failure
+        # bam_tests directly, with every test case printed as it starts and ends (a hang names its
+        # test); ctest for the rest (the panel logic under node)
+        timeout-minutes: 25
+        env:
+          BAM_TEST_PROGRESS: 1
+        run: |
+          & build\Release\bam_tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir build -C Release --output-on-failure -E '^bam_tests$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Configure and build 32-bit (ASIO driver for 32-bit hosts such as 32-bit mAirList)
         run: |
           cmake -S . -B build32 -A Win32 -DBAM_WITH_CODECS=OFF
           cmake --build build32 --config Release
       - name: Tests (32-bit)
-        run: ctest --test-dir build32 -C Release --output-on-failure
+        timeout-minutes: 25
+        env:
+          BAM_TEST_PROGRESS: 1
+        run: |
+          & build32\Release\bam_tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir build32 -C Release --output-on-failure -E '^bam_tests$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: ASIO driver as 64-bit and 32-bit hosts see it, 32-bit client with the 64-bit service (no network)
         shell: pwsh
         run: |

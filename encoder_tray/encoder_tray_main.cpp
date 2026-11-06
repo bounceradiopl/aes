@@ -5,6 +5,7 @@
 // that one also runs the BounceAES audio bridge and reports ASIO and the PTP master role, none of
 // which the encoder has.
 #include <windows.h>
+#include <objbase.h>
 #include <shellapi.h>
 #include <commctrl.h>
 #include <winhttp.h>
@@ -161,11 +162,23 @@ void poll() {
   Shell_NotifyIconW(NIM_MODIFY, &g_nid);
 }
 
+// SEE_MASK_NOASYNC: ShellExecuteEx returns only when the launch is done, so a caller that exits
+// right after (--open-panel, a second start) does not cut it short.
+bool shell_open(const wchar_t* file, const wchar_t* params) {
+  SHELLEXECUTEINFOW sei{};
+  sei.cbSize = sizeof(sei);
+  sei.fMask = SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+  sei.lpVerb = L"open";
+  sei.lpFile = file;
+  sei.lpParameters = params;
+  sei.nShow = SW_SHOWNORMAL;
+  return ShellExecuteExW(&sei) != FALSE;
+}
+
 void open_panel(const wchar_t* fragment) {
   const std::wstring url = panel_url(fragment);
   const std::wstring args = L"--app=" + url;
-  const auto rc = reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", L"msedge", args.c_str(), nullptr, SW_SHOWNORMAL));
-  if (rc <= 32) ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+  if (!shell_open(L"msedge", args.c_str())) shell_open(url.c_str(), nullptr);
 }
 
 void add_icon(HWND hwnd) {
@@ -289,7 +302,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR cmdline, int) {
   // --open-panel (the Start-menu "Panel Bounce Encoder" entry): open the panel at the address in
   // public\panel.json and exit, whether or not the tray runs.
   if (cmdline && wcsstr(cmdline, L"--open-panel") != nullptr) {
+    // the shell may hand the launch to COM objects: initialise COM for ShellExecuteEx
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     open_panel(L"");
+    if (SUCCEEDED(com)) CoUninitialize();
     return 0;
   }
   // Shortcuts pass --panel; the logon autostart entry does not, so logging in opens no window.

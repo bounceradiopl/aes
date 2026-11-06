@@ -42,19 +42,27 @@ Pliki w `C:\ProgramData\Bounce Encoder\`:
 
 Ostrzeżenia i błędy trafiają też do Dziennika zdarzeń Windows (Aplikacja, źródło „Bounce Encoder”).
 
-**Uprawnienia folderu ustawione ręcznie.** Jeśli instalator zgłosił, że nie mógł ustawić uprawnień, albo folder powstał bez instalatora (np. założył go inny użytkownik), zatrzymaj usługę i uruchom w wierszu poleceń jako administrator:
+**Uprawnienia folderu ustawione ręcznie.** Jeśli instalator zgłosił, że nie mógł ustawić uprawnień, albo folder powstał bez instalatora (np. założył go inny użytkownik), zatrzymaj usługę i uruchom w PowerShellu jako administrator:
 
-```bat
-takeown /F "C:\ProgramData\Bounce Encoder" /A
-icacls "C:\ProgramData\Bounce Encoder" /setowner *S-1-5-32-544 /T /C /Q
-icacls "C:\ProgramData\Bounce Encoder" /reset /T /C /Q
-icacls "C:\ProgramData\Bounce Encoder" /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F
-icacls "C:\ProgramData\Bounce Encoder" /inheritance:r
-mkdir "C:\ProgramData\Bounce Encoder\public"
-icacls "C:\ProgramData\Bounce Encoder\public" /grant:r *S-1-5-32-545:(OI)(CI)RX
+```powershell
+$d = 'C:\ProgramData\Bounce Encoder'
+takeown /F $d /A
+icacls $d /setowner '*S-1-5-32-544' /T /C /Q
+$a = Get-Acl -LiteralPath $d
+$a.SetSecurityDescriptorSddlForm('D:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)', 'Access')
+Set-Acl -LiteralPath $d -AclObject $a
+icacls "$d\*" /reset /T /C /Q
+New-Item -ItemType Directory -Force "$d\public" | Out-Null
+icacls "$d\public" /grant:r '*S-1-5-32-545:(OI)(CI)RX'
 ```
 
-Kolejno: Administratorzy przejmują folder i wszystko w nim (właściciel folderu może zawsze zmienić jego uprawnienia), wszystkie dodane ręcznie uprawnienia są usuwane, Administratorzy i SYSTEM dostają pełną kontrolę, folder przestaje dziedziczyć uprawnienia z `C:\ProgramData`, a podfolder `public` dostaje odczyt dla Użytkowników. `*S-1-5-32-544` to Administratorzy, `*S-1-5-18` to SYSTEM, `*S-1-5-32-545` to Użytkownicy (identyfikatory działają w każdej wersji językowej Windows). Instalator robi to samo przy każdej instalacji i aktualizacji.
+Kolejno:
+1. Administratorzy przejmują folder i wszystko w nim (właściciel folderu może zawsze zmienić jego uprawnienia).
+2. Folder dostaje jednym poleceniem docelowe uprawnienia: tylko Administratorzy (`BA`) i SYSTEM (`SY`), pełna kontrola dziedziczona przez wszystko w środku, bez dziedziczenia z `C:\ProgramData`. Folder ani na chwilę nie dziedziczy dostępu Użytkowników z `C:\ProgramData`.
+3. Wszystko w folderze traci uprawnienia dodane ręcznie i dziedziczy tylko te z punktu 2.
+4. Podfolder `public` dostaje odczyt dla Użytkowników.
+
+`*S-1-5-32-544` to Administratorzy, `*S-1-5-32-545` to Użytkownicy (identyfikatory działają w każdej wersji językowej Windows). Instalator robi to samo przy każdej instalacji i aktualizacji.
 
 ## 3. Pierwsze uruchomienie panelu
 
@@ -166,9 +174,9 @@ Każdy strumień wysyła sygnał stacji do jednego mountpointu na serwerze Iceca
 
 **Zmiana strumienia w trakcie pracy** (np. bitrate'u): po zapisaniu ten strumień zamyka połączenie i łączy się od nowa, z nowymi ustawieniami. Inne strumienie i stacje nadają bez przerwy.
 
-Każdy strumień ma własny wątek i dwie kolejki po około 5 s, więc wolny serwer albo sieć nie wstrzymuje innych strumieni ani stacji:
-- **dźwięk przed kodekiem**: gdy kodek nie nadąża (przeciążony procesor), najstarsze ramki są odrzucane i liczone w Statystykach („Ramki: kolejka”);
-- **dane do serwera**: gdy serwer albo łącze nie nadąża, cała zaległa kolejka jest odrzucana (liczona w „Odrzucone”), a kodek zaczyna strumień od nowa od nowej ramki (FLAC: od nowego nagłówka). Słuchacze słyszą krótką przerwę, ale strumień zostaje poprawny i połączenie trwa.
+Każdy strumień ma własny wątek i dwie kolejki, więc wolny serwer albo sieć nie wstrzymuje innych strumieni ani stacji:
+- **dźwięk przed kodekiem** (5 s): gdy kodek nie nadąża (przeciążony procesor), najstarsze ramki są odrzucane i liczone w Statystykach („Ramki: kolejka”);
+- **dane do serwera** (5 s przy ustawionym bitrate, ale co najmniej 64 KB, więc przy niskich bitrate'ach dłużej: np. 64 KB to około 16 s przy 32 kb/s; FLAC: 5 s dźwięku przed kompresją): gdy serwer albo łącze nie nadąża, cała zaległa kolejka jest odrzucana (liczona w „Odrzucone”), a kodek zaczyna strumień od nowa od nowej ramki (FLAC: od nowego nagłówka). Słuchacze słyszą krótką przerwę, ale strumień zostaje poprawny i połączenie trwa.
 
 ## 8. Kodeki i bitrate
 
@@ -288,7 +296,7 @@ Windows czeka na zatrzymanie usługi do 10 s. Jeśli przy zatrzymaniu pojawia si
 
 ## 14. Licencje kodeków
 
-Bounce Encoder jest na licencji GPL-3.0-or-later. Kodeki to osobne biblioteki, ładowane w czasie pracy:
+Bounce Encoder jest na licencji GPL-3.0-or-later. Kodeki MP3 i AAC to osobne biblioteki ładowane w czasie pracy; libogg, libFLAC i libsamplerate są wkompilowane w program:
 
 | Biblioteka | Licencja | Plik |
 |---|---|---|

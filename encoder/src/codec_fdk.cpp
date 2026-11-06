@@ -122,6 +122,7 @@ class FdkEncoder final : public AudioEncoder {
   // access unit per call. With `eof` the encoder is drained until it reports the end.
   void run(bool eof, std::vector<uint8_t>& out) {
     size_t offset = 0;
+    int idle_drain_calls = 0;  // eof: calls that returned nothing (the drain must end)
     for (;;) {
       const size_t remaining = pcm_.size() - offset;
       if (!eof && remaining == 0) break;
@@ -141,6 +142,9 @@ class FdkEncoder final : public AudioEncoder {
       if (out_args.numOutBytes > 0) out.insert(out.end(), out_buf_.begin(), out_buf_.begin() + out_args.numOutBytes);
       if (!eof && out_args.numInSamples == 0 && out_args.numOutBytes == 0)
         return fail_encode("koder nie przyjmuje danych");  // would otherwise buffer without bound
+      // fdk-aac ends a drain with AACENC_ENCODE_EOF after a few frames of delay; a library that
+      // kept answering "OK, nothing" would loop here for ever
+      if (eof && out_args.numOutBytes == 0 && ++idle_drain_calls > 64) break;
     }
     pcm_.erase(pcm_.begin(), pcm_.begin() + std::ptrdiff_t(offset));
   }

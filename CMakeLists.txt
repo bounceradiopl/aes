@@ -173,7 +173,7 @@ if(WIN32)
   if(TARGET bam_encoder)
     add_executable(BounceEncoderTray WIN32 encoder_tray/encoder_tray_main.cpp encoder_tray/encoder_tray.rc)
     target_include_directories(BounceEncoderTray PRIVATE encoder/include)  # constants only, nothing linked
-    target_link_libraries(BounceEncoderTray PRIVATE bam_core winhttp shell32 user32 gdi32 comctl32)
+    target_link_libraries(BounceEncoderTray PRIVATE bam_core winhttp shell32 user32 gdi32 comctl32 ole32)
     if(MSVC)
       target_sources(BounceEncoderTray PRIVATE encoder_tray/encoder_tray.manifest)  # merged by the linker (/MANIFESTINPUT)
     endif()
@@ -224,9 +224,13 @@ if(BAM_BUILD_TESTS)
     add_dependencies(bam_tests mp3lame fdk-aac)
   endif()
   add_test(NAME bam_tests COMMAND bam_tests)
+  # a hanging test must not hold ctest (or CI) for ever; with the progress output of
+  # tests/test_main.cpp a timeout names the test that hung
+  set_tests_properties(bam_tests PROPERTIES TIMEOUT 1200 ENVIRONMENT BAM_TEST_PROGRESS=1)
   # the Bounce Encoder panel's pure helpers (encoder/panel/logic.js), with node's built-in test runner
   find_program(BAM_NODE node)
   if(BAM_NODE)
     add_test(NAME encoder_panel_logic COMMAND ${BAM_NODE} --test ${CMAKE_CURRENT_SOURCE_DIR}/tests/panel/encoder_panel_logic.test.js)
+    set_tests_properties(encoder_panel_logic PROPERTIES TIMEOUT 120)
   endif()
 endif()

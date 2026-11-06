@@ -19,6 +19,8 @@ Zakres testów Bounce Encoder (część `bam_tests`, razem z testami BounceAES M
 - **API HTTP i panel**: logowanie, pierwsze hasło tylko lokalnie, limity żądań, jedno żądanie na połączenie, odporność na przemycanie żądań, stacje (`POST`/`PUT`/`DELETE`), kodeki, strumień SSE, wbudowane pliki panelu (CSP, bez skryptów inline), `public\panel.json` dla ikony w zasobniku;
 - **logika panelu** (`tests/panel/encoder_panel_logic.test.js`, node): formatowanie, listy bitrate'ów, podpowiedzi AAC↔MP3, hasło po zmianie serwera.
 
+Zmienna środowiskowa `BAM_TEST_PROGRESS=1` wypisuje na bieżąco każdy przypadek testowy (start, koniec, czas), więc zawieszony test widać od razu; CTest ustawia ją sam i przerywa `bam_tests` po 20 minutach.
+
 **Testy nigdy nie wysyłają ruchu do prawdziwej sieci**: używają wyłącznie `127.0.0.1` (Icecast i nadawca AES67 to atrapy w procesie testu). Na Linuksie trzeba włączyć multicast na pętli zwrotnej i porty PTP bez uprawnień: `sudo ip link set lo multicast on`, `sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0`.
 
 **CI** (`.github/workflows/build.yml`): Linux buduje z kodekami i uruchamia wszystkie testy; Windows buduje MSVC x64 z kodekami, uruchamia wszystkie testy, sprawdza, czy `BounceEncoder.exe` uruchomiony na 127.0.0.1 widzi wszystkie pięć kodeków obok siebie, buduje instalatory BounceAES Master i Bounce Encoder i udostępnia artefakty `BounceEncoder-setup` i `BounceEncoder-binaries`.

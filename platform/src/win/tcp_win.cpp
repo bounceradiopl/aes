@@ -154,7 +154,9 @@ int TcpStream::recv(std::span<uint8_t> buf, int timeout_ms) {
   if (fd_ == kInvalid) return -1;
   WSAPOLLFD p{sock(fd_), POLLRDNORM, 0};
   const int pr = WSAPoll(&p, 1, timeout_ms);
-  if (pr <= 0 || !(p.revents & POLLRDNORM)) return -1;
+  // WSAPoll reports a peer's close as POLLHUP without POLLRDNORM (unlike poll() on POSIX): recv()
+  // then returns the 0 of the end of the stream, or the error of a reset.
+  if (pr <= 0 || !(p.revents & (POLLRDNORM | POLLHUP | POLLERR))) return -1;
   const int n = ::recv(sock(fd_), reinterpret_cast<char*>(buf.data()), static_cast<int>(buf.size()), 0);
   if (n == SOCKET_ERROR) return -1;
   return n;
@@ -232,8 +234,11 @@ std::optional<TcpListener> TcpListener::listen(const std::string& ip, uint16_t p
     if (error) *error = wsa_error("socket");
     return std::nullopt;
   }
+  // Exclusive, not SO_REUSEADDR: on Windows SO_REUSEADDR lets another socket bind the same port
+  // too (POSIX only allows a rebind next to TIME_WAIT), so a port this listener holds would not
+  // count as taken for a server that uses SO_REUSEADDR itself (httplib does).
   BOOL one = TRUE;
-  setsockopt(s, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&one), sizeof(one));
+  setsockopt(s, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&one), sizeof(one));
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(port);

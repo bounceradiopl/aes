@@ -979,6 +979,29 @@ TEST_CASE("encoder HTTP: a start that failed to bind can be retried") {
   server.stop();
 }
 
+TEST_CASE("encoder HTTP: a server stopped right after it started does not hang") {
+  // httplib ignores a stop() that comes before its listen thread runs; start() waits for it
+  be::EncoderEngine engine{[] {
+    be::EncoderEngineOptions o;
+    o.enable_ptp = false;
+    return o;
+  }()};
+  std::string err;
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  REQUIRE(engine.start(cfg, &err));
+  for (int i = 0; i < 50; ++i) {
+    be::EncoderHttpServer server(engine, "");
+    REQUIRE_MESSAGE(server.start(kLoopback, 0, &err), err);
+    server.stop();  // returns: the listen thread has ended
+  }
+  {
+    be::EncoderHttpServer server(engine, "");
+    REQUIRE(server.start(kLoopback, 0, &err));
+  }  // the destructor stops it as well
+  engine.stop();
+}
+
 TEST_CASE("encoder service: the panel address file for the tray") {
   const std::string path = unique_path("panel");
   std::string err;

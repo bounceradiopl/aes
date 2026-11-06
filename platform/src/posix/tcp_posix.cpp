@@ -153,7 +153,8 @@ int TcpStream::recv(std::span<uint8_t> buf, int timeout_ms) {
   const int64_t deadline = monotonic_ns() + int64_t(timeout_ms) * 1'000'000;
   pollfd p{static_cast<int>(fd_), POLLIN, 0};
   const int pr = poll_fd(p, deadline);
-  if (pr <= 0 || !(p.revents & POLLIN)) return -1;
+  // a close or reset without POLLIN still goes through recv(): it reports the end (0) or the error
+  if (pr <= 0 || !(p.revents & (POLLIN | POLLHUP | POLLERR))) return -1;
   const ssize_t n = ::recv(static_cast<int>(fd_), buf.data(), buf.size(), 0);
   if (n < 0) return -1;
   return static_cast<int>(n);

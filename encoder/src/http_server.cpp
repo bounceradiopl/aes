@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -355,7 +356,15 @@ struct EncoderHttpServer::Impl {
   std::mutex change_mutex;  // one configuration change (build, validate, save, apply) at a time
   std::thread thread;
   std::atomic<bool> stopping{false};
+  std::atomic<bool> listen_returned{false};  // the listen thread is past listen_after_bind()
   uint16_t port = 0;
+
+  // httplib's Server::stop() does nothing until the listen thread has set is_running(): a stop
+  // that comes first would leave the thread listening for ever and its join() hanging. Waits until
+  // the server listens (or its thread ended). Short: the thread only has to start.
+  void wait_listening() const {
+    while (!server->is_running() && !listen_returned) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
 
   Impl(EncoderEngine& e, std::string path) : engine(e), config_path(std::move(path)) { make_server(); }
 
@@ -803,7 +812,12 @@ bool EncoderHttpServer::start(const std::string& bind, uint16_t port, std::strin
     return false;
   }
   m.port = static_cast<uint16_t>(bound);
-  m.thread = std::thread([&m] { m.server->listen_after_bind(); });
+  m.listen_returned = false;
+  m.thread = std::thread([&m] {
+    m.server->listen_after_bind();
+    m.listen_returned = true;
+  });
+  m.wait_listening();  // a stop() right after this start must reach a running server
   log_info("Panel Bounce Encoder dostępny pod http://" + (bind == "0.0.0.0" ? std::string("127.0.0.1") : bind) + ":" +
            std::to_string(m.port));
   return true;
@@ -813,6 +827,7 @@ void EncoderHttpServer::stop() {
   auto& m = *impl_;
   if (!m.thread.joinable()) return;
   m.stopping = true;
+  m.wait_listening();
   m.server->stop();
   m.thread.join();
 }

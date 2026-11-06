@@ -41,6 +41,9 @@ Unicode true
 !define SID_ADMINS "*S-1-5-32-544"
 !define SID_SYSTEM "*S-1-5-18"
 !define SID_USERS "*S-1-5-32-545"
+; the folder's DACL: protected (P), auto-inherited (AI); full access (FA) for Administrators (BA)
+; and SYSTEM (SY), inherited by subfolders and files (OICI)
+!define FOLDER_SDDL "D:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)"
 
 Name "${APP}"
 OutFile "BounceEncoder-setup.exe"
@@ -182,11 +185,16 @@ Section "Bounce Encoder" SecMain
   ;     The folder may exist already, even created by another user (who would own it, with an
   ;     implicit right to change its ACL, and may have added ACEs of their own). Order:
   ;       1. Administrators take ownership of the folder and everything in it;
-  ;       2. the folder and everything in it go back to inherited ACEs only (explicit ACEs removed);
-  ;       3. Administrators and SYSTEM get inheritable full control;
-  ;       4. only then the ACEs inherited from %ProgramData% are cut (never without step 3);
-  ;       5. Users may read public\.
-  ;     Every step is tried; $1 keeps the first error code for the warning. ---
+  ;       2. the folder gets its final DACL in one call: protected (nothing inherited from
+  ;          %ProgramData%), Administrators and SYSTEM full control, inheritable. At no moment does
+  ;          the folder or a file in it inherit the Users access of %ProgramData% (a /reset of the
+  ;          folder itself would, until the next steps ran);
+  ;       3. everything inside goes back to inherited ACEs only (explicit ACEs removed), and so
+  ;          inherits exactly step 2 - only after step 2 succeeded;
+  ;       4. Users may read public\.
+  ;     Step 2 uses Windows PowerShell (Set-Acl with an SDDL); if that fails, icacls grants first
+  ;     and then cuts inheritance, which never widens the access either. $1 keeps the first error
+  ;     code for the warning. ---
   CreateDirectory "$APPDATA\Bounce Encoder"
   CreateDirectory "$APPDATA\Bounce Encoder\public"
   StrCpy $1 0
@@ -195,29 +203,36 @@ Section "Bounce Encoder" SecMain
   nsExec::ExecToLog 'icacls "$APPDATA\Bounce Encoder" /setowner ${SID_ADMINS} /T /C /Q'
   Pop $0
   ${If} $0 != 0
-  ${AndIf} $1 == 0
     StrCpy $1 $0
   ${EndIf}
-  nsExec::ExecToLog 'icacls "$APPDATA\Bounce Encoder" /reset /T /C /Q'
+  nsExec::ExecToLog `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$ErrorActionPreference = 'Stop'; $$d = '$APPDATA\Bounce Encoder'; $$a = Get-Acl -LiteralPath $$d; $$a.SetSecurityDescriptorSddlForm('${FOLDER_SDDL}', 'Access'); Set-Acl -LiteralPath $$d -AclObject $$a"`
   Pop $0
   ${If} $0 != 0
-  ${AndIf} $1 == 0
-    StrCpy $1 $0
-  ${EndIf}
-  nsExec::ExecToLog 'icacls "$APPDATA\Bounce Encoder" /grant:r ${SID_ADMINS}:(OI)(CI)F ${SID_SYSTEM}:(OI)(CI)F'
-  Pop $0
-  ${If} $0 == 0
-    nsExec::ExecToLog 'icacls "$APPDATA\Bounce Encoder" /inheritance:r'
+    ${If} $1 == 0
+      StrCpy $1 $0
+    ${EndIf}
+    nsExec::ExecToLog 'icacls "$APPDATA\Bounce Encoder" /grant:r ${SID_ADMINS}:(OI)(CI)F ${SID_SYSTEM}:(OI)(CI)F'
     Pop $0
+    ${If} $0 == 0
+      nsExec::ExecToLog 'icacls "$APPDATA\Bounce Encoder" /inheritance:r'
+      Pop $0
+    ${EndIf}
   ${EndIf}
-  ${If} $0 != 0
-  ${AndIf} $1 == 0
-    StrCpy $1 $0
-  ${EndIf}
-  nsExec::ExecToLog 'icacls "$APPDATA\Bounce Encoder\public" /grant:r ${SID_USERS}:(OI)(CI)RX'
-  Pop $0
-  ${If} $0 != 0
-  ${AndIf} $1 == 0
+  ${If} $0 == 0
+    ; the folder's DACL is final: its contents may now inherit it
+    nsExec::ExecToLog 'icacls "$APPDATA\Bounce Encoder\*" /reset /T /C /Q'
+    Pop $0
+    ${If} $0 != 0
+    ${AndIf} $1 == 0
+      StrCpy $1 $0
+    ${EndIf}
+    nsExec::ExecToLog 'icacls "$APPDATA\Bounce Encoder\public" /grant:r ${SID_USERS}:(OI)(CI)RX'
+    Pop $0
+    ${If} $0 != 0
+    ${AndIf} $1 == 0
+      StrCpy $1 $0
+    ${EndIf}
+  ${ElseIf} $1 == 0
     StrCpy $1 $0
   ${EndIf}
   ${If} $1 != 0

@@ -237,7 +237,7 @@ struct FakeIcecast {
     c.peek_wanted = false;
     if (!c.open) return true;
     std::vector<uint8_t> buf(65536);
-    for (;;) {
+    for (int i = 0; i < 256; ++i) {  // bounded: a source that sends without pause is open
       const int n = c.s.recv_some(buf, 0);
       if (n < 0) {
         c.open = false;
@@ -248,6 +248,7 @@ struct FakeIcecast {
       c.body.insert(c.body.end(), buf.begin(), buf.begin() + n);
       c.bytes = c.body.size();
     }
+    return false;
   }
 
   void accept_loop() {
