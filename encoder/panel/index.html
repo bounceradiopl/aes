@@ -41,7 +41,7 @@
       </form>
       <p id="setup-remote" class="hint hidden">
         Hasło do panelu nie jest jeszcze ustawione. Ustawia się je przy pierwszym otwarciu panelu na komputerze,
-        na którym działa usługa (adres <code>http://127.0.0.1:8070</code>).
+        na którym działa usługa (adres <code id="setup-remote-url">http://127.0.0.1:8070</code>).
       </p>
     </div>
   </section>
@@ -60,15 +60,15 @@
     </header>
 
     <nav class="tabs" role="tablist">
-      <a href="#stations" data-tab="stations">Stacje</a>
-      <a href="#edit" data-tab="edit">Edycja stacji</a>
-      <a href="#stats" data-tab="stats">Statystyki</a>
-      <a href="#logs" data-tab="logs">Logi</a>
+      <a href="#stations" data-tab="stations" role="tab" aria-controls="tab-stations">Stacje</a>
+      <a href="#edit" data-tab="edit" role="tab" aria-controls="tab-edit">Edycja stacji</a>
+      <a href="#stats" data-tab="stats" role="tab" aria-controls="tab-stats">Statystyki</a>
+      <a href="#logs" data-tab="logs" role="tab" aria-controls="tab-logs">Logi</a>
     </nav>
 
     <main>
       <!-- ================= Stacje ================= -->
-      <section id="tab-stations" class="tab">
+      <section id="tab-stations" role="tabpanel" class="tab">
         <div class="card">
           <div class="card-head">
             <h2>Stacje <small id="station-count"></small></h2>
@@ -82,7 +82,7 @@
       </section>
 
       <!-- ================= Edycja stacji ================= -->
-      <section id="tab-edit" class="tab hidden">
+      <section id="tab-edit" role="tabpanel" class="tab hidden">
         <div class="card">
           <div class="edit-head">
             <h2 id="edit-title">Nowa stacja</h2>
@@ -92,7 +92,7 @@
             <button type="button" class="mini danger" id="edit-delete">Usuń stację</button>
           </div>
         </div>
-        <ul class="form-error" id="edit-general" hidden></ul>
+        <ul class="form-error" id="edit-general" tabindex="-1" hidden></ul>
         <div class="card">
           <div class="grid station-grid">
             <label>Nazwa stacji
@@ -127,7 +127,7 @@
       </section>
 
       <!-- ================= Statystyki ================= -->
-      <section id="tab-stats" class="tab hidden">
+      <section id="tab-stats" role="tabpanel" class="tab hidden">
         <div class="stats-top">
           <div class="card">
             <h2>Zegar PTP</h2>
@@ -152,7 +152,7 @@
           <div class="table-wrap">
             <table class="stats">
               <thead>
-                <tr><th class="l">Stacja</th><th class="l">Wejście</th><th class="l">Adres</th><th>RxPkts</th><th>RxBytes</th><th>RxUnderrun</th><th>RxOverrun</th><th>RxSeqErr</th><th>Jitter ms</th><th class="l">Sygnał</th></tr>
+                <tr><th class="l">Stacja</th><th class="l">Wejście</th><th class="l">Adres</th><th>Pakiety</th><th>Bajty</th><th title="Brak pakietu, gdy był potrzebny">Niedobory</th><th title="Pakiety, które nie zmieściły się w buforze">Przepełnienia</th><th title="Pakiety zgubione lub poza kolejnością">Błędy sekw.</th><th>Jitter ms</th><th class="l">Sygnał</th></tr>
               </thead>
               <tbody id="stats-input-rows"></tbody>
             </table>
@@ -179,7 +179,7 @@
       </section>
 
       <!-- ================= Logi ================= -->
-      <section id="tab-logs" class="tab hidden">
+      <section id="tab-logs" role="tabpanel" class="tab hidden">
         <div class="card">
           <div class="card-head">
             <h2>Dziennik zdarzeń</h2>
@@ -233,8 +233,8 @@
       </div>
       <ul class="form-error" id="set-error" hidden></ul>
       <menu>
-        <button value="cancel" class="ghost">Anuluj</button>
-        <button type="button" class="primary" id="set-save">Zapisz</button>
+        <button type="button" class="ghost" data-close>Anuluj</button>
+        <button type="submit" class="primary" id="set-save">Zapisz</button>
       </menu>
     </form>
   </dialog>
@@ -247,8 +247,8 @@
       <label>Powtórz nowe hasło <input type="password" id="pw-new2" autocomplete="new-password" minlength="8"></label>
       <p class="form-error" id="pw-error"></p>
       <menu>
-        <button value="cancel" class="ghost">Anuluj</button>
-        <button type="button" class="primary" id="pw-save">Zmień</button>
+        <button type="button" class="ghost" data-close>Anuluj</button>
+        <button type="submit" class="primary" id="pw-save">Zmień</button>
       </menu>
     </form>
   </dialog>

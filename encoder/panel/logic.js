@@ -12,7 +12,6 @@
     latencyMinMs: 1, latencyMaxMs: 1000,
     sdpMaxBytes: 64 * 1024,
   };
-  L.AAC = ["aac", "he-aac", "he-aac-v2"];
 
   // ---------------------------------------------------------------- formatting (Polish)
   const MINUS = "−";
@@ -54,11 +53,23 @@
     return (d ? `${d} d ` : "") + `${pad2(h)}:${pad2(m)}:${pad2(t % 60)}`;
   };
 
-  // A number typed by hand: a comma works as the decimal separator; NaN when empty or not a number.
+  // A number typed by hand: "2,5" and "2.5" both work, and so does a typographic minus; NaN when
+  // empty or not a plain decimal number.
   L.parseNumber = (text) => {
-    const s = String(text ?? "").trim().replace(",", ".");
-    return s === "" ? NaN : Number(s);
+    const s = String(text ?? "").trim().replace(",", ".").replace(MINUS, "-");
+    return /^[-+]?(\d+\.?\d*|\.\d+)$/.test(s) ? Number(s) : NaN;
   };
+
+  // A number field's text checked: { ok, value, error } (error in Polish, for the field).
+  L.checkNumber = (text, { integer = false } = {}) => {
+    const value = L.parseNumber(text);
+    if (Number.isNaN(value)) return { ok: false, value, error: integer ? "wpisz liczbę całkowitą" : "wpisz liczbę, np. 2,5" };
+    if (integer && !Number.isInteger(value)) return { ok: false, value, error: "wpisz liczbę całkowitą" };
+    return { ok: true, value, error: "" };
+  };
+
+  // A model value as a number field shows it: a decimal comma, a plain minus (parseNumber reads it back).
+  L.numberText = (v) => String(v).replace(".", ",");
 
   L.plural = (n, one, few, many) => {
     if (n === 1) return one;
@@ -109,17 +120,16 @@
   // The AAC profiles spec §8 recommends for a bitrate.
   L.recommendedCodecs = (codecs, kbps) => (codecs?.recommendations || []).filter((r) => inRange(r, kbps)).map((r) => r.codec);
 
-  // The hint next to the bitrate field: { mp3, advice, text }, or null for a lossless codec.
+  // The AAC profiles: the codecs the spec §8 tables of /api/codecs talk about.
+  L.aacCodecs = (codecs) => new Set([...(codecs?.recommendations || []), ...(codecs?.mp3_equivalents || [])].map((r) => r.codec));
+
+  // The hint next to the bitrate field of an AAC profile: { mp3, advice, text }; null for any other codec.
   L.bitrateHint = (codecs, id, kbps) => {
     const info = L.codec(codecs, id);
-    if (!info || info.lossless) return null;
-    const aac = L.AAC.includes(id);
-    let advice = "";
-    if (aac) {
-      const rec = L.recommendedCodecs(codecs, kbps);
-      if (rec.length && !rec.includes(id)) advice = `przy ${kbps} kb/s lepiej: ${rec.map((c) => L.codecLabel(codecs, c)).join(" lub ")}`;
-    }
-    return { mp3: aac ? L.mp3Equivalent(codecs, id, kbps) : "", advice, text: codecs?.recommendation_text || "" };
+    if (!info || info.lossless || !L.aacCodecs(codecs).has(id)) return null;
+    const rec = L.recommendedCodecs(codecs, kbps);
+    const advice = rec.length && !rec.includes(id) ? `przy ${kbps} kb/s lepiej: ${rec.map((c) => L.codecLabel(codecs, c)).join(" lub ")}` : "";
+    return { mp3: L.mp3Equivalent(codecs, id, kbps), advice, text: codecs?.recommendation_text || "" };
   };
 
   // The spec §8 table as rows: { aac: "HE-AAC 48–64 kb/s", mp3: "~128 kb/s" }.
@@ -185,6 +195,27 @@
 
   // A stored password that will not be carried over: the user has to type it again.
   L.needsPasswordAgain = (saved, s) => !!saved?.password_set && !s.password && L.serverChanged(saved, s);
+
+  // ---------------------------------------------------------------- the station editor
+  // After /api/config was reloaded: what happens to the editor of station `editId`. Unsaved edits
+  // and a new station are kept; a clean editor is reopened when its station changed, closed when
+  // the station is gone, and otherwise left alone.
+  L.editorReload = (editId, dirty, stations, saved) => {
+    if (!editId || editId === "new" || dirty) return "keep";
+    const fresh = (stations || []).find((s) => s.id === editId);
+    if (!fresh) return "close";
+    return JSON.stringify(fresh) !== JSON.stringify(saved) ? "reopen" : "keep";
+  };
+
+  // After a new login: the open draft stays when its station still exists (or it is a new one).
+  L.keepDraft = (editId, stations) => editId === "new" || (!!editId && (stations || []).some((s) => s.id === editId));
+
+  // The draft as compared for "unsaved changes" (what would be sent).
+  L.draftJson = (station) => JSON.stringify(L.stationBody(station));
+
+  // The saved station differs from the one the draft was opened from (another panel changed or
+  // deleted it).
+  L.changedElsewhere = (saved, current) => !!saved && JSON.stringify(saved) !== JSON.stringify(current);
 
   // The station as the API takes it: panel-only keys (leading "_") and password_set left out.
   L.stationBody = (station) => JSON.parse(JSON.stringify(station, (k, v) => (k.startsWith("_") || k === "password_set" ? undefined : v)));

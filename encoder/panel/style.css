@@ -88,6 +88,11 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--i
 input.invalid, select.invalid, textarea.invalid { border-color: var(--err-fg); background: var(--err-bg); }
 input[type=checkbox] { accent-color: var(--ink); width: 15px; height: 15px; margin: 0; }
 input[type=range] { accent-color: var(--ink); width: 100%; min-width: 0; }
+input[type=checkbox]:focus-visible, input[type=range]:focus-visible, summary:focus-visible, .tabs a:focus-visible {
+  outline: 2px solid var(--ink); outline-offset: 3px; border-radius: 2px;
+}
+input, select, textarea, #edit-general { scroll-margin-top: 96px; }
+#edit-general:focus { outline: 1px solid var(--err-fg); }
 input::placeholder, textarea::placeholder { color: var(--muted); opacity: 0.8; }
 select option:disabled { color: var(--muted); }
 textarea { font-family: var(--mono); font-size: 12.5px; line-height: 1.5; resize: vertical; }
@@ -119,7 +124,7 @@ ul.form-error { padding: 12px 14px 12px 32px; border-radius: 8px; background: va
 ul.form-error li + li { margin-top: 4px; }
 
 .range-row { display: flex; gap: 10px; align-items: center; min-height: 38px; }
-.range-row input[type=number] { width: 84px; flex: none; font-family: var(--mono); font-size: 12.5px; text-align: right; }
+.range-row input[type=text] { width: 84px; flex: none; font-family: var(--mono); font-size: 12.5px; text-align: right; }
 .range-row .unit { color: var(--muted); font-size: 12.5px; min-width: 14px; }
 
 /* ---- tables ---- */

@@ -28,6 +28,10 @@ const state = {
 };
 
 // ---------------------------------------------------------------- helpers
+// A 401: the login screen is already shown, the caller just stops (unsaved drafts stay).
+class AuthRequired extends Error {}
+window.addEventListener("unhandledrejection", (e) => { if (e.reason instanceof AuthRequired) e.preventDefault(); });
+
 async function api(path, options = {}) {
   const res = await fetch(path, {
     credentials: "same-origin",
@@ -39,7 +43,7 @@ async function api(path, options = {}) {
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
   if (res.status === 401 && !path.startsWith("/api/login")) {
     showAuth();
-    throw new Error("wymagane logowanie");
+    throw new AuthRequired("wymagane logowanie");
   }
   return { ok: res.ok, status: res.status, data };
 }
@@ -158,6 +162,7 @@ async function showAuth() {
   $("#login-form").classList.toggle("hidden", !data.password_set);
   $("#setup-form").classList.toggle("hidden", data.password_set || !data.local);
   $("#setup-remote").classList.toggle("hidden", data.password_set || data.local);
+  $("#setup-remote-url").textContent = `http://127.0.0.1:${location.port || (location.protocol === "https:" ? 443 : 80)}`;
   if (data.password_set) $("#login-password").focus();
   else if (data.local) $("#setup-password").focus();
 }
@@ -183,10 +188,12 @@ $("#setup-form").addEventListener("submit", async (e) => {
 });
 
 $("#logout").addEventListener("click", async () => {
+  if (editorDirty() && !(await confirmDialog("Wylogować i odrzucić niezapisane zmiany?",
+    `Zmiany w stacji „${state.draft.name || "nowa stacja"}” nie zostały zapisane.`, "Wyloguj"))) return;
   stopLive();
-  await api("/api/logout", { method: "POST" });
   state.editId = null;
   state.draft = null;
+  await api("/api/logout", { method: "POST" }).catch(() => {});
   showAuth();
 });
 
@@ -196,7 +203,11 @@ $("#change-password").addEventListener("click", () => {
   $("#dlg-password").showModal();
 });
 
-$("#pw-save").addEventListener("click", async () => {
+// Enter in a dialog field submits its form (the save button); "Anuluj" only closes the dialog.
+for (const b of $$("dialog [data-close]")) b.addEventListener("click", () => b.closest("dialog").close());
+
+$("#password-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
   if ($("#pw-new").value !== $("#pw-new2").value) { $("#pw-error").textContent = "Hasła się różnią"; return; }
   const r = await api("/api/password", { method: "POST", body: JSON.stringify({ current: $("#pw-current").value, password: $("#pw-new").value }) });
   if (!r.ok) { $("#pw-error").textContent = r.data?.error || "Błąd"; return; }
@@ -220,7 +231,10 @@ async function showTab() {
       history.replaceState(null, "", editHash(state.editId));  // stays on the unsaved draft
     }
   }
-  for (const a of $$(".tabs a")) a.classList.toggle("active", a.dataset.tab === tab);
+  for (const a of $$(".tabs a")) {
+    a.classList.toggle("active", a.dataset.tab === tab);
+    a.setAttribute("aria-selected", String(a.dataset.tab === tab));
+  }
   for (const s of $$(".tab")) s.classList.toggle("hidden", s.id !== `tab-${tab}`);
   if (tab === "logs") loadLogs();
   updateSavebar();
@@ -236,10 +250,14 @@ async function loadConfig() {
   if (!r.ok) return;
   state.config = r.data;
   renderStations();
-  if (state.editId && state.editId !== "new" && !editorDirty()) {
-    const fresh = state.config.stations.find((s) => s.id === state.editId);
-    if (fresh && JSON.stringify(fresh) !== JSON.stringify(state.saved)) openEditor(state.editId, true);
-    else { state.editId = null; if (parseHash().tab === "edit") location.hash = "#stations"; }
+  switch (L.editorReload(state.editId, editorDirty(), state.config.stations, state.saved)) {
+    case "reopen": openEditor(state.editId, true); break;
+    case "close":  // the station was deleted elsewhere
+      state.editId = null;
+      state.draft = null;
+      if (parseHash().tab === "edit") location.hash = "#stations";
+      break;
+    default: break;  // unchanged, unsaved edits, or a new station: the editor stays as it is
   }
   renderEditPick();
 }
@@ -316,8 +334,12 @@ async function setStationEnabled(id, enabled, input) {
   const st = state.config.stations[i];
   input.disabled = true;
   const body = L.stationBody({ ...st, enabled });
-  const r = await api(`/api/stations/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) });
-  input.disabled = false;
+  let r;
+  try {
+    r = await api(`/api/stations/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) });
+  } finally {
+    input.disabled = false;
+  }
   if (!r.ok) {
     input.checked = !enabled;
     toast(issuesText(r, "Nie można zmienić stacji"), "err");
@@ -325,16 +347,26 @@ async function setStationEnabled(id, enabled, input) {
   }
   adoptConfig(r.data);
   toast(`Stacja „${stationLabel(st, i)}” ${enabled ? "włączona" : "wyłączona"}`);
-  if (state.editId === id && !editorDirty()) openEditor(id, true);
+  if (state.editId !== id) return;
+  if (!editorDirty()) { openEditor(id, true); return; }
+  // unsaved edits stay; the switch, already saved, applies to the draft and its saved copy too
+  state.saved = { ...state.saved, enabled };
+  const original = JSON.parse(state.original);
+  original.enabled = enabled;
+  state.original = JSON.stringify(original);
+  state.draft.enabled = enabled;
+  $("#edit-enabled").checked = enabled;
+  updateSavebar();
 }
 
 async function deleteStation(id) {
   const i = state.config.stations.findIndex((s) => s.id === id);
   if (i < 0) return;
   const st = state.config.stations[i];
+  const n = st.streams.length;
+  const streams = n ? ` ${n} ${L.plural(n, "strumień", "strumienie", "strumieni")} ${L.plural(n, "rozłączy", "rozłączą", "rozłączy")} się z serwerami.` : "";
   const ok = await confirmDialog(`Usunąć stację „${stationLabel(st, i)}”?`,
-    `Stacja przestanie nadawać od razu: ${st.streams.length} ${L.plural(st.streams.length, "strumień", "strumienie", "strumieni")} rozłączy się z serwerami. Tego nie można cofnąć.`,
-    "Usuń stację");
+    `Stacja zostanie usunięta od razu.${streams} Tego nie można cofnąć.`, "Usuń stację");
   if (!ok) return;
   const r = await api(`/api/stations/${encodeURIComponent(id)}`, { method: "DELETE" });
   if (!r.ok) { toast(issuesText(r, "Nie można usunąć stacji"), "err"); return; }
@@ -353,7 +385,7 @@ $("#add-station").addEventListener("click", () => { location.hash = "#edit/new";
 // ---------------------------------------------------------------- station editor
 function editorDirty() {
   if (!state.draft) return false;
-  return state.editId === "new" || JSON.stringify(L.stationBody(state.draft)) !== state.original;
+  return L.draftJson(state.draft) !== state.original;  // a new station: dirty once something was typed
 }
 
 // Opens a station (or "new") in the editor. With unsaved changes it asks first; false = stayed.
@@ -369,7 +401,7 @@ async function openEditor(id, force = false) {
   state.saved = saved ? clone(saved) : null;
   state.draft = saved ? clone(saved) : L.newStation();
   state.draft.inputs.forEach((inp, j) => { inp._k = j; });  // the saved input it was (live meters)
-  state.original = JSON.stringify(L.stationBody(state.draft));
+  state.original = L.draftJson(state.draft);
   state.issues = { fields: {}, general: [] };
   renderEditor();
   return true;
@@ -407,8 +439,41 @@ function issue(rel) {
 function fieldError(rel) { return el("p", { class: "field-error", dataset: { err: rel } }, issue(rel).join(" · ")); }
 
 function checkField(node, rel) {
-  if (state.issues.fields[rel]) node.classList.add("invalid");
+  if (state.issues.fields[rel]) {
+    node.classList.add("invalid");
+    node.setAttribute("aria-invalid", "true");
+  }
   return node;
+}
+
+// A number the panel cannot read is marked on its field (data-bad) and blocks the save, so a value
+// different from the one shown is never sent. Typing a valid number clears the mark (and any
+// server message about the old value).
+function setClientError(input, message) {
+  const err = input.closest("label")?.querySelector("[data-err]");
+  if (message) {
+    input.dataset.bad = message;
+    input.classList.add("invalid");
+    input.setAttribute("aria-invalid", "true");
+    if (err) err.textContent = message;
+  } else if (input.dataset.bad || input.classList.contains("invalid")) {
+    delete input.dataset.bad;
+    input.classList.remove("invalid");
+    input.removeAttribute("aria-invalid");
+    if (err) err.textContent = "";
+  }
+}
+
+// A number field typed by hand: "2,5" and "2.5" both work (text field, decimal keyboard).
+function numberField(value, { rel, label, integer = false, onvalue }) {
+  const input = checkField(el("input", { type: "text", inputMode: integer ? "numeric" : "decimal", value: L.numberText(value), autocomplete: "off",
+    spellcheck: false, "aria-label": label, dataset: { field: rel.split(".").pop() } }), rel);
+  input.addEventListener("input", () => {
+    const c = L.checkNumber(input.value, { integer });
+    setClientError(input, c.ok ? "" : c.error);
+    if (c.ok) onvalue(c.value);
+  });
+  return input;
 }
 
 function renderEditor() {
@@ -420,6 +485,7 @@ function renderEditor() {
   renderEditPick();
   $("#edit-name").value = d.name;
   $("#edit-name").classList.toggle("invalid", !!state.issues.fields.name);
+  if (state.issues.fields.name) $("#edit-name").setAttribute("aria-invalid", "true"); else $("#edit-name").removeAttribute("aria-invalid");
   $("#edit-name-error").textContent = issue("name").join(" · ");
   $("#edit-enabled").checked = d.enabled;
   $("#input-count").textContent = `${d.inputs.length} z ${LIM.inputs}`;
@@ -470,14 +536,12 @@ $("#edit-delete").addEventListener("click", () => { if (state.editId && state.ed
 
 // A gain or delay: a slider and a number field that follow each other.
 function rangeField(value, { min, max, step, unit, label, rel, onvalue }) {
-  const num = checkField(el("input", { type: "number", min, max, step, value, "aria-label": label, dataset: { field: rel.split(".").pop() } }), rel);
   const range = el("input", { type: "range", min, max, step, value: Math.min(max, Math.max(min, value)), "aria-label": `${label} (suwak)` });
-  range.addEventListener("input", () => { num.value = range.value; onvalue(Number(range.value)); });
-  num.addEventListener("input", () => {
-    const v = L.parseNumber(num.value);
-    if (Number.isNaN(v)) return;
-    range.value = Math.min(max, Math.max(min, v));
-    onvalue(v);
+  const num = numberField(value, { rel, label, onvalue: (v) => { range.value = Math.min(max, Math.max(min, v)); onvalue(v); } });
+  range.addEventListener("input", () => {
+    num.value = L.numberText(range.value);
+    setClientError(num, "");
+    onvalue(Number(range.value));
   });
   return el("span", { class: "range-row" }, range, num, el("span", { class: "unit" }, unit));
 }
@@ -535,9 +599,8 @@ function inputBlock(j) {
         el("small", {}, "0–60 s, co 0,1 s: przesuń suwak albo wpisz wartość"), fieldError(`${p}.delay_s`)),
       el("label", {}, "Opóźnienie odbioru",
         el("span", { class: "range-row" },
-          checkField(el("input", { type: "number", min: LIM.latencyMinMs, max: LIM.latencyMaxMs, step: 0.5, value: inp.latency_us / 1000,
-            "aria-label": `Opóźnienie odbioru wejścia ${j + 1} w ms`, dataset: { field: "latency_us" },
-            oninput: (e) => { const v = L.parseNumber(e.target.value); if (!Number.isNaN(v)) set("latency_us", Math.round(v * 1000)); } }), `${p}.latency_us`),
+          numberField(inp.latency_us / 1000, { rel: `${p}.latency_us`, label: `Opóźnienie odbioru wejścia ${j + 1} w ms`,
+            onvalue: (v) => set("latency_us", Math.round(v * 1000)) }),
           el("span", { class: "unit" }, "ms")),
         el("small", {}, "bufor sieciowy, co najmniej ptime źródła + 1 ms"), fieldError(`${p}.latency_us`))));
   return block;
@@ -626,8 +689,8 @@ function streamBlock(k) {
   const text = (key, extra = {}) => checkField(el("input", { type: "text", value: s[key], autocomplete: "off", spellcheck: false, dataset: { field: key }, ...extra,
     oninput: (e) => { set(key, e.target.value.trim()); if (key === "host") updatePassword(); target.textContent = streamTarget(s); } }), `${p}.${key}`);
   const host = text("host", { placeholder: "np. stream.example.pl albo 192.168.1.20", maxLength: 253, "aria-label": `Serwer strumienia ${k + 1}` });
-  const port = checkField(el("input", { type: "number", min: 1, max: 65535, step: 1, value: s.port, "aria-label": `Port strumienia ${k + 1}`, dataset: { field: "port" },
-    oninput: (e) => { const v = L.parseNumber(e.target.value); set("port", Number.isNaN(v) ? 0 : v); updatePassword(); target.textContent = streamTarget(s); } }), `${p}.port`);
+  const port = numberField(s.port, { rel: `${p}.port`, label: `Port strumienia ${k + 1}`, integer: true,
+    onvalue: (v) => { set("port", v); updatePassword(); target.textContent = streamTarget(s); } });
   const mount = text("mount", { placeholder: "/radio.mp3", maxLength: 255, "aria-label": `Mountpoint strumienia ${k + 1}` });
   const user = text("user", { placeholder: "source", maxLength: 255, "aria-label": `Użytkownik strumienia ${k + 1}` });
   updatePassword();
@@ -686,39 +749,70 @@ function clientIssues() {
   return fields;
 }
 
+// Keyboard focus (and the view) on the first marked field, else on the list of other issues.
+function focusFirstError() {
+  const first = $("#tab-edit [aria-invalid=true]");
+  const target = first || ($("#edit-general").hidden ? null : $("#edit-general"));
+  if (!target) return;
+  target.focus({ preventScroll: true });
+  target.scrollIntoView({ block: "center" });
+}
+
 $("#save").addEventListener("click", async () => {
   if (!state.draft || state.saving) return;
+  // a number the panel cannot read: the value shown is not the one that would be sent
+  if ($("#tab-edit [data-bad]")) {
+    toast("Popraw zaznaczone pola", "err");
+    focusFirstError();
+    return;
+  }
   const own = clientIssues();
   if (Object.keys(own).length) {
     state.issues = { fields: own, general: [] };
     renderEditor();
     toast("Popraw zaznaczone pola", "err");
-    $("#edit-streams input.invalid")?.focus();
+    focusFirstError();
     return;
   }
   const isNew = state.editId === "new";
   const id = state.editId;
-  const index = isNew ? state.config.stations.length : state.config.stations.findIndex((s) => s.id === id);
   state.saving = true;
   updateSavebar();
   let r;
   try {
+    if (!isNew) {
+      // changed in another panel since this draft was opened: ask before replacing that change
+      const fresh = await api("/api/config");
+      if (fresh.ok) {
+        state.config = fresh.data;
+        renderStations();
+        const current = state.config.stations.find((s) => s.id === id);
+        if (current && L.changedElsewhere(state.saved, current) &&
+          !(await confirmDialog("Stacja została zmieniona w innym panelu",
+            "Zapisać mimo to? Twoje zmiany zastąpią zmiany wprowadzone w innym panelu lub na innym komputerze.", "Zapisz mimo to"))) return;
+      }
+    }
+    const index = isNew ? state.config.stations.length : state.config.stations.findIndex((s) => s.id === id);
     r = await api(isNew ? "/api/stations" : `/api/stations/${encodeURIComponent(id)}`,
       { method: isNew ? "POST" : "PUT", body: JSON.stringify(L.stationBody(state.draft)) });
+    r.index = index;
+  } catch (e) {
+    if (!(e instanceof AuthRequired)) toast("Brak połączenia z usługą: stacja nie została zapisana", "err");
+    return;  // a 401 shows the login screen; the draft stays for after the login
   } finally {
     state.saving = false;
     updateSavebar();
   }
   if (!r.ok) {
-    state.issues = L.mapIssues(r.data?.issues || [], index);
+    state.issues = L.mapIssues(r.data?.issues || [], r.index);
     if (!r.data?.issues?.length) state.issues.general.push(r.data?.error || `Błąd zapisu (HTTP ${r.status})`);
     renderEditor();
     toast(r.status === 400 ? "Stacja nie została zapisana: popraw zaznaczone pola" : (r.data?.error || "Błąd zapisu"), "err");
-    ($("#tab-edit .invalid") || $("#edit-general:not([hidden])"))?.scrollIntoView({ block: "center", behavior: "smooth" });
+    focusFirstError();
     return;
   }
   adoptConfig(r.data);
-  toast(isNew ? "Dodano stację; nadaje od razu" : "Zapisano i zastosowano stację");
+  toast(!isNew ? "Zapisano i zastosowano stację" : state.draft.enabled ? "Dodano stację; nadaje od razu" : "Dodano stację (wyłączoną)");
   await openEditor(r.data.id, true);
   history.replaceState(null, "", editHash(r.data.id));
   renderEditPick();
@@ -735,7 +829,7 @@ $("#discard").addEventListener("click", async () => {
   await openEditor(state.editId, true);
 });
 
-window.addEventListener("beforeunload", (e) => { if (editorDirty() && state.editId !== "new") e.preventDefault(); });
+window.addEventListener("beforeunload", (e) => { if (editorDirty()) e.preventDefault(); });
 
 // ---------------------------------------------------------------- global settings
 async function openSettings() {
@@ -756,7 +850,8 @@ async function openSettings() {
 }
 $("#open-settings").addEventListener("click", openSettings);
 
-$("#set-save").addEventListener("click", async () => {
+$("#settings-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
   const c = state.config;
   const next = {
     interface_ip: $("#set-iface").value,
@@ -855,7 +950,7 @@ function renderStats() {
     ["Odchyłka", p.has_master ? fmtUs(p.offset_us) : "—"],
     ["Opóźnienie ścieżki", p.has_master ? fmtUs(p.path_delay_us) : "—"],
     ["Korekta częstotliwości", `${L.fmtNum(p.rate_ppm, 3)} ppm`],
-    ["Synchronization Lost", p.sync_lost],
+    ["Utraty synchronizacji", p.sync_lost],
     ["Korekty skokowe", p.steps],
     ...(p.error ? [["Błąd", p.error]] : []),
   ]);
@@ -886,7 +981,7 @@ function renderStats() {
   if (!inputs.length) $("#stats-input-rows").append(el("tr", {}, el("td", { class: "l hint", colSpan: 10 }, "Brak wejść.")));
   $("#stats-stream-rows").replaceChildren(...live.stations.flatMap((st, i) => st.streams.map((x) => el("tr", {},
     name(st, i),
-    el("td", { class: "l" }, x.codec === "flac" ? `${x.codec_label} · ${L.fmtRate(x.sample_rate)}` : `${x.codec_label} · ${x.bitrate_kbps} kb/s · ${L.fmtRate(x.sample_rate)}`),
+    el("td", { class: "l" }, L.codec(state.codecs, x.codec)?.lossless ? `${x.codec_label} · ${L.fmtRate(x.sample_rate)}` : `${x.codec_label} · ${x.bitrate_kbps} kb/s · ${L.fmtRate(x.sample_rate)}`),
     el("td", { class: "l mono" }, `${x.host}:${x.port}${x.mount}`),
     stateCell(L.streamState(x, st.enabled)),
     el("td", {}, L.fmtBytes(x.bytes_sent)), el("td", {}, L.fmtNum(x.kbps, 1)),
@@ -938,8 +1033,13 @@ async function boot() {
   const [cfg, codecs] = await Promise.all([api("/api/config"), api("/api/codecs")]);
   state.config = cfg.data;
   state.codecs = codecs.data;
-  state.editId = null;
-  state.draft = null;
+  // after a new login (session expired, service restarted) an open draft stays while its station exists
+  if (L.keepDraft(state.editId, state.config.stations) && state.draft) {
+    renderEditor();
+  } else {
+    state.editId = null;
+    state.draft = null;
+  }
   renderStations();
   renderEditPick();
   connectLive();

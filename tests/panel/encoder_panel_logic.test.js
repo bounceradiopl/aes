@@ -123,8 +123,8 @@ test("the bitrate hint shows the MP3 equivalent and the codec advice of spec §8
   assert.equal(L.bitrateHint(codecs, "he-aac-v2", 64).advice, "przy 64 kb/s lepiej: HE-AAC");
   assert.equal(L.bitrateHint(codecs, "he-aac", 128).advice, "przy 128 kb/s lepiej: AAC-LC");
   assert.equal(L.bitrateHint(codecs, "he-aac", 96).advice, "");  // 96: HE-AAC and AAC-LC both fit
-  // MP3: no equivalent and no advice, only the general text; FLAC: no hint at all
-  assert.deepEqual(L.bitrateHint(codecs, "mp3", 128), { mp3: "", advice: "", text: codecs.recommendation_text });
+  // MP3 and FLAC: no AAC hint at all
+  assert.equal(L.bitrateHint(codecs, "mp3", 128), null);
   assert.equal(L.bitrateHint(codecs, "flac", 0), null);
 });
 
@@ -217,4 +217,72 @@ test("the station shape is the same for /api/config and /api/live stations", () 
   assert.equal(L.stationsShape(cfg), L.stationsShape(live));
   live[0].streams[0].mount = "/b";
   assert.notEqual(L.stationsShape(cfg), L.stationsShape(live));
+});
+
+// ---------------------------------------------------------------- fix round 1
+test("a configuration reload keeps a clean editor unless its station changed or went away", () => {
+  const s1 = { id: "s1", name: "R1", enabled: true, inputs: [], streams: [] };
+  const s2 = { id: "s2", name: "R2", enabled: true, inputs: [], streams: [] };
+  // another panel renamed s2: the clean s1 editor stays as it is
+  assert.equal(L.editorReload("s1", false, [s1, { ...s2, name: "R2 FM" }], s1), "keep");
+  // s1 itself changed: reopen it with the new values
+  assert.equal(L.editorReload("s1", false, [{ ...s1, enabled: false }, s2], s1), "reopen");
+  // s1 was deleted: close the editor
+  assert.equal(L.editorReload("s1", false, [s2], s1), "close");
+  // unsaved edits are never touched; a new station is not on the server yet
+  assert.equal(L.editorReload("s1", true, [{ ...s1, enabled: false }], s1), "keep");
+  assert.equal(L.editorReload("s1", true, [s2], s1), "keep");
+  assert.equal(L.editorReload("new", false, [s1], null), "keep");
+  assert.equal(L.editorReload(null, false, [s1], null), "keep");
+});
+
+test("an open draft survives a new login while its station exists", () => {
+  const stations = [{ id: "s1" }, { id: "s3" }];
+  assert.equal(L.keepDraft("s1", stations), true);
+  assert.equal(L.keepDraft("s2", stations), false);
+  assert.equal(L.keepDraft("new", stations), true);
+  assert.equal(L.keepDraft(null, stations), false);
+});
+
+test("a new station is dirty only once something was typed", () => {
+  const original = L.draftJson(L.newStation());
+  assert.equal(L.draftJson(L.newStation()), original);
+  const typed = L.newStation();
+  typed.name = "Radio";
+  assert.notEqual(L.draftJson(typed), original);
+  // panel-only keys do not make a draft dirty
+  const s = { id: "s1", name: "R", inputs: [{ sdp: "" }], streams: [{ id: "str1", password: "", password_set: true }] };
+  const d = JSON.parse(JSON.stringify(s));
+  d.inputs[0]._k = 0;
+  assert.equal(L.draftJson(d), L.draftJson(s));
+});
+
+test("a station changed in another panel under an open draft is noticed", () => {
+  const saved = { id: "s1", name: "R", enabled: true, streams: [{ id: "str1", password_set: true }] };
+  assert.equal(L.changedElsewhere(saved, JSON.parse(JSON.stringify(saved))), false);
+  assert.equal(L.changedElsewhere(saved, { ...saved, name: "R FM" }), true);
+  assert.equal(L.changedElsewhere(saved, undefined), true);  // deleted
+  assert.equal(L.changedElsewhere(null, undefined), false);  // a new station
+});
+
+test("hand-typed numbers: both decimal separators, a real minus, and errors instead of silent values", () => {
+  assert.equal(L.parseNumber("2,5"), 2.5);
+  assert.equal(L.parseNumber("2.5"), 2.5);
+  assert.equal(L.parseNumber("−3"), -3);
+  assert.deepEqual(L.checkNumber("2,5"), { ok: true, value: 2.5, error: "" });
+  assert.deepEqual(L.checkNumber(" -6 "), { ok: true, value: -6, error: "" });
+  assert.equal(L.checkNumber("abc").ok, false);
+  assert.equal(L.checkNumber("").ok, false);
+  assert.equal(L.checkNumber("1e3").ok, false);  // only plain decimals
+  assert.equal(L.checkNumber("8000", { integer: true }).value, 8000);
+  assert.equal(L.checkNumber("80,5", { integer: true }).ok, false);
+  assert.match(L.checkNumber("x").error, /liczbę/);
+  assert.equal(L.numberText(-3), "-3");
+  assert.equal(L.numberText(2.5), "2,5");
+});
+
+test("the AAC profiles come from /api/codecs", () => {
+  assert.deepEqual([...L.aacCodecs(codecs)].sort(), ["aac", "he-aac", "he-aac-v2"]);
+  const renamed = { ...codecs, recommendations: [{ codec: "x-aac", min_kbps: null, max_kbps: null }], mp3_equivalents: [] };
+  assert.deepEqual([...L.aacCodecs(renamed)], ["x-aac"]);
 });
