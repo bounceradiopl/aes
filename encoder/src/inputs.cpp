@@ -3,11 +3,14 @@
 // pair in process memory on the media clock (spec §4.1), and the network thread receiving them.
 #include <algorithm>
 #include <cmath>
+#include <functional>
+#include <mutex>
 #include <optional>
 
 #include "bam/config.hpp"  // ptime_us_to_frames
 #include "bam/constants.hpp"
 #include "bam/platform/time.hpp"
+#include "bam/platform/udp.hpp"  // default_interface_ip
 #include "bam/sdp.hpp"
 #include "engine_internal.hpp"
 
@@ -20,6 +23,10 @@ std::atomic<int> g_live_rx{0};
 std::atomic<int> g_live_lines{0};
 std::atomic<int> g_fail_opens{0};  // test hook
 std::atomic<int> g_retry_ms{0};    // test hook, 0 = kRetryNs
+std::atomic<int> g_freed_on_rx{0};  // InputRx destroyed on a network thread (must stay 0)
+thread_local bool t_rx_thread = false;
+std::mutex g_iface_hook_m;
+std::function<std::string()> g_iface_hook;  // test hook for default_interface_ip()
 constexpr int64_t kRetryNs = 5'000'000'000;
 }  // namespace
 
@@ -29,7 +36,18 @@ int64_t input_retry_ns() {
 }
 
 InputRx::InputRx() : id(g_next_id.fetch_add(1)) { g_live_rx.fetch_add(1); }
-InputRx::~InputRx() { g_live_rx.fetch_sub(1); }
+InputRx::~InputRx() {
+  if (t_rx_thread) g_freed_on_rx.fetch_add(1);
+  g_live_rx.fetch_sub(1);
+}
+
+std::string default_interface_ip() {
+  {
+    std::lock_guard lock(g_iface_hook_m);
+    if (g_iface_hook) return g_iface_hook();
+  }
+  return platform::default_interface_ip();
+}
 
 std::shared_ptr<DelayLine> make_delay_line() {
   auto* line = new DelayLine();
@@ -45,6 +63,11 @@ int live_input_receivers() { return g_live_rx.load(); }
 int live_delay_lines() { return g_live_lines.load(); }
 void fail_next_input_opens(int n) { g_fail_opens.store(n); }
 void set_input_retry_ms(int ms) { g_retry_ms.store(ms); }
+int input_receivers_freed_on_rx_thread() { return g_freed_on_rx.load(); }
+void set_default_interface_hook(std::function<std::string()> hook) {
+  std::lock_guard lock(g_iface_hook_m);
+  g_iface_hook = std::move(hook);
+}
 }  // namespace testing
 
 float level_db(float linear) {
@@ -103,9 +126,10 @@ RxThread::RxThread(const ClockSource& clock) : clock_(clock), inputs_(std::make_
 
 RxThread::~RxThread() { stop(); }
 
-void RxThread::set_inputs(std::shared_ptr<const RxSet> inputs) {
+std::shared_ptr<const RxSet> RxThread::set_inputs(std::shared_ptr<const RxSet> inputs) {
   std::lock_guard lock(m_);
-  inputs_ = std::move(inputs);
+  std::swap(inputs_, inputs);
+  return inputs;
 }
 
 std::shared_ptr<const RxSet> RxThread::snapshot() const {
@@ -120,6 +144,7 @@ void RxThread::stop() {
 
 void RxThread::run() {
   platform::set_realtime_priority("Pro Audio");
+  t_rx_thread = true;
   std::vector<uint8_t> buf(2048);
   std::vector<uint8_t> ready;
   std::vector<platform::UdpSocket*> socks;

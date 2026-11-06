@@ -60,6 +60,9 @@ struct IcecastStatus {
   uint64_t reconnects = 0;     // connection attempts after the first one
   uint64_t dropped_bytes = 0;  // bytes thrown away because the queue overflowed while streaming
   double kbps = 0;             // measured send rate over the last second while streaming
+  // Monotonic time of the last transition into Streaming (the current connection's start); 0
+  // while not streaming.
+  int64_t connected_since_ns = 0;
 };
 
 // The error texts shown to the user (spec §6).

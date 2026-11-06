@@ -11,6 +11,7 @@
 #include <mutex>
 #include <string>
 
+#include "bam/encoder/data_dir.hpp"
 #include "bam/encoder/engine.hpp"
 #include "bam/encoder/http_server.hpp"
 #include "bam/encoder/paths.hpp"
@@ -92,8 +93,9 @@ void install_file_sink(const std::string& dir) {
   });
 }
 
-int run(const std::string& config_path, std::atomic<bool>& stop) {
+int run(const std::string& config_path, const std::string& dir_error, std::atomic<bool>& stop) {
   bam::log_info(std::string(be::kEncoderProductName) + " " + be::kEncoderVersion + ", konfiguracja: " + config_path);
+  if (!dir_error.empty()) bam::log_error("Folder danych: " + dir_error);
   const be::EncoderConfig cfg = be::load_startup_config(config_path);
   be::EncoderEngine engine;
   std::string err;
@@ -144,13 +146,22 @@ int main(int argc, char** argv) {
     }
   }
   if (config_path.empty()) config_path = default_config_path();
-  bam::platform::ensure_directory(dir_of(config_path));  // CreateDirectory does not create parents
+  // The service's own folder (deleted after the installation, say) is created with the installer's
+  // protected ACL, never with the one it would inherit from %ProgramData%; a --config elsewhere is
+  // created as any folder. CreateDirectory does not create parents.
+#ifdef _WIN32
+  const bool protect = config_path == default_config_path();
+#else
+  const bool protect = false;
+#endif
+  std::string dir_error;
+  be::create_data_dirs(be::data_dirs(config_path, protect), &dir_error);
   install_file_sink(dir_of(config_path) + kSep + "logs");
 
 #ifdef _WIN32
   if (!console) {
     bam::install_event_log_sink(kEncoderEventSource);
-    if (bam::run_as_windows_service([&](std::atomic<bool>& stop) { return run(config_path, stop); }, kEncoderServiceName))
+    if (bam::run_as_windows_service([&](std::atomic<bool>& stop) { return run(config_path, dir_error, stop); }, kEncoderServiceName))
       return 0;
     print_usage();  // started by hand, not by the service control manager
     return 2;
@@ -164,5 +175,5 @@ int main(int argc, char** argv) {
   });
   std::signal(SIGINT, [](int) { g_console_stop = true; });
   std::signal(SIGTERM, [](int) { g_console_stop = true; });
-  return run(config_path, g_console_stop);
+  return run(config_path, dir_error, g_console_stop);
 }

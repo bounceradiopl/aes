@@ -345,6 +345,8 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
       add(sp + ".streams", label + "najwyżej " + std::to_string(kMaxStreamsPerStation) + " strumieni (jest " +
                                std::to_string(st.streams.size()) + ")");
 
+    // group:port|sender -> input index: one source received twice would be mixed twice (+6 dB)
+    std::map<std::string, size_t> sources;
     for (size_t j = 0; j < st.inputs.size(); ++j) {
       const auto& in = st.inputs[j];
       const std::string f = input_path(i, j) + ".";
@@ -367,7 +369,16 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
       const auto r = parse_sdp(in.sdp);
       if (!r.stream) {
         add(f + "sdp", p + "SDP: " + r.error);
-      } else if (latency_in_range && in.latency_us < min_rx_latency_us(*r.stream)) {
+        continue;
+      }
+      const std::string source = lower(r.stream->multicast_address) + ":" + std::to_string(r.stream->port) + "|" +
+                                 lower(r.stream->source_filter);
+      if (auto [it, inserted] = sources.emplace(source, j); !inserted) {
+        add(f + "sdp", p + "ten sam strumień źródła (" + r.stream->multicast_address + ":" + std::to_string(r.stream->port) +
+                           ") co wejście " + std::to_string(it->second + 1) +
+                           " tej stacji: dźwięk byłby zmiksowany dwa razy (+6 dB); wyłącz lub usuń jedno z wejść");
+      }
+      if (latency_in_range && in.latency_us < min_rx_latency_us(*r.stream)) {
         char buf[48];
         std::snprintf(buf, sizeof(buf), "%.3f ms", min_rx_latency_us(*r.stream) / 1000.0);
         add(f + "latency_us", p + "opóźnienie odbioru musi być co najmniej ptime źródła + 1 ms (" + buf + ")");

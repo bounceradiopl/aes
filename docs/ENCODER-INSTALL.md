@@ -15,17 +15,17 @@ BounceAES Master (sterownik ASIO) i Bounce Encoder to dwa niezależne programy. 
 
 - Windows 10 lub 11, **64-bit**.
 - Karta sieciowa podłączona do sieci AoIP (najlepiej osobna, w VLAN-ie AoIP), a na przełączniku IGMP snooping z querierem.
-- Zegar PTPv2 w sieci (Orban, Omnia, konsola albo BounceAES Master w roli mastera). Bez zegara Bounce Encoder też działa, na zegarze własnym (rozdział 11).
+- Zegar PTPv2 w sieci (Orban, Omnia, konsola albo BounceAES Master w roli mastera), w tej samej domenie co źródła. Bez zsynchronizowanego PTP Bounce Encoder odbiera tylko źródła, które liczą czas tym samym zegarem co on, w praktyce prawie żadne (rozdział 11).
 - Dostęp do serwera Icecast 2.4 (albo nowszego) z hasłem źródła.
 
 ## 2. Instalacja
 
 1. Uruchom `BounceEncoder-setup.exe` i potwierdź uprawnienia administratora.
 2. Instalator:
-   - kopiuje pliki do `C:\Program Files\Bounce Encoder`, razem z bibliotekami kodeków `libmp3lame.dll` (MP3) i `libfdk-aac-2.dll` (AAC). Program ładuje kodeki **tylko ze swojego folderu**;
+   - kopiuje pliki do `C:\Program Files\Bounce Encoder`, razem z bibliotekami kodeków `libmp3lame.dll` (MP3) i `libfdk-aac-2.dll` (AAC). Program ładuje kodeki **tylko ze swojego folderu**. Folder spoza `Program Files` (nowy albo z poprzednią instalacją) dostaje takie same uprawnienia jak `Program Files`: administratorzy i SYSTEM pełna kontrola, Użytkownicy tylko odczyt i uruchamianie, bez dziedziczenia, bo usługa działa jako SYSTEM i nikt inny nie może podmienić jej plików. Uprawnień istniejącego folderu z innymi plikami instalator nie zmienia (ostrzega). Katalog główny dysku nie może być folderem programu;
    - instaluje usługę **Bounce Encoder** (`BounceEncoder`): start automatyczny razem z Windows, restart po awarii po 5 s;
    - rejestruje źródło **Bounce Encoder** w Dzienniku zdarzeń Windows;
-   - dodaje regułę zapory dla programu `BounceEncoder.exe`: odbiór AES67 (RTP), PTP 319/320 i panel 8070. Reguła dotyczy tylko tego programu, nie otwiera portów dla innych;
+   - dodaje regułę zapory dla programu `BounceEncoder.exe`: odbiór AES67 (RTP), PTP 319/320 i panel 8070. Reguła dotyczy tylko tego programu, nie otwiera portów dla innych, ale obowiązuje we **wszystkich profilach sieci** (także „Publiczna”: sieci AoIP Windows zwykle tak klasyfikuje, a bez tego odbiór AES67 by nie działał). Panel jest więc osiągalny z każdej sieci, w której nasłuchuje: ustaw jego adres na kartę sieci administracyjnej (rozdział 4);
    - zakłada folder `C:\ProgramData\Bounce Encoder` z uprawnieniami **tylko dla administratorów i usługi** (SYSTEM), bo `config.json` zawiera hasła strumieni i skrót hasła panelu. Podfolder `public` mogą czytać wszyscy użytkownicy: jest w nim tylko `panel.json` (adres i port panelu dla ikony w zasobniku);
    - dodaje ikonę w zasobniku do autostartu (przy każdym logowaniu);
    - tworzy skrót **Bounce Encoder** na pulpicie i w menu Start (uruchamia ikonę w zasobniku i otwiera panel) oraz w menu Start *Panel Bounce Encoder* (otwiera tylko panel), *Instrukcja* i *Odinstaluj Bounce Encoder*.
@@ -62,12 +62,12 @@ Kolejno:
 3. Wszystko w folderze traci uprawnienia dodane ręcznie i dziedziczy tylko te z punktu 2.
 4. Podfolder `public` dostaje odczyt dla Użytkowników.
 
-`*S-1-5-32-544` to Administratorzy, `*S-1-5-32-545` to Użytkownicy (identyfikatory działają w każdej wersji językowej Windows). Instalator robi to samo przy każdej instalacji i aktualizacji.
+`*S-1-5-32-544` to Administratorzy, `*S-1-5-32-545` to Użytkownicy (identyfikatory działają w każdej wersji językowej Windows). Instalator robi to samo przy każdej instalacji i aktualizacji. Jeśli folder zniknie (np. ktoś go usunął), usługa przy starcie zakłada go od razu z tymi samymi uprawnieniami (i `public` z odczytem dla Użytkowników), nigdy z uprawnieniami odziedziczonymi z `C:\ProgramData`.
 
 ## 3. Pierwsze uruchomienie panelu
 
 1. Kliknij dwukrotnie ikonę Bounce Encoder w zasobniku albo skrót na pulpicie. Możesz też otworzyć `http://127.0.0.1:8070` w przeglądarce na tym komputerze.
-2. Ustaw hasło panelu (co najmniej 8 znaków). Pierwsze hasło można ustawić **tylko z tego komputera**. Z innego komputera panel pokaże tylko tę informację.
+2. Ustaw hasło panelu (co najmniej 8 znaków). Pierwsze hasło można ustawić **tylko z tego komputera**, w panelu otwartym pod adresem `http://127.0.0.1:8070` albo `http://localhost:8070` (nie przez nazwę komputera ani jego adres w sieci: to chroni przed stronami WWW, które podszywają się pod adres tego komputera). W innym przypadku panel pokaże tylko tę informację.
 3. Potem panel jest dostępny również z innych komputerów pod `http://<adres-komputera>:8070`, po zalogowaniu. Jeśli panel ma być dostępny spoza sieci firmowej, wystaw go przez odwrotne proxy z HTTPS. Proxy na tym samym komputerze sprawia, że dla usługi każde żądanie przychodzi z tego komputera: pierwsze hasło dałoby się wtedy ustawić z zewnątrz (ustaw je przed uruchomieniem proxy), a nieudane logowania wszystkich klientów liczą się razem, więc blokada po błędnych hasłach dotyczy wszystkich naraz.
 4. Otwórz **Ustawienia…** (rozdział 4) i wybierz kartę sieciową AoIP.
 
@@ -97,7 +97,7 @@ Podpowiedź ikony pokazuje liczbę nadających strumieni, wejść z sygnałem i 
 
 | Pole | Opis |
 |---|---|
-| Karta sieciowa AoIP | karta, na której usługa odbiera strumienie AES67 i zegar PTP. „Automatycznie” wybiera pierwszą aktywną kartę, ale przy kilku kartach wybierz właściwą ręcznie. Zmiana działa od razu |
+| Karta sieciowa AoIP | karta, na której usługa odbiera strumienie AES67 i zegar PTP. „Automatycznie” wybiera pierwszą aktywną kartę i sprawdza ją co około 2 s: jeśli karta dostanie adres dopiero po starcie usługi albo go zmieni, wejścia i PTP same przechodzą na nowy adres (strumienie nadają dalej). Przy kilku kartach wybierz właściwą ręcznie. Zmiana działa od razu |
 | Domena PTP | taka jak w grandmasterze (w SDP z Orbana: `a=clock-domain:PTPv2 0`). Zmiana działa od razu |
 | Adres panelu | `0.0.0.0`: panel dostępny ze wszystkich kart sieciowych; `127.0.0.1`: tylko z tego komputera; adres jednej karty: tylko z tej sieci |
 | Port panelu | domyślnie 8070 |
@@ -121,7 +121,7 @@ Lista pokazuje dla każdej stacji:
 **Dodaj stację** otwiera edytor nowej stacji. **Edytuj** otwiera edytor istniejącej, **Usuń** usuwa stację od razu (po potwierdzeniu) i rozłącza jej strumienie.
 
 ### Edycja stacji
-Zakładka **Edycja stacji** ma pole wyboru stacji, nazwę, przełącznik „stacja włączona”, wejścia i strumienie. Zmiany wysyła przycisk **Zapisz stację** na dole ekranu (**Odrzuć** je cofa). Zapis dotyczy tylko edytowanej stacji, inne stacje grają dalej bez przerwy. W edytowanej stacji od nowa łączą się tylko strumienie, które się zmieniły. Błędy (np. mountpoint bez „/”) panel pokazuje czerwonym kolorem przy polu i nic nie zapisuje, dopóki ich nie poprawisz.
+Zakładka **Edycja stacji** ma pole wyboru stacji, nazwę, przełącznik „stacja włączona”, wejścia i strumienie. Zmiany wysyła przycisk **Zapisz stację** na dole ekranu (**Odrzuć** je cofa). Zapis dotyczy tylko edytowanej stacji, inne stacje grają dalej bez przerwy. W edytowanej stacji od nowa łączą się tylko strumienie, które się zmieniły. Wyjątek: **zmiana nazwy stacji** łączy od nowa wszystkie jej włączone strumienie (nazwa stacji jest nazwą strumienia `Ice-Name` na serwerze), więc słuchacze usłyszą krótką przerwę; panel ostrzega o tym na pasku zapisu. Błędy (np. mountpoint bez „/”) panel pokazuje czerwonym kolorem przy polu i nic nie zapisuje, dopóki ich nie poprawisz.
 
 Jeśli ktoś w tym czasie zmieni tę samą stację w innym panelu, panel zapyta przed zapisem, czy zastąpić tamte zmiany.
 
@@ -147,6 +147,8 @@ Skąd wziąć SDP:
 
 **Opóźnienie** przesuwa wejście w czasie, np. żeby zgrać studio z nadajnikiem albo dać czas na reakcję. Zmiana w trakcie pracy przechodzi płynnie (wyciszenie i podgłośnienie 5 ms, bez trzasku): zwiększenie opóźnienia wstawia ciszę o długości różnicy, zmniejszenie przeskakuje do przodu. Każde włączone wejście ma bufor na pełne 60 s (około 23 MB pamięci).
 
+Jedno źródło (ten sam adres multicast, port i nadawca) może być tylko w jednym włączonym wejściu stacji: dwa takie wejścia zsumowałyby ten sam dźwięk dwa razy (+6 dB), więc panel nie zapisze takiej stacji.
+
 Zmiana samego opóźnienia odbioru nie kasuje opóźnienia wejścia. Zmiana SDP to nowe źródło: bufor opóźnienia zaczyna się od ciszy.
 
 Brak pakietów na wejściu oznacza ciszę, a nie przerwę w strumieniach: słuchacze słyszą ciszę, połączenia z Icecastem trwają. Stacja bez wejść też nadaje ciszę.
@@ -166,7 +168,7 @@ Każdy strumień wysyła sygnał stacji do jednego mountpointu na serwerze Iceca
 | Gain strumienia | −60…+12 dB, co 0,5 dB, tylko dla tego strumienia. Sygnał powyżej 0 dBFS jest przycinany, nie zawija się |
 | Serwer Icecast | nazwa serwera albo adres IPv4, bez `http://` i bez portu |
 | Port | port serwera Icecast, zwykle 8000 |
-| Mountpoint | zaczyna się od „/”, bez spacji, „?” i „#”, np. `/radio.mp3`. We włączonych stacjach ten sam serwer i mountpoint może wystąpić tylko raz (sprawdzane są wszystkie strumienie tych stacji, także wyłączone). Stacje wyłączone nie są sprawdzane, więc wyłączona stacja zapasowa może mieć te same mountpointy |
+| Mountpoint | zaczyna się od „/”, bez spacji, „?” i „#”, np. `/radio.mp3`. Ten sam serwer i mountpoint może mieć tylko jeden strumień, który nadaje: porównywane są tylko włączone strumienie włączonych stacji. Wyłączony strumień i wyłączona stacja (np. zapasowa) mogą mieć te same mountpointy |
 | Użytkownik | zwykle `source` (puste pole oznacza `source`) |
 | Hasło | hasło źródła Icecast. Wymagane dla włączonego strumienia |
 
@@ -248,15 +250,17 @@ Po błędzie strumień próbuje ponownie po 1, 2, 5 i 10 s, potem co 10 s, bez k
 - **Zegar PTP**: stan, zegar (PTP albo własny), domena, grandmaster, odchyłka, opóźnienie ścieżki, korekta częstotliwości, utraty synchronizacji;
 - **Usługa**: wersja, czas działania, karta sieciowa, liczby stacji, wejść i strumieni;
 - **Stacje**: stan, czas działania, pominięte ramki (powinny zostać na 0);
-- **Wejścia**: pakiety, bajty, niedobory, przepełnienia, błędy sekwencji, jitter, sygnał;
-- **Strumienie**: stan, wysłane bajty, kb/s, ponowienia, odrzucone dane, ramki odrzucone z powodu kolejki i zegara, czas połączenia.
+- **Wejścia**: pakiety, bajty, niedobory, przepełnienia (pakiety odrzucone, m.in. spoza okna czasu: bez synchronizacji PTP rosną stale, rozdział 11), błędy sekwencji, jitter, sygnał;
+- **Strumienie**: stan, wysłane bajty, kb/s, ponowienia, odrzucone dane, ramki odrzucone w kolejce kodera („Ramki: kolejka”) i przez resampler („Ramki: resampler”: błąd albo brak miejsca przy przeliczaniu częstotliwości, powinny zostać na 0), czas obecnego połączenia z serwerem („Połączony”: liczony od nowa po każdym ponownym połączeniu).
 
 **Logi**: ostatnie 500 wpisów usługi, najnowsze na górze. Pełny log jest w `C:\ProgramData\Bounce Encoder\logs\bounce-encoder.log` (tylko dla administratorów).
 
 ## 11. PTP, sieć i strojenie Windows
 
 - Bounce Encoder jest zawsze **PTP slave**: podąża za grandmasterem w wybranej domenie i nigdy nie nadaje zegara. Pasek u góry panelu pokazuje „PTP: zsynchronizowany”, „synchronizacja…” albo „zegar własny”.
-- Bez mastera w sieci program działa na zegarze własnym (free-run). Przy długiej pracy bez PTP mogą się zdarzyć pojedyncze uzupełnienia albo odrzucenia pakietów (widoczne w Statystykach).
+- **Bez synchronizacji PTP odbiór zwykle nie działa.** Bez mastera (albo zanim zegar się zsynchronizuje) program liczy czas mediów z własnego zegara komputera (czas systemowy w skali TAI, „zegar własny”). Pakiety AES67 niosą znaczniki czasu na zegarze nadawcy, a wejście przyjmuje tylko pakiety, których czas wypada w oknie od „teraz − opóźnienie odbioru” do „teraz + 0,5 s”. Nadawca na innym zegarze (urządzenie zsynchronizowane z grandmasterem, którego Bounce Encoder nie widzi, albo z własnym zegarem) jest więc odrzucany w całości: w Statystykach rosną **Przepełnienia**, wejście ma stan „brak sygnału”, a stacja nadaje ciszę.
+- Zegar własny działa tylko wtedy, gdy nadawca liczy czas tym samym zegarem, np. BounceAES Master bez PTP (też na zegarze własnym) na komputerze z czasem z NTP, a różnica czasu obu komputerów stale mieści się w tym oknie: nadawca najwyżej o opóźnienie odbioru za Bounce Encoderem i najwyżej 0,5 s przed nim. Nawet wtedy przy długiej pracy mogą się zdarzyć pojedyncze uzupełnienia albo odrzucenia pakietów (widoczne w Statystykach). Do pracy na antenie potrzebny jest PTP.
+- Gdy pasek pokazuje „zegar własny”, choć master jest w sieci, sprawdź: domenę PTP (Ustawienia… i grandmaster muszą mieć tę samą), wybraną kartę sieciową AoIP (Ustawienia…: zła karta to brak komunikatów PTP), klienta PTP Windows (w32time, poniżej) i zaporę dla portów UDP 319/320.
 - **Klient PTP Windows** (w32time) zająłby porty 319/320. Instalator ostrzega, jeśli jest włączony. Wyłączenie (wiersz poleceń jako administrator):
   `reg add HKLM\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\PtpClient /v Enabled /t REG_DWORD /d 0 /f`, potem `net stop w32time && net start w32time`.
 - Karta sieciowa AoIP (Menedżer urządzeń → Właściwości → Zaawansowane): *Interrupt Moderation*, *Energy Efficient Ethernet* i *Flow Control* wyłączone; w zarządzaniu energią odznacz „Zezwalaj komputerowi na wyłączanie tego urządzenia”. Plan zasilania: „Wysoka wydajność”.
@@ -268,11 +272,11 @@ Po błędzie strumień próbuje ponownie po 1, 2, 5 i 10 s, potem co 10 s, bez k
 |---|---|
 | Ikona czerwona, panel się nie otwiera | `services.msc` → Bounce Encoder → Uruchom; log `C:\ProgramData\Bounce Encoder\logs\bounce-encoder.log`; Dziennik zdarzeń (Aplikacja, źródło „Bounce Encoder”) |
 | Ikona żółta | panel → Stacje: który strumień nie nadaje albo które wejście nie ma sygnału |
-| Wejście „brak sygnału” | czy źródło nadaje; SDP (adres, port); wybrana karta sieciowa AoIP (Ustawienia…); IGMP na przełączniku; zapora |
+| Wejście „brak sygnału” | czy źródło nadaje; SDP (adres, port); wybrana karta sieciowa AoIP (Ustawienia…); IGMP na przełączniku; zapora. Jeśli w Statystykach rosną **Przepełnienia** (pakiety przychodzą, ale są odrzucane): PTP niezsynchronizowany, więc czas źródła i Bounce Encodera się nie zgadza (rozdział 11): domena PTP, karta AoIP, w32time zajmujący porty 319/320, zapora |
 | Wejście z błędem „nieprawidłowy SDP” | SDP musi opisywać L16/L24, 48 kHz, 1–2 kanały, adres multicast; wklej cały plik |
 | Wejście z błędem „dołączenie do grupy …” albo „gniazdo odbiorcze: …” | karta sieciowa AoIP (Ustawienia…) jest rozłączona albo ma inny adres; usługa ponawia próbę sama |
 | Trzaski, rośnie licznik niedoborów | zwiększ opóźnienie odbioru wejścia; ustawienia karty sieciowej (rozdział 11) |
-| PTP „zegar własny”, choć master jest w sieci | domena PTP, karta AoIP, w32time (rozdział 11), zapora |
+| PTP „zegar własny”, choć master jest w sieci | domena PTP (ta sama co w grandmasterze), karta AoIP (Ustawienia…), w32time zajmujący porty 319/320 (rozdział 11), zapora (UDP 319/320) |
 | Strumień z komunikatem błędu | tabela w rozdziale 9 |
 | AAC niedostępny | brak `libfdk-aac-2.dll` w folderze programu: zainstaluj ponownie |
 | Rosną „Odrzucone” w strumieniu | serwer albo łącze nie nadąża: przepustowość wysyłania, obciążenie serwera |
@@ -314,3 +318,5 @@ Bounce Encoder jest na licencji GPL-3.0-or-later. Kodeki MP3 i AAC to osobne bib
 **Odinstalowanie:** *Ustawienia → Aplikacje → Bounce Encoder → Odinstaluj* albo skrót *Odinstaluj Bounce Encoder* w menu Start. Deinstalator zatrzymuje i usuwa usługę, regułę zapory, źródło Dziennika zdarzeń, autostart, skróty i pliki programu. Na koniec pyta, czy usunąć konfigurację i logi (`C:\ProgramData\Bounce Encoder`); domyślnie (i przy deinstalacji cichej `/S`) zostają.
 
 **Podpisywanie plików:** jak w BounceAES Master (INSTALL.md, rozdział 10): `installer\sign.ps1 -Path <folder>` podpisuje pliki `.exe` i `.dll` (także biblioteki kodeków) i instalator własnym certyfikatem firmy. Nigdy nie używaj certyfikatu ani nazwy innego producenta.
+
+**Budowanie ze źródeł** (README.md, rozdział o kompilacji): konfiguracja 64-bitowego buildu z kodekami pobiera archiwa źródeł LAME, fdk-aac, libogg i libFLAC (sourceforge.net, github.com, xiph.org, sprawdzane po SHA-256), więc potrzebuje dostępu do sieci, chyba że kodeki są wyłączone (`-DBAM_WITH_CODECS=OFF`, wtedy bez Bounce Encodera). `-DBAM_CODEC_CACHE=<folder>` zachowuje archiwa i przy kolejnych konfiguracjach używa ich bez sieci.

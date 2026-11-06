@@ -73,7 +73,7 @@ ctest --test-dir build --output-on-failure
 ```
 
 - **Windows (MSVC):** `cmake -S . -B build -A x64 && cmake --build build --config Release` (Visual Studio 2022 lub nowsze). Instalator buduje NSIS, z katalogu `installer/nsis`: `makensis -DPAYLOAD=<bezwzględna ścieżka do plików .exe/.dll> BounceAES-setup.nsi` (działa też na macOS/Linuksie, `brew install makensis`; bez `-DPAYLOAD` bierze `build-win`).
-- **Bounce Encoder:** buildy 64-bitowe pobierają i budują kodeki (LAME, fdk-aac, libogg, libFLAC; `BAM_WITH_CODECS`, `cmake/codecs.cmake`) i tworzą `BounceEncoder` oraz `BounceEncoderTray` (Windows). Instalator: `makensis -DPAYLOAD=<folder z BounceEncoder.exe> BounceEncoder-setup.nsi` w `installer/nsis`.
+- **Bounce Encoder:** buildy 64-bitowe pobierają i budują kodeki (LAME, fdk-aac, libogg, libFLAC; `BAM_WITH_CODECS`, `cmake/codecs.cmake`) i tworzą `BounceEncoder` oraz `BounceEncoderTray` (Windows). **Konfiguracja 64-bitowego buildu z kodekami potrzebuje dostępu do sieci** (archiwa źródeł z sourceforge.net, github.com i xiph.org, sprawdzane po SHA-256), chyba że podasz `-DBAM_WITH_CODECS=OFF` (wtedy bez Bounce Encodera). `-DBAM_CODEC_CACHE=<folder>` trzyma pobrane archiwa w tym folderze i przy kolejnych konfiguracjach bierze je stamtąd bez sieci (tak robi CI). Instalator: `makensis -DPAYLOAD=<folder z BounceEncoder.exe> BounceEncoder-setup.nsi` w `installer/nsis`.
 - **Kompilacja skrośna z macOS/Linuksa:** `cmake -S . -B build-win -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake -DCMAKE_BUILD_TYPE=Release`.
 - **macOS/Linux:** usługę można uruchomić do testów: `build/BounceAESService --console --config moja.json`. Sterownik ASIO i aplikacja w zasobniku powstają tylko na Windows.
 

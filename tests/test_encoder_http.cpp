@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "bam/auth.hpp"
+#include "bam/encoder/data_dir.hpp"
 #include "bam/encoder/engine.hpp"
 #include "bam/encoder/http_server.hpp"
 #include "bam/encoder/paths.hpp"
@@ -30,6 +31,14 @@
 #include "bam/sdp.hpp"
 #include "../encoder/src/login_throttle.hpp"  // LoginThrottle (the login counter behind 429)
 #include "test_util.hpp"
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <aclapi.h>
+#endif
 
 namespace be = bam::encoder;
 namespace bp = bam::platform;
@@ -694,6 +703,7 @@ TEST_CASE("encoder HTTP: status of stations, inputs, streams and PTP") {
   CHECK(str.contains("reconnects"));
   CHECK(str.contains("dropped_bytes"));
   CHECK(str.contains("queue_dropped_frames"));
+  CHECK(str["connected_s"] == 0);  // never connected (the panel's "Połączony" column)
   CHECK(str["encoder_failed"] == !be::codec_available(be::Codec::Mp3));
   if (be::codec_available(be::Codec::Mp3)) {
     CHECK(str["codec_library"] == be::codec_library_path(be::Codec::Mp3));
@@ -841,6 +851,52 @@ TEST_CASE("encoder HTTP: a body must be JSON (no cross-origin simple requests)")
   CHECK(f.client->Put("/api/config", f.auth, R"({"ptp_domain":3})", "application/json; charset=utf-8")->status == 200);
   // a POST without a body needs no type
   CHECK(f.client->Post("/api/logout", f.auth)->status == 200);
+}
+
+TEST_CASE("encoder HTTP: the first password only through a loopback Host (no DNS rebinding)") {
+  // A web page in a browser on the encoder computer can rebind its own domain to 127.0.0.1: its
+  // requests then come from 127.0.0.1 and are same-origin, but carry the page's Host.
+  const std::string body = json{{"password", kPassword}}.dump();
+  {
+    Fixture f;
+    for (const char* host : {"evil.example", "evil.example:8070", "127.0.0.1.evil.example", "localhost.evil.example",
+                             "192.168.1.10:8070", "[::2]:8070", ""}) {
+      auto r = f.client->Post("/api/setup", {{"Host", host}}, body, "application/json");
+      REQUIRE(r);
+      CHECK_MESSAGE(r->status == 403, host);
+      CHECK(json::parse(r->body)["error"].get<std::string>().find("127.0.0.1") != std::string::npos);
+      // the panel shows the "open http://127.0.0.1:port" hint instead of the form
+      CHECK(json::parse(f.client->Get("/api/auth-state", {{"Host", host}})->body)["local"] == false);
+    }
+    // HTTP/1.0 without any Host
+    CHECK(raw_status(f.server->port(), "POST /api/setup HTTP/1.0\r\nContent-Type: application/json\r\nContent-Length: " +
+                                           std::to_string(body.size()) + "\r\n\r\n" + body) == 403);
+    CHECK(json::parse(f.client->Get("/api/auth-state")->body)["password_set"] == false);
+    const json saved = f.file();
+    CHECK(saved.value("password_hash", std::string()).empty());
+  }
+  const auto port_of = [](const Fixture& f) { return std::to_string(f.server->port()); };
+  for (const std::string host : {"127.0.0.1:%", "localhost:%", "LocalHost:%", "127.0.0.1", "localhost", "[::1]:%", "[::1]"}) {
+    Fixture f;
+    std::string h = host;
+    if (const size_t pct = h.find('%'); pct != std::string::npos) h.replace(pct, 1, port_of(f));
+    CHECK(json::parse(f.client->Get("/api/auth-state", {{"Host", h}})->body)["local"] == true);
+    auto r = f.client->Post("/api/setup", {{"Host", h}}, body, "application/json");
+    REQUIRE(r);
+    CHECK_MESSAGE(r->status == 200, h);
+  }
+}
+
+TEST_CASE("encoder HTTP: a large form body is refused as the wrong type, not as over 1 MB") {
+  Fixture f;
+  // httplib refuses urlencoded bodies over 8 KB itself (413) before any handler runs
+  auto r = f.client->Post("/api/setup", "password=" + std::string(9000, 'x'), "application/x-www-form-urlencoded");
+  if (!r && kResetMayLoseAnswer) return;  // the refused body is unread at the close (see status_or_reset)
+  REQUIRE(r);
+  CHECK(r->status == 413);
+  const std::string error = json::parse(r->body)["error"].get<std::string>();
+  CHECK(error.find("application/json") != std::string::npos);
+  CHECK(error.find("1 MB") == std::string::npos);
 }
 
 TEST_CASE("encoder HTTP: failed logins are throttled without holding a request thread") {
@@ -1067,6 +1123,67 @@ TEST_CASE("encoder service: panel.json lives in the public folder next to the co
   CHECK(j == json({{"bind", "10.0.0.6"}, {"port", 8071}}));
   CHECK_FALSE(exists(path + ".tmp"));
   CHECK_FALSE(exists(dir + "/panel.json"));  // never next to config.json itself
+}
+
+TEST_CASE("encoder service: a missing data folder is created with the installer's protected access") {
+  // the service's own folder: protected DACL, Administrators + SYSTEM only; public\ adds Users read
+  const auto dirs = be::data_dirs("C:\\ProgramData\\Bounce Encoder\\config.json", true);
+  REQUIRE(dirs.size() == 2);
+  CHECK(dirs[0].path == "C:\\ProgramData\\Bounce Encoder");
+  CHECK(dirs[0].sddl == "D:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)");
+  CHECK(dirs[1].path == "C:\\ProgramData\\Bounce Encoder\\public");
+  CHECK(dirs[1].sddl == "D:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;FRFX;;;BU)");
+  // the installer sets the same DACL on the folder
+  const std::string nsi = read_file(BAM_TEST_DATA "/../../installer/nsis/BounceEncoder-setup.nsi");
+  CHECK(nsi.find(std::string("!define FOLDER_SDDL \"") + be::kDataDirSddl + "\"") != std::string::npos);
+  // a configuration elsewhere (--config, POSIX) gets no SDDL
+  const auto plain = be::data_dirs("bounce-encoder-config.json", false);
+  REQUIRE(plain.size() == 2);
+  CHECK(plain[0].path == ".");
+  CHECK(plain[0].sddl.empty());
+  CHECK(plain[1].path == "./public");
+  CHECK(plain[1].sddl.empty());
+
+  struct TempDir {
+    std::string path;
+    ~TempDir() {
+      std::error_code ec;
+      std::filesystem::remove_all(path, ec);
+    }
+  };
+  const std::string tag = std::to_string(bp::current_pid());
+  TempDir temp{"bam_enc_datadir_" + tag};
+  const std::string config_path = temp.path + "/config.json";
+  std::string err;
+  REQUIRE_MESSAGE(be::create_data_dirs(be::data_dirs(config_path, false), &err), err);
+  REQUIRE_MESSAGE(be::create_data_dirs(be::data_dirs(config_path, false), &err), err);  // existing: fine
+  CHECK(std::filesystem::is_directory(temp.path));
+  CHECK(std::filesystem::is_directory(temp.path + "/public"));
+#ifdef _WIN32
+  // the real security descriptors, each on a folder of its own in the working directory (a
+  // non-elevated test could not create a folder inside one that only Administrators may use)
+  TempDir data{"bam_enc_datadir_a_" + tag}, pub{"bam_enc_datadir_p_" + tag};
+  REQUIRE_MESSAGE(be::create_data_dirs({{data.path, be::kDataDirSddl}, {pub.path, be::kPublicDirSddl}}, &err), err);
+  const std::vector<std::pair<std::string, DWORD>> expected = {{data.path, 2}, {pub.path, 3}};
+  for (const auto& [path, aces] : expected) {
+    PACL dacl = nullptr;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    const std::filesystem::path native(path);
+    REQUIRE(GetNamedSecurityInfoW(native.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, &dacl, nullptr,
+                                  &sd) == ERROR_SUCCESS);
+    SECURITY_DESCRIPTOR_CONTROL control = 0;
+    DWORD revision = 0;
+    CHECK(GetSecurityDescriptorControl(sd, &control, &revision));
+    CHECK_MESSAGE((control & SE_DACL_PROTECTED) != 0, path);  // nothing inherited from the parent
+    CHECK(dacl != nullptr);
+    if (dacl) {
+      CHECK_MESSAGE(dacl->AceCount == aces, path);
+    }
+    LocalFree(sd);
+  }
+#endif
+  CHECK_FALSE(be::create_data_dirs({{temp.path + "/missing-parent/x", ""}}, &err));
+  CHECK(err.find("missing-parent") != std::string::npos);
 }
 
 TEST_CASE("encoder HTTP: a request hidden in a refused request's body is never executed") {

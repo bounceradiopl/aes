@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <mutex>
@@ -62,9 +63,30 @@ std::string session_cookie(const httplib::Request& req) {
   return {};
 }
 
-bool is_local(const httplib::Request& req) {
+bool is_local_address(const httplib::Request& req) {
   return req.remote_addr == "127.0.0.1" || req.remote_addr == "::1" || req.remote_addr == "::ffff:127.0.0.1";
 }
+
+// The Host header names this computer by a loopback literal: 127.0.0.1, localhost or [::1], with
+// an optional port (case-insensitive). A page that rebinds its own domain to 127.0.0.1 (DNS
+// rebinding) sends requests from 127.0.0.1, same-origin, but with its own name as the Host.
+bool is_loopback_host(const httplib::Request& req) {
+  if (req.get_header_value_count("Host") != 1) return false;
+  std::string host = req.get_header_value("Host");
+  for (char& c : host) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  for (const char* name : {"127.0.0.1", "localhost", "[::1]"}) {
+    const size_t n = std::strlen(name);
+    if (host.compare(0, n, name) != 0) continue;
+    if (host.size() == n) return true;
+    const std::string port = host.substr(n + 1);
+    return host[n] == ':' && !port.empty() && port.size() <= 5 && port.find_first_not_of("0123456789") == std::string::npos;
+  }
+  return false;
+}
+
+// A request from a browser on this computer that opened the panel by a loopback address: the
+// only place the first password may be set from.
+bool is_local(const httplib::Request& req) { return is_local_address(req) && is_loopback_host(req); }
 
 std::optional<json> parse_body(const httplib::Request& req, httplib::Response& res) {
   try {
@@ -184,7 +206,8 @@ json status_json(const EncoderStatus& s) {
                          {"queue_dropped_frames", str.queue_dropped_frames},
                          {"conditioner_dropped_frames", str.conditioner_dropped_frames},
                          {"peak_db", peaks(str.peak_db)},
-                         {"uptime_s", uptime_s(str.started_ns, now)}});
+                         {"uptime_s", uptime_s(str.started_ns, now)},  // since the stream (worker) started
+                         {"connected_s", uptime_s(str.icecast.connected_since_ns, now)}});  // since the current connection
     }
     stations.push_back({{"id", st.id},
                         {"name", st.name},
@@ -584,9 +607,12 @@ struct EncoderHttpServer::Impl {
 
   void routes(httplib::Server& server) {
     server.set_payload_max_length(kMaxApiBodyBytes);  // a second line of defence: checked before routing below
-    server.set_error_handler([](const httplib::Request&, httplib::Response& res) {
+    server.set_error_handler([](const httplib::Request& req, httplib::Response& res) {
       if (res.has_header("Content-Type")) return httplib::Server::HandlerResponse::Unhandled;  // already answered
-      if (res.status == 413) {
+      if (res.status == 413 && !is_json_type(req.get_header_value("Content-Type"))) {
+        // httplib's own limit for a form (urlencoded) body, 8 KB, far below ours: the type is wrong
+        send_error(res, 413, "oczekiwano treści typu application/json");
+      } else if (res.status == 413) {
         send_error(res, 413, "treść żądania jest za duża (najwyżej " + std::to_string(kMaxApiBodyBytes / (1024 * 1024)) + " MB)");
       } else if (res.status == 400) {
         send_error(res, 400, "nieprawidłowe żądanie");
@@ -606,7 +632,8 @@ struct EncoderHttpServer::Impl {
       return refuse(req, res) ? httplib::Server::HandlerResponse::Handled : httplib::Server::HandlerResponse::Unhandled;
     });
 
-    // Every route goes through guard(): the session (kSession), checked after the body was read.
+    // Every route goes through guard(): the body type (415) and the session (kSession, 401), both
+    // checked after the body was read.
     using Handler = httplib::Server::Handler;
     auto get = [&](const std::string& pattern, Access a, Handler h) { server.Get(pattern, guard(a, std::move(h))); };
     auto post = [&](const std::string& pattern, Access a, Handler h) { server.Post(pattern, guard(a, std::move(h))); };
@@ -630,7 +657,12 @@ struct EncoderHttpServer::Impl {
 
     post("/api/setup", kPublic, [this](const httplib::Request& req, httplib::Response& res) {
       if (!engine.config().password_hash.empty()) return send_error(res, 409, "hasło jest już ustawione");
-      if (!is_local(req)) return send_error(res, 403, "pierwsze hasło można ustawić tylko z tego komputera (127.0.0.1)");
+      if (!is_local_address(req))
+        return send_error(res, 403, "pierwsze hasło można ustawić tylko z tego komputera (127.0.0.1)");
+      if (!is_loopback_host(req))
+        return send_error(res, 403,
+                          "pierwsze hasło można ustawić tylko z panelu otwartego pod adresem http://127.0.0.1 lub http://localhost "
+                          "(nie przez nazwę komputera ani inną nazwę domeny)");
       auto body = parse_body(req, res);
       if (!body) return;
       const std::string pw = text(*body, "password");

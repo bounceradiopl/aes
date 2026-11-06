@@ -217,6 +217,11 @@
   // deleted it).
   L.changedElsewhere = (saved, current) => !!saved && JSON.stringify(saved) !== JSON.stringify(current);
 
+  // Saving this draft renames a running station that has enabled streams: the station name is
+  // each stream's Ice-Name, so every one of its streams reconnects (a short break on air).
+  L.renameRestartsStreams = (saved, draft) => !!saved && !!draft && saved.enabled && draft.enabled &&
+    saved.name !== draft.name && (draft.streams || []).some((s) => s.enabled);
+
   // The station as the API takes it: panel-only keys (leading "_") and password_set left out.
   L.stationBody = (station) => JSON.parse(JSON.stringify(station, (k, v) => (k.startsWith("_") || k === "password_set" ? undefined : v)));
 

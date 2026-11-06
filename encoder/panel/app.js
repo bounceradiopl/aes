@@ -152,8 +152,17 @@ function stopLive() {
   if (state.source) { state.source.close(); state.source = null; }
 }
 
+// Typed passwords do not stay in the page while it is logged out: the login and setup fields, the
+// password dialog and the hidden editor's stream passwords (a draft kept for the next login
+// refills its editor then, see boot()).
+function clearPasswordFields() {
+  for (const p of $$("input[type=password]")) p.value = "";
+  if ($("#dlg-password").open) $("#dlg-password").close();
+}
+
 async function showAuth() {
   stopLive();
+  clearPasswordFields();
   state.config = null;  // boot() loads it again after the login
   state.live = null;
   $("#app").classList.add("hidden");
@@ -423,7 +432,10 @@ function updateSavebar() {
   const onEdit = parseHash().tab === "edit" && state.draft;
   const isNew = state.editId === "new";
   $("#savebar").classList.toggle("hidden", !onEdit || !editorDirty());
-  $("#savebar-text").textContent = isNew ? "Nowa stacja nie jest jeszcze zapisana" : "Niezapisane zmiany";
+  $("#savebar-text").textContent = isNew ? "Nowa stacja nie jest jeszcze zapisana"
+    : L.renameRestartsStreams(state.saved, state.draft)
+      ? "Niezapisane zmiany. Nowa nazwa stacji połączy ponownie wszystkie jej strumienie (krótka przerwa w nadawaniu)"
+      : "Niezapisane zmiany";
   $("#save").textContent = isNew ? "Dodaj stację" : "Zapisz stację";
   $("#save").disabled = state.saving;
 }
@@ -987,7 +999,7 @@ function renderStats() {
     el("td", {}, L.fmtBytes(x.bytes_sent)), el("td", {}, L.fmtNum(x.kbps, 1)),
     num(x.reconnects, x.reconnects > 0), el("td", { class: x.dropped_bytes > 0 ? "bad" : "" }, L.fmtBytes(x.dropped_bytes)),
     num(x.queue_dropped_frames, x.queue_dropped_frames > 0), num(x.conditioner_dropped_frames, x.conditioner_dropped_frames > 0),
-    el("td", {}, x.state === "streaming" ? L.fmtUptime(x.uptime_s) : "—")))));
+    el("td", {}, x.state === "streaming" ? L.fmtUptime(x.connected_s) : "—")))));
   if (!streams.length) $("#stats-stream-rows").append(el("tr", {}, el("td", { class: "l hint", colSpan: 11 }, "Brak strumieni.")));
 }
 

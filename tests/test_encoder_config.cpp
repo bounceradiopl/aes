@@ -26,6 +26,14 @@ be::InputConfig orban_input() {
   return in;
 }
 
+// The same source on another multicast group (n = 1, 2, ...): another input.
+be::InputConfig orban_input_on(int n) {
+  be::InputConfig in = orban_input();
+  const std::string group = "239.1.14.100", other = "239.1.15." + std::to_string(n);
+  for (size_t pos; (pos = in.sdp.find(group)) != std::string::npos;) in.sdp.replace(pos, group.size(), other);
+  return in;
+}
+
 be::StreamConfig stream(std::string id, be::Codec codec, uint32_t kbps, uint32_t rate, std::string mount) {
   be::StreamConfig s;
   s.id = std::move(id);
@@ -193,7 +201,7 @@ TEST_CASE("encoder config: limits of stations, inputs and streams") {
   CHECK_MESSAGE(be::validate_config(c).empty(), dump(be::validate_config(c)));
 
   c = sample();
-  for (int i = 0; i < 3; ++i) c.stations[0].inputs.push_back(orban_input());
+  for (int i = 1; i <= 3; ++i) c.stations[0].inputs.push_back(orban_input_on(i));
   issues = be::validate_config(c);
   REQUIRE_MESSAGE(find_issue(issues, "stations[0].inputs"), dump(issues));
   CHECK(contains(find_issue(issues, "stations[0].inputs")->message, "Stacja „Radio Bounce”"));
@@ -377,6 +385,40 @@ TEST_CASE("encoder config: two running streams may not share a server mountpoint
   CHECK(be::validate_config(c).empty());
 }
 
+TEST_CASE("encoder config: one station may not receive the same source twice") {
+  // the same stream on two inputs would be mixed twice (+6 dB)
+  auto c = sample();
+  c.stations[0].inputs.push_back(orban_input());
+  auto issues = be::validate_config(c);
+  const auto* i = find_issue(issues, "stations[0].inputs[1].sdp");
+  REQUIRE_MESSAGE(i, dump(issues));
+  CHECK_MESSAGE(contains(i->message, "Stacja „Radio Bounce”, wejście 2: "), i->message);
+  CHECK_MESSAGE(contains(i->message, "wejście 1"), i->message);
+  CHECK_MESSAGE(contains(i->message, "+6 dB"), i->message);
+  CHECK(find_issue(issues, "stations[0].inputs[0].sdp") == nullptr);
+
+  // another SDP text for the same group, port and sender is the same source
+  std::string sdp = c.stations[0].inputs[1].sdp;
+  const std::string orig = "s=Optimod_114969_2";
+  REQUIRE(contains(sdp, orig));
+  sdp.replace(sdp.find(orig), orig.size(), "s=Inna nazwa");
+  c.stations[0].inputs[1].sdp = sdp;
+  CHECK(find_issue(be::validate_config(c), "stations[0].inputs[1].sdp"));
+
+  // a disabled duplicate is allowed (it is not received), and so is the same source in another station
+  c = sample();
+  c.stations[0].inputs.push_back(orban_input());
+  c.stations[0].inputs[1].enabled = false;
+  CHECK_MESSAGE(be::validate_config(c).empty(), dump(be::validate_config(c)));
+  c = sample();
+  be::StationConfig other;
+  other.id = "s2";
+  other.name = "Bounce Dwa";
+  other.inputs.push_back(orban_input());
+  c.stations.push_back(other);
+  CHECK_MESSAGE(be::validate_config(c).empty(), dump(be::validate_config(c)));
+}
+
 TEST_CASE("encoder config: station ids, names and global settings") {
   auto c = sample();
   be::StationConfig dup;
@@ -484,9 +526,17 @@ TEST_CASE("encoder config: normalize rounds steps, raises latency and assigns id
 }
 
 TEST_CASE("encoder config: an input named after its SDP gets a valid name") {
-  // 80+ bytes of session name with a tab in it and two-byte characters across the 64-byte cut
-  std::string session = "Studio\tA ";
+  // 80+ bytes of session name with a tab in it and a two-byte character across the 64-byte cut:
+  // without the tab, "StudioAB " is 9 bytes and each "żółć " 9 more, so byte 64 is the second
+  // byte of a "ż"
+  std::string session = "Studio\tAB ";
   while (session.size() < 90) session += "żółć ";
+  {
+    std::string cleaned = session;
+    cleaned.erase(cleaned.find('\t'), 1);
+    REQUIRE(cleaned.size() > 64);
+    REQUIRE((static_cast<unsigned char>(cleaned[64]) & 0xC0) == 0x80);  // a plain cut would split a character
+  }
   std::string sdp = read_file(BAM_TEST_DATA "/orban.sdp");
   const std::string orig = "s=Optimod_114969_2";
   REQUIRE(contains(sdp, orig));
@@ -497,10 +547,9 @@ TEST_CASE("encoder config: an input named after its SDP gets a valid name") {
   be::normalize_config(c);
   const std::string& name = c.stations[0].inputs[0].name;
   CAPTURE(name);
-  CHECK(name.size() <= 64);
-  CHECK(name.size() >= 60);
+  CHECK(name.size() == 63);  // the split character left out whole
   CHECK(name.find('\t') == std::string::npos);
-  CHECK(name.rfind("StudioA ", 0) == 0);
+  CHECK(name.rfind("StudioAB ", 0) == 0);
   CHECK(valid_utf8(name));  // cut on a whole character
   CHECK_MESSAGE(be::validate_config(c).empty(), dump(be::validate_config(c)));
 }

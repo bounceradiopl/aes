@@ -950,6 +950,98 @@ TEST_CASE("encoder engine: an input whose socket failed is tried again") {
   CHECK(engine.status().stations[0].inputs[0].receiver_id != first.receiver_id);
 }
 
+TEST_CASE("encoder engine: the automatic network card is detected again while running") {
+  // At boot the card may have no address yet (or an APIPA one): the engine looks again about
+  // every 2 s and moves inputs (and PTP) to the card once it is there. Loopback only: the
+  // "detected" cards are 127.0.0.2 (boot) and 127.0.0.1.
+  struct Detected {
+    std::mutex m;
+    std::string ip = "127.0.0.2";
+    std::string get() {
+      std::lock_guard l(m);
+      return ip;
+    }
+    void set(std::string v) {
+      std::lock_guard l(m);
+      ip = std::move(v);
+    }
+  };
+  static Detected detected;
+  detected.set("127.0.0.2");
+  struct Restore {
+    ~Restore() { be::detail::testing::set_default_interface_hook({}); }
+  } restore;
+  be::detail::testing::set_default_interface_hook([] { return detected.get(); });
+
+  FakeIcecast server;
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = "";  // automatic
+  be::StationConfig st;
+  st.id = "s1";
+  st.name = "Radio Test";
+  be::InputConfig in;
+  in.sdp = make_sdp("A", "239.69.231.1", 15231);
+  in.latency_us = 20000;
+  st.inputs = {in};
+  st.streams = {stream("str1", be::Codec::Flac, 0, 48000, server.port(), "/g.ogg")};
+  cfg.stations = {st};
+  cfg = ready(cfg);
+
+  be::EncoderEngine engine(no_ptp());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  CHECK(engine.status().interface_ip == "127.0.0.2");
+  REQUIRE(wait_for([&] { return server.latest("/g.ogg") != nullptr; }, 10000));
+  auto conn = server.latest("/g.ogg");
+  const uint64_t receiver = engine.status().stations.at(0).inputs.at(0).receiver_id;
+
+  // no card found for a while: everything stays as it is
+  detected.set("");
+  bp::sleep_ns(2'500'000'000);
+  CHECK(engine.status().interface_ip == "127.0.0.2");
+  CHECK(engine.status().stations[0].inputs[0].receiver_id == receiver);
+
+  detected.set(kLoopback);
+  AesSender sender(engine, "239.69.231.1", 15231, sig_a);
+  CHECK(wait_for([&] { return engine.status().interface_ip == kLoopback; }, 5000));
+  CHECK(wait_for([&] {
+    const auto s = engine.status().stations.at(0).inputs.at(0);
+    return s.receiver_id != receiver && s.error.empty() && s.signal;
+  }, 5000));
+  CHECK(engine.config().interface_ip.empty());  // still automatic
+  CHECK(server.latest("/g.ogg")->id == conn->id);  // the stream kept its connection
+}
+
+TEST_CASE("encoder engine: old receivers are freed off the network thread") {
+  // Closing a socket (IGMP leave) and freeing its rings must not run on the real-time network
+  // thread, even when the network thread held the last receive set that had them.
+  const int base_freed = be::detail::testing::input_receivers_freed_on_rx_thread();
+  const int base_rx = be::detail::testing::live_input_receivers();
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  be::StationConfig st;
+  st.id = "s1";
+  st.name = "Radio Test";
+  be::InputConfig in;
+  in.sdp = make_sdp("A", "239.69.232.1", 15232);
+  in.latency_us = 20000;
+  st.inputs = {in};
+  cfg.stations = {st};
+  be::EncoderEngine engine(no_ptp());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(ready(cfg), &err), err);
+  for (int i = 0; i < 30; ++i) {
+    cfg.stations[0].inputs[0].sdp = make_sdp("A", "239.69.232." + std::to_string(i % 3 + 1), 15232);
+    engine.apply_config(ready(cfg));
+    bp::sleep_ns(40'000'000);
+  }
+  // every replaced receiver goes once it has faded out and stopped lingering
+  CHECK(wait_for([&] { return be::detail::testing::live_input_receivers() == base_rx + 1; }, 5000));
+  engine.stop();
+  CHECK(be::detail::testing::live_input_receivers() == base_rx);
+  CHECK(be::detail::testing::input_receivers_freed_on_rx_thread() == base_freed);
+}
+
 TEST_CASE("encoder engine: a stream whose codec library is missing says so and runs nothing") {
   struct RestoreDefault {
     ~RestoreDefault() { be::set_codec_library_dirs({}); }  // back to the executable directory

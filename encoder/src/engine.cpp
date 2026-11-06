@@ -34,6 +34,7 @@ constexpr uint32_t kDefaultLatencyFrames = 240;         // a station without inp
 constexpr int64_t kHousekeepingNs = 100'000'000;        // housekeeping thread period
 // A removed input keeps receiving this long, so the station can fade it out on real audio.
 constexpr int64_t kLingerNs = 500'000'000;
+constexpr int64_t kInterfaceCheckNs = 2'000'000'000;  // the automatic interface, looked up again
 
 // Stops the workers side by side: each IcecastClient::stop() may take a few hundred ms.
 void stop_workers(std::vector<std::shared_ptr<StreamWorker>> workers) {
@@ -83,6 +84,10 @@ struct EncoderEngine::Impl {
   std::unique_ptr<RxThread> rx;
   std::map<std::string, std::unique_ptr<StationRuntime>> stations;  // enabled stations by id
   std::vector<std::pair<std::shared_ptr<InputRx>, int64_t>> lingering;  // removed inputs, since when
+  // Receive sets the network thread may still use: released here (with the sockets and rings
+  // only they still hold) once the engine has the only reference, never on the network thread.
+  std::vector<std::shared_ptr<const detail::RxSet>> retired_rx_sets;
+  int64_t iface_checked_ns = 0;  // the automatic interface was last looked up (housekeeping)
 
   std::mutex hk_m;
   std::condition_variable hk_cv;
@@ -101,6 +106,8 @@ struct EncoderEngine::Impl {
   void update_inputs(StationRuntime& rt, const StationConfig& sc);
   void publish(StationRuntime& rt);
   void update_rx_set();
+  void release_rx_sets();
+  void check_interface(int64_t now);
   void housekeeping_loop();
   void housekeeping();
   void shutdown();
@@ -190,11 +197,33 @@ void EncoderEngine::Impl::update_rx_set() {
     for (const auto& e : rt->inputs)
       if (e) set->push_back(e->rx);
   for (const auto& [in, since] : lingering) set->push_back(in);
-  if (rx) rx->set_inputs(std::move(set));
+  if (rx) retired_rx_sets.push_back(rx->set_inputs(std::move(set)));
+  release_rx_sets();
+}
+
+void EncoderEngine::Impl::release_rx_sets() {
+  // use_count() == 1: the network thread no longer has it and cannot get it again (it only takes
+  // the current set), so nothing can race this release
+  std::erase_if(retired_rx_sets, [](const auto& set) { return !set || set.use_count() == 1; });
+}
+
+// The automatic interface (interface_ip ""), looked up again about every 2 s like BounceAES
+// Master does: at boot the card may have no address yet (or an APIPA one) and the inputs and PTP
+// would stay on the wrong one until the next save. A different card found re-applies the current
+// configuration (PTP and inputs move to it; the streams keep running).
+void EncoderEngine::Impl::check_interface(int64_t now) {
+  if (!config.interface_ip.empty() || now - iface_checked_ns < kInterfaceCheckNs) return;
+  iface_checked_ns = now;
+  const std::string found = detail::default_interface_ip();
+  if (found.empty() || found == iface) return;
+  log_info("Bounce Encoder: zmiana karty sieciowej (automatycznie): " + (iface.empty() ? std::string("(brak)") : iface) + " -> " +
+           found + "; wejścia i PTP przechodzą na nową kartę");
+  const EncoderConfig current = config;
+  apply(current);
 }
 
 void EncoderEngine::Impl::apply(const EncoderConfig& next) {
-  const std::string next_iface = next.interface_ip.empty() ? platform::default_interface_ip() : next.interface_ip;
+  const std::string next_iface = next.interface_ip.empty() ? detail::default_interface_ip() : next.interface_ip;
   if (next_iface.empty()) log_warning("Nie znaleziono aktywnej karty sieciowej IPv4");
   if (next_iface != iface) log_info("Bounce Encoder: karta sieciowa " + (next_iface.empty() ? std::string("(brak)") : next_iface));
   iface = next_iface;
@@ -260,9 +289,10 @@ void EncoderEngine::Impl::apply(const EncoderConfig& next) {
   config = next;
 }
 
-// Every kHousekeepingNs, off the audio threads: releases what the stations let go of (old
-// plans, faded-out inputs with their sockets and delay lines), lets removed inputs stop
-// receiving once faded, and retries inputs whose socket could not be opened or joined.
+// Every kHousekeepingNs, off the audio threads: releases what the stations and the network
+// thread let go of (old plans, faded-out inputs with their sockets and delay lines), lets removed
+// inputs stop receiving once faded, retries inputs whose socket could not be opened or joined,
+// and follows the automatic interface (check_interface).
 void EncoderEngine::Impl::housekeeping_loop() {
   std::unique_lock hk(hk_m);
   while (!hk_stop) {
@@ -303,6 +333,8 @@ void EncoderEngine::Impl::housekeeping() {
     rt->station->collect();
   }
   if (rx_changed) update_rx_set();
+  release_rx_sets();
+  check_interface(now);
 }
 
 void EncoderEngine::Impl::shutdown() {
@@ -314,7 +346,10 @@ void EncoderEngine::Impl::shutdown() {
   stop_workers(std::move(workers));
   stations.clear();
   lingering.clear();
+  // the network thread lets go of its set first; the receivers are released after it ended
+  if (rx) retired_rx_sets.push_back(rx->set_inputs(std::make_shared<detail::RxSet>()));
   rx.reset();
+  retired_rx_sets.clear();
   ptp.reset();
 }
 
@@ -334,6 +369,7 @@ bool EncoderEngine::start(const EncoderConfig& config, std::string* error) {
   m.set_free_run();  // until PTP takes over
   m.started_ns = platform::monotonic_ns();
   m.iface.clear();
+  m.iface_checked_ns = m.started_ns;
   m.rx = std::make_unique<RxThread>(m.clock);
   m.running = true;
   m.apply(config);

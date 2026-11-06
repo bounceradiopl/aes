@@ -15,8 +15,23 @@ jobs:
         run: |
           sudo ip link set lo multicast on
           sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0
+      # the codec source tarballs (cmake/codecs.cmake) from the cache, so a download outage at
+      # sourceforge or xiph.org does not break the build; saved right after the configure step
+      # (also when a later step fails)
+      - name: Restore the codec source tarballs
+        id: codecs
+        uses: actions/cache/restore@v4
+        with:
+          path: codec-cache
+          key: codecs-${{ runner.os }}-${{ hashFiles('cmake/codecs.cmake') }}
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBAM_WITH_CODECS=ON
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBAM_WITH_CODECS=ON -DBAM_CODEC_CACHE=codec-cache
+      - name: Save the codec source tarballs
+        if: steps.codecs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: codec-cache
+          key: codecs-${{ runner.os }}-${{ hashFiles('cmake/codecs.cmake') }}
       - name: Build
         run: cmake --build build
       - name: Unit and integration tests
@@ -70,8 +85,20 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Restore the codec source tarballs
+        id: codecs
+        uses: actions/cache/restore@v4
+        with:
+          path: codec-cache
+          key: codecs-${{ runner.os }}-${{ hashFiles('cmake/codecs.cmake') }}
       - name: Configure (MSVC x64, newest Visual Studio on the runner)
-        run: cmake -S . -B build -A x64 -DBAM_WITH_CODECS=ON
+        run: cmake -S . -B build -A x64 -DBAM_WITH_CODECS=ON -DBAM_CODEC_CACHE=codec-cache
+      - name: Save the codec source tarballs
+        if: steps.codecs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: codec-cache
+          key: codecs-${{ runner.os }}-${{ hashFiles('cmake/codecs.cmake') }}
       - name: Build
         run: cmake --build build --config Release
       - name: Tests

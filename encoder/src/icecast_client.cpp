@@ -14,6 +14,7 @@
 
 #include "bam/encoder/icecast.hpp"
 #include "bam/platform/tcp.hpp"
+#include "bam/platform/time.hpp"
 
 namespace bam::encoder {
 
@@ -284,6 +285,7 @@ void IcecastClient::stop() {
   status_.state = IcecastState::Idle;
   status_.error.clear();
   status_.kbps = 0;
+  status_.connected_since_ns = 0;
 }
 
 void IcecastClient::set_state(IcecastState state, std::string error) {
@@ -295,9 +297,11 @@ void IcecastClient::set_state(IcecastState state, std::string error) {
     // and let the producer restart (on_reconnect, fired by stream()).
     need_start_ = true;
     restart_pending_ = true;
+    status_.connected_since_ns = platform::monotonic_ns();
   } else {
     status_.kbps = 0;
     restart_pending_ = false;
+    status_.connected_since_ns = 0;
   }
   queue_.clear();  // not counted as dropped: no connection to send it on
   queued_bytes_ = 0;
@@ -395,6 +399,7 @@ void IcecastClient::run() {
       std::lock_guard lk(m_);
       status_.state = IcecastState::Connecting;  // the last error stays visible while retrying
       status_.kbps = 0;
+      status_.connected_since_ns = 0;
     }
     std::string error;
     platform::TcpStream conn;

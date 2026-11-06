@@ -22,6 +22,7 @@
 
 #include "bam/encoder/icecast.hpp"
 #include "bam/platform/tcp.hpp"
+#include "bam/platform/time.hpp"
 
 namespace be = bam::encoder;
 namespace bp = bam::platform;
@@ -640,11 +641,16 @@ TEST_CASE("Icecast: a dropped connection is retried on the schedule with a fresh
   std::atomic<int> reconnect_calls{0};
   client.on_reconnect([&] { ++reconnect_calls; });
   REQUIRE(wait_for([&] { return reconnect_calls.load() == 1; }));
+  // the time of the connection (not of the client): set on every transition into Streaming
+  const int64_t connected1 = client.status().connected_since_ns;
+  CHECK(connected1 > 0);
+  CHECK(connected1 <= bam::platform::monotonic_ns());
   client.push(a, true);
   REQUIRE(wait_for([&] { return conn1_done.load(); }));
   // once the client has noticed the drop, nothing is queued until the reconnect: pushes are
   // discarded and, even far beyond the queue limit, not counted as dropped
   REQUIRE(wait_for([&] { return client.status().state != be::IcecastState::Streaming; }));
+  CHECK(client.status().connected_since_ns == 0);
   for (int i = 0; i < 2000; ++i) client.push(stale, true);
   CHECK(client.status().dropped_bytes == 0);
   stale_pushed = true;
@@ -654,6 +660,7 @@ TEST_CASE("Icecast: a dropped connection is retried on the schedule with a fresh
   client.push(b, true);  // the producer's fresh stream after the reconnect
   REQUIRE(wait_for([&] { return conn4_done.load(); }));
   REQUIRE(wait_for([&] { return reconnect_calls.load() == 3; }));
+  CHECK(client.status().connected_since_ns > connected1 + 1'000'000'000);  // after the 1 s retry wait
   client.push(c, true);
   srv.join();
 
@@ -681,6 +688,7 @@ TEST_CASE("Icecast: a dropped connection is retried on the schedule with a fresh
   CHECK(st.bytes_sent == a.size() + b.size() + c.size());
   CHECK(st.dropped_bytes == 0);
   client.stop();
+  CHECK(client.status().connected_since_ns == 0);
 }
 
 TEST_CASE("Icecast: the retry schedule starts over only after a connection streamed long enough") {

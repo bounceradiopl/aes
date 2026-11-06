@@ -7,6 +7,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -33,7 +34,9 @@ float level_db(float linear);
 
 // One received AES67 input: its socket (joined to the SDP group, with the source filter when
 // the SDP has one), the RxStream and the ring pair it writes on the media clock. Immutable after
-// make_input_rx() except for the RxStream state, which only the network thread touches.
+// make_input_rx() except for the RxStream state, which only the network thread touches, and
+// latency_frames, which a latency edit changes in place (engine side, with the RxStream's own
+// copy set through RxStream::set_latency_frames).
 struct InputRx {
   InputRx();
   ~InputRx();
@@ -45,7 +48,7 @@ struct InputRx {
   std::string group;
   std::string source;  // sender address from a=source-filter, may be empty
   uint16_t port = 0;
-  uint32_t latency_frames = 0;  // engine (API/housekeeping) side copy; RxStream has its own
+  uint32_t latency_frames = 0;  // engine (API/housekeeping) side, under the engine lock; RxStream has its own
   std::string error;  // Polish; set when the SDP or the socket failed (then stream is null)
   bool retryable = false;    // the socket failed (not the SDP): worth another make_input_rx()
   int64_t attempted_ns = 0;  // when the socket was tried
@@ -62,6 +65,10 @@ std::shared_ptr<InputRx> make_input_rx(const InputConfig& in, const std::string&
 
 using RxSet = std::vector<std::shared_ptr<InputRx>>;
 
+// The IPv4 address of the default network card (platform::default_interface_ip(), or the test
+// hook); empty when none is up.
+std::string default_interface_ip();
+
 // A delay line counted by testing::live_delay_lines().
 std::shared_ptr<DelayLine> make_delay_line();
 // How long a receiver whose socket failed waits before the next attempt (5 s).
@@ -72,6 +79,9 @@ int live_input_receivers();  // InputRx objects alive (sockets open or not)
 int live_delay_lines();      // delay lines alive (23 MB each)
 void fail_next_input_opens(int n);  // the next n socket opens fail (0 = off)
 void set_input_retry_ms(int ms);    // retry interval for failed sockets (0 = the default 5 s)
+int input_receivers_freed_on_rx_thread();  // InputRx objects destroyed on the network thread
+// Replaces platform::default_interface_ip() for the automatic interface (empty = the real one).
+void set_default_interface_hook(std::function<std::string()> hook);
 }  // namespace testing
 
 // The network thread: receives every input of the current set (re-read every pass), dispatching
@@ -80,7 +90,10 @@ class RxThread {
  public:
   explicit RxThread(const ClockSource& clock);
   ~RxThread();  // stop()
-  void set_inputs(std::shared_ptr<const RxSet> inputs);
+  // Returns the set it replaces. The network thread may still be using that set: the caller
+  // keeps it until it holds the only reference, so its sockets and rings are never released on
+  // the network thread.
+  std::shared_ptr<const RxSet> set_inputs(std::shared_ptr<const RxSet> inputs);
   void stop();
 
  private:

@@ -44,6 +44,9 @@ Unicode true
 ; the folder's DACL: protected (P), auto-inherited (AI); full access (FA) for Administrators (BA)
 ; and SYSTEM (SY), inherited by subfolders and files (OICI)
 !define FOLDER_SDDL "D:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)"
+; the program folder outside Program Files: the same plus read & execute (FRFX) for Users (BU), so
+; that no user can replace BounceEncoder.exe or a codec DLL the LocalSystem service loads
+!define PROGRAM_SDDL "D:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;FRFX;;;BU)"
 
 Name "${APP}"
 OutFile "BounceEncoder-setup.exe"
@@ -109,6 +112,12 @@ LangString PtpWarn ${LANG_POLISH} "Włączony jest klient PTP usługi czasu Wind
 LangString PtpWarn ${LANG_ENGLISH} "The Windows Time service PTP client (w32time) is enabled. It occupies ports 319/320 and prevents Bounce Encoder from synchronising to the PTP clock.$\r$\n$\r$\nDisable it after installation (see INSTRUKCJA.md, section 11)."
 LangString AclWarn ${LANG_POLISH} "Nie udało się ustawić uprawnień folderu $APPDATA\Bounce Encoder (kod $1). Plik config.json z hasłami strumieni może być czytelny dla innych użytkowników tego komputera: ustaw uprawnienia ręcznie (INSTRUKCJA.md, rozdział 2)."
 LangString AclWarn ${LANG_ENGLISH} "Could not set the permissions of $APPDATA\Bounce Encoder (code $1). config.json with the stream passwords may be readable by other users of this computer: set the permissions by hand (INSTRUKCJA.md, section 2)."
+LangString InstAclWarn ${LANG_POLISH} "Nie udało się ustawić uprawnień folderu programu $INSTDIR (kod $1). Inni użytkownicy tego komputera mogą podmienić pliki usługi Bounce Encoder: zainstaluj program w Program Files albo ustaw uprawnienia ręcznie (administratorzy i SYSTEM: pełna kontrola, Użytkownicy: odczyt i wykonanie)."
+LangString InstAclWarn ${LANG_ENGLISH} "Could not set the permissions of the program folder $INSTDIR (code $1). Other users of this computer may replace the Bounce Encoder service files: install the program in Program Files or set the permissions by hand (Administrators and SYSTEM: full control, Users: read & execute)."
+LangString ForeignDirWarn ${LANG_POLISH} "Folder $INSTDIR już istniał i nie jest folderem Bounce Encoder, więc jego uprawnienia nie zostały zmienione. Jeśli inni użytkownicy tego komputera mogą w nim zapisywać, mogą też podmienić pliki usługi: zainstaluj program w Program Files albo w nowym folderze."
+LangString ForeignDirWarn ${LANG_ENGLISH} "The folder $INSTDIR already existed and is not a Bounce Encoder folder, so its permissions were not changed. If other users of this computer can write to it, they can also replace the service files: install the program in Program Files or in a new folder."
+LangString RootDir ${LANG_POLISH} "Wybierz folder dla programu (np. $PROGRAMFILES64\Bounce Encoder), nie katalog główny dysku."
+LangString RootDir ${LANG_ENGLISH} "Choose a folder for the program (e.g. $PROGRAMFILES64\Bounce Encoder), not the root of a drive."
 LangString DelConfig ${LANG_POLISH} "Usunąć także konfigurację i logi Bounce Encoder ($APPDATA\Bounce Encoder)?$\r$\n$\r$\nKonfiguracja zawiera stacje, strumienie z hasłami Icecast i hasło panelu. Wybierz Nie, jeśli zamierzasz zainstalować program ponownie."
 LangString DelConfig ${LANG_ENGLISH} "Also delete the Bounce Encoder configuration and logs ($APPDATA\Bounce Encoder)?$\r$\n$\r$\nThe configuration holds the stations, the streams with their Icecast passwords and the panel password. Choose No if you plan to install the program again."
 
@@ -136,6 +145,77 @@ Function un.onInit
   SetRegView 64
 FunctionEnd
 
+; Not the root of a drive: Next stays disabled.
+Function .onVerifyInstDir
+  StrLen $0 $INSTDIR
+  ${If} $0 <= 3
+    Abort
+  ${EndIf}
+FunctionEnd
+
+; The same for /D= (silent installation), before anything is stopped.
+!macro CHECK_INSTDIR
+  StrLen $0 $INSTDIR
+  ${If} $0 <= 3
+    MessageBox MB_OK|MB_ICONSTOP "$(RootDir)" /SD IDOK
+    Abort
+  ${EndIf}
+!macroend
+
+; The program folder outside $PROGRAMFILES64 (which already allows Users only to read and run)
+; gets the same protection: Administrators and SYSTEM full control, Users read & execute,
+; protected (nothing inherited from a parent such as D:\ where Users may create and change
+; files). Otherwise a local user could replace BounceEncoder.exe or a codec DLL and have the
+; LocalSystem service run it. Runs before the files are written (they inherit the DACL), in the
+; same order as the data folder below: Administrators take ownership, the folder gets its final
+; DACL in one call, then what is inside goes back to inherited ACEs only. Only a folder that is
+; ours ($5 = 1: new, or an earlier installation of Bounce Encoder): the ACL of a folder that
+; existed with other contents (which could be anything, e.g. a user's profile) is never replaced,
+; the user is warned instead.
+!macro PROTECT_INSTDIR
+  StrCpy $2 "$PROGRAMFILES64\"
+  StrLen $3 $2
+  StrCpy $4 $INSTDIR $3
+  ${If} $4 != $2  ; case-insensitive
+  ${AndIf} $5 == 0
+    MessageBox MB_OK|MB_ICONEXCLAMATION "$(ForeignDirWarn)" /SD IDOK
+  ${ElseIf} $4 != $2
+    StrCpy $1 0
+    nsExec::ExecToLog 'takeown /F "$INSTDIR" /A'
+    Pop $0
+    nsExec::ExecToLog 'icacls "$INSTDIR" /setowner ${SID_ADMINS} /T /C /Q'
+    Pop $0
+    ${If} $0 != 0
+      StrCpy $1 $0
+    ${EndIf}
+    nsExec::ExecToLog `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$ErrorActionPreference = 'Stop'; $$d = '$INSTDIR'; $$a = New-Object System.Security.AccessControl.DirectorySecurity; $$a.SetSecurityDescriptorSddlForm('${PROGRAM_SDDL}', 'Access'); (Get-Item -LiteralPath $$d).SetAccessControl($$a)"`
+    Pop $0
+    ${If} $0 != 0
+      ${If} $1 == 0
+        StrCpy $1 $0
+      ${EndIf}
+      nsExec::ExecToLog 'icacls "$INSTDIR" /grant:r ${SID_ADMINS}:(OI)(CI)F ${SID_SYSTEM}:(OI)(CI)F ${SID_USERS}:(OI)(CI)RX'
+      Pop $0
+      ${If} $0 == 0
+        nsExec::ExecToLog 'icacls "$INSTDIR" /inheritance:r'
+        Pop $0
+      ${EndIf}
+    ${EndIf}
+    ${If} $0 == 0
+      ; an update or an existing folder: what is inside inherits the final DACL (no stray ACEs)
+      ${If} ${FileExists} "$INSTDIR\*.*"
+        nsExec::ExecToLog 'icacls "$INSTDIR\*" /reset /T /C /Q'
+        Pop $0
+      ${EndIf}
+    ${ElseIf} $1 == 0
+      StrCpy $1 $0
+    ${EndIf}
+    ${If} $1 != 0
+      MessageBox MB_OK|MB_ICONEXCLAMATION "$(InstAclWarn)" /SD IDOK
+    ${EndIf}
+  ${EndIf}
+!macroend
+
 ; Stops the components so that no file is locked (update and uninstall). net stop waits until the
 ; service has stopped (its stop wait hint is 10 s); a service that hangs is ended with taskkill.
 ; The failure actions are cleared first, so that the taskkill fallback cannot make the service
@@ -155,9 +235,17 @@ FunctionEnd
 
 Section "Bounce Encoder" SecMain
   SectionIn RO
+  !insertmacro CHECK_INSTDIR
   !insertmacro STOP_COMPONENTS
   SetShellVarContext all
+  ; $5 = 1: the program folder is ours to protect (new, or an earlier installation)
+  StrCpy $5 1
+  ${If} ${FileExists} "$INSTDIR\*.*"
+  ${AndIfNot} ${FileExists} "$INSTDIR\BounceEncoder.exe"
+    StrCpy $5 0
+  ${EndIf}
   SetOutPath "$INSTDIR"
+  !insertmacro PROTECT_INSTDIR
 
   File "${PAYLOAD}\BounceEncoder.exe"
   File "${PAYLOAD}\BounceEncoderTray.exe"

@@ -286,3 +286,13 @@ test("the AAC profiles come from /api/codecs", () => {
   const renamed = { ...codecs, recommendations: [{ codec: "x-aac", min_kbps: null, max_kbps: null }], mp3_equivalents: [] };
   assert.deepEqual([...L.aacCodecs(renamed)], ["x-aac"]);
 });
+
+test("renaming a running station warns that its streams reconnect", () => {
+  const saved = { id: "s1", name: "Radio", enabled: true, streams: [{ id: "str1", enabled: true }] };
+  assert.equal(L.renameRestartsStreams(saved, { ...saved, name: "Radio Dwa" }), true);
+  assert.equal(L.renameRestartsStreams(saved, { ...saved }), false);  // the name unchanged
+  assert.equal(L.renameRestartsStreams(null, { ...saved, name: "Nowa" }), false);  // a new station
+  assert.equal(L.renameRestartsStreams({ ...saved, enabled: false }, { ...saved, name: "X" }), false);  // not running
+  assert.equal(L.renameRestartsStreams(saved, { ...saved, name: "X", enabled: false }), false);  // stops anyway
+  assert.equal(L.renameRestartsStreams(saved, { ...saved, name: "X", streams: [{ id: "str1", enabled: false }] }), false);
+});
