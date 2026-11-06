@@ -51,6 +51,10 @@ Instrukcja: [docs/INSTALL.md](docs/INSTALL.md). W skrócie:
 5. W zakładce **Routing** połącz źródła z celami.
 6. W mAirList wybierz sterownik ASIO **BounceAES Master**.
 
+## Co nowego w 1.2.3
+
+Nowy wygląd panelu, bez zmian w działaniu: zakładki w górnym pasku, stan usługi (PTP, ASIO, Audio Windows, wyjścia, subskrypcje, karta sieciowa, czas działania) w pasku stanu na dole, mierniki LED ze skalą dBFS i zapamiętanym szczytem, przełączniki zamiast pól wyboru. Wygląd jest wspólny z Bounce Encoder 1.0.2 (`panel-common/common.css`).
+
 ## Co nowego w 1.2.2
 
 Bezpieczeństwo panelu, z zabezpieczeniami przetestowanymi w Bounce Encoder 1.0 (dźwięk, ASIO i routing bez zmian): jedno żądanie na połączenie, treść żądań tylko jako JSON (do 1 MB), pierwsze hasło tylko z `127.0.0.1`/`localhost`, blokada po 5 nieudanych logowaniach zamiast spowalniania, zmiana hasła wylogowuje inne sesje, a podgląd na żywo kończy się z sesją. Własne skrypty korzystające z API muszą wysyłać JSON z `Content-Type: application/json` (panel i ikona w zasobniku już to robią). Szczegóły: [docs/INSTALL.md](docs/INSTALL.md) (rozdziały 4 i 10).
@@ -64,6 +68,7 @@ Osobny program z tego samego repozytorium (wspólny rdzeń AES67/PTP): **enkoder
 - Panel WWW z logowaniem (port **8070**): stacje z miernikami, edycja, odpowiedniki bitrate'ów AAC ↔ MP3, statystyki, logi. Usługa Windows `BounceEncoder`, ikona w zasobniku, instalator `BounceEncoder-setup.exe`.
 - Bez processingu, RDS i metadanych; PTP tylko jako slave.
 - Wersja 1.0.1: blokada logowania działa też przy równoległych próbach (wspólna poprawka z BounceAES Master 1.2.2).
+- Wersja 1.0.2: nowy wygląd panelu, wspólny z BounceAES Master 1.2.3 (lampka „NA ANTENIE” przy nadającym strumieniu, mierniki LED, pasek stanu na dole); bez zmian w działaniu.
 
 Instrukcja: [docs/ENCODER-INSTALL.md](docs/ENCODER-INSTALL.md), testy i odbiór: [docs/ENCODER-TESTING.md](docs/ENCODER-TESTING.md), specyfikacja: [docs/superpowers/specs/2026-11-05-bounce-encoder-design.md](docs/superpowers/specs/2026-11-05-bounce-encoder-design.md). Licencja Bounce Encoder (GPLv3) ma dodatkowe uprawnienie na połączenie z fdk-aac; w Bounce instalator z AAC jest bez ograniczeń, a przed przekazaniem poza firmę trzeba sprawdzić patenty AAC ([LICENSING.md](LICENSING.md)).
 
@@ -98,6 +103,7 @@ Panel pokazuje logotyp Bounce ([panel/logo.svg](panel/logo.svg), biała wersja) 
 | `tray/` | aplikacja w zasobniku |
 | `bridge/` | BounceAES Audio Bridge: WASAPI, przechwytywanie procesów, resampling |
 | `panel/` | panel WWW (HTML/CSS/JS) |
+| `panel-common/` | arkusz stylów wspólny dla paneli BounceAES Master i Bounce Encoder |
 | `encoder/` | Bounce Encoder: kodeki, bufor opóźnienia, miks stacji, klient Icecast, silnik, API i panel WWW (`encoder/panel/`) |
 | `encoder_service/`, `encoder_tray/` | Bounce Encoder: usługa Windows / `--console` i ikona w zasobniku |
 | `tools/` | `bounceaes-test` (test pętli), `ptp-sim` (testowy master PTP) |

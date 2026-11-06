@@ -116,7 +116,7 @@ Lista pokazuje dla każdej stacji:
 - przełącznik włączenia: działa od razu, bez zapisywania. Wyłączona stacja rozłącza wszystkie swoje strumienie;
 - stan („działa” i czas działania), miernik sygnału stacji i szczyt w dBFS;
 - wejścia: nazwa, adres strumienia AES67, gain i opóźnienie, miernik, stan („sygnał”, „brak sygnału” albo błąd);
-- strumienie: kodek, bitrate i częstotliwość, serwer i mountpoint, gain, miernik, stan („nadaje” z bitrate'em, „łączenie…”, komunikat błędu z rozdziału 9).
+- strumienie: kodek, bitrate i częstotliwość, serwer i mountpoint, gain, miernik, stan (lampka **NA ANTENIE** z bitrate'em, „łączenie…”, komunikat błędu z rozdziału 9).
 
 **Dodaj stację** otwiera edytor nowej stacji. **Edytuj** otwiera edytor istniejącej, **Usuń** usuwa stację od razu (po potwierdzeniu) i rozłącza jej strumienie.
 
@@ -257,7 +257,7 @@ Po błędzie strumień próbuje ponownie po 1, 2, 5 i 10 s, potem co 10 s, bez k
 
 ## 11. PTP, sieć i strojenie Windows
 
-- Bounce Encoder jest zawsze **PTP slave**: podąża za grandmasterem w wybranej domenie i nigdy nie nadaje zegara. Pasek u góry panelu pokazuje „PTP: zsynchronizowany”, „synchronizacja…” albo „zegar własny”.
+- Bounce Encoder jest zawsze **PTP slave**: podąża za grandmasterem w wybranej domenie i nigdy nie nadaje zegara. Pasek stanu na dole panelu pokazuje „PTP: zsynchronizowany”, „synchronizacja…” albo „zegar własny”.
 - **Bez synchronizacji PTP odbiór zwykle nie działa.** Bez mastera (albo zanim zegar się zsynchronizuje) program liczy czas mediów z własnego zegara komputera (czas systemowy w skali TAI, „zegar własny”). Pakiety AES67 niosą znaczniki czasu na zegarze nadawcy, a wejście przyjmuje tylko pakiety, których czas wypada w oknie od „teraz − opóźnienie odbioru” do „teraz + 0,5 s”. Nadawca na innym zegarze (urządzenie zsynchronizowane z grandmasterem, którego Bounce Encoder nie widzi, albo z własnym zegarem) jest więc odrzucany w całości: w Statystykach rosną **Przepełnienia**, wejście ma stan „brak sygnału”, a stacja nadaje ciszę.
 - Zegar własny działa tylko wtedy, gdy nadawca liczy czas tym samym zegarem, np. BounceAES Master bez PTP (też na zegarze własnym) na komputerze z czasem z NTP, a różnica czasu obu komputerów stale mieści się w tym oknie: nadawca najwyżej o opóźnienie odbioru za Bounce Encoderem i najwyżej 0,5 s przed nim. Nawet wtedy przy długiej pracy mogą się zdarzyć pojedyncze uzupełnienia albo odrzucenia pakietów (widoczne w Statystykach). Do pracy na antenie potrzebny jest PTP.
 - Gdy pasek pokazuje „zegar własny”, choć master jest w sieci, sprawdź: domenę PTP (Ustawienia… i grandmaster muszą mieć tę samą), wybraną kartę sieciową AoIP (Ustawienia…: zła karta to brak komunikatów PTP), klienta PTP Windows (w32time, poniżej) i zaporę dla portów UDP 319/320.
@@ -314,6 +314,8 @@ Licencja FDK AAC nie jest zgodna z GPL, dlatego licencja Bounce Encoder ma dodat
 ## 15. Aktualizacja, odinstalowanie, podpisywanie
 
 **Aktualizacja:** uruchom nowy instalator. Zatrzyma usługę i ikonę, wymieni pliki i uruchomi usługę ponownie. Konfiguracja zostaje.
+
+**Co nowego w 1.0.2:** nowy wygląd panelu, wspólny z BounceAES Master 1.2.3; bez zmian w działaniu. Stan usługi (PTP, wejścia, strumienie, karta sieciowa, czas działania) jest w pasku stanu na dole, nadający strumień ma lampkę **NA ANTENIE**, mierniki są segmentowe, ze skalą dBFS i zapamiętanym szczytem.
 
 **Co nowego w 1.0.1:** blokada logowania działa też przy równoległych próbach: hasła sprawdzane w tej samej chwili liczą się do limitu, więc wiele prób wysłanych naraz nie obejdzie blokady po 5 błędnych hasłach (ani ogólnego limitu 20 błędnych haseł z sieci na minutę).
 
