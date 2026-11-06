@@ -3,9 +3,13 @@
 // byte for byte to a server on 127.0.0.1, and what comes back on that one connection.
 #pragma once
 #include <doctest/doctest.h>
+#include <httplib.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <string>
@@ -135,6 +139,58 @@ inline std::string chunked_request(const std::string& method, const std::string&
   return method + " " + path + " HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n" +
          (cookie.empty() ? std::string() : "Cookie: " + cookie + "\r\n") + "Transfer-Encoding: chunked\r\n\r\n" + hex.str() +
          "\r\n" + body + "\r\n0\r\n\r\n";
+}
+
+// N wrong logins from this computer at once: the throttle must count the ones still checking
+// their password, not only the finished ones. A burst of N connections overflows httplib's listen
+// backlog of 5, and the kernel may refuse or reset the extra ones before the server sees them:
+// such a login is sent again (a little later) until it is answered.
+struct LoginBurst {
+  int unauthorized = 0, throttled = 0, lost = 0, other = 0, resent = 0;
+};
+inline LoginBurst concurrent_wrong_logins(uint16_t port, int n) {
+  LoginBurst b;
+  std::mutex m;
+  std::atomic<bool> go{false};
+  std::vector<std::thread> threads;
+  for (int i = 0; i < n; ++i) {
+    threads.emplace_back([&] {
+      while (!go) std::this_thread::yield();
+      httplib::Result r;
+      for (int tries = 0; tries < 50; ++tries) {
+        httplib::Client c("127.0.0.1", port);
+        c.set_connection_timeout(10, 0);
+        c.set_read_timeout(20, 0);
+        r = c.Post("/api/login", R"({"password":"zlehaslo123"})", "application/json");
+        if (r) break;
+        {
+          std::lock_guard lock(m);
+          ++b.resent;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      }
+      std::lock_guard lock(m);
+      if (!r) ++b.lost;
+      else if (r->status == 401) ++b.unauthorized;
+      else if (r->status == 429) ++b.throttled;
+      else ++b.other;
+    });
+  }
+  go = true;
+  for (auto& t : threads) t.join();
+  return b;
+}
+// At most 5 logins got to check the password (5 failures block the address), whatever reached
+// the server at the same time; every other one was refused with 429.
+inline void check_login_burst(const LoginBurst& b, int n) {
+  CAPTURE(b.unauthorized);
+  CAPTURE(b.throttled);
+  CAPTURE(b.lost);
+  CAPTURE(b.resent);
+  CHECK(b.unauthorized <= 5);
+  CHECK(b.other == 0);
+  CHECK(b.lost == 0);
+  CHECK(b.unauthorized + b.throttled == n);
 }
 
 // Joins a test thread however the test leaves its scope (a failed REQUIRE included).

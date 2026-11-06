@@ -40,6 +40,18 @@ std::optional<json> parse_body(const httplib::Request& req, httplib::Response& r
   }
 }
 
+// The number a route's (\d+) matched; 0 when it is too large for any output or subscription
+// (std::stoi would throw, and httplib would answer 500): the handlers answer 404.
+int path_number(const std::string& digits) {
+  int n = 0;
+  for (char c : digits) {
+    if (c < '0' || c > '9') return 0;
+    n = n * 10 + (c - '0');
+    if (n > 1'000'000) return 0;
+  }
+  return n;
+}
+
 // A text field of a request body; "" when missing or not text.
 std::string text(const json& body, const char* key) {
   if (!body.is_object()) return {};
@@ -210,14 +222,16 @@ struct HttpServer::Impl {
       const uint64_t generation = sessions_generation();  // before the hash: see create_session
       const std::string stored = engine.config().password_hash;
       if (stored.empty()) return send_error(res, 409, "hasło nie jest jeszcze ustawione");
-      // guessing is limited by counting failures (429), not by holding a request thread
-      if (!throttle.allowed(req.remote_addr, now_ns())) return send_error(res, 429, "zbyt wiele nieudanych prób, spróbuj za chwilę");
+      // guessing is limited by counting failures (429), not by holding a request thread; the ticket
+      // counts this attempt until it ends, so attempts sent at once cannot all get past the limit
+      auto attempt = throttle.attempt(req.remote_addr, now_ns());
+      if (!attempt) return send_error(res, 429, "zbyt wiele nieudanych prób, spróbuj za chwilę");
       if (!verify_password(text(*body, "password"), stored)) {
-        throttle.failed(req.remote_addr, now_ns());
+        attempt.failed(now_ns());
         log_warning("Nieudane logowanie do panelu z " + req.remote_addr);
         return send_error(res, 401, "nieprawidłowe hasło");
       }
-      throttle.succeeded(req.remote_addr);
+      attempt.succeeded();
       {
         std::lock_guard hook(g_hook_mutex);
         if (g_login_verified_hook) g_login_verified_hook();
@@ -288,7 +302,7 @@ struct HttpServer::Impl {
     });
 
     auto output_sdp = [this](const httplib::Request& req, httplib::Response& res) {
-      const int n = std::stoi(req.matches[1]);
+      const int n = path_number(req.matches[1]);
       if (n < 1 || n > kDeviceCount) return send_error(res, 404, "brak wyjścia");
       res.set_content(engine.output_sdp(n), "application/sdp");
     };
@@ -319,7 +333,7 @@ struct HttpServer::Impl {
     });
 
     del(R"(/api/outputs/(\d+))", kSession, [this](const httplib::Request& req, httplib::Response& res) {
-      const int n = std::stoi(req.matches[1]);
+      const int n = path_number(req.matches[1]);
       if (n < 1 || n > kDeviceCount) return send_error(res, 404, "brak wyjścia");
       const ApplyResult r = engine.remove_output(n);
       json out = api::result_json(r);
@@ -404,7 +418,7 @@ struct HttpServer::Impl {
     });
 
     del(R"(/api/subscriptions/(\d+))", kSession, [this](const httplib::Request& req, httplib::Response& res) {
-      const int n = std::stoi(req.matches[1]);
+      const int n = path_number(req.matches[1]);
       if (n < 1 || n > kDeviceCount) return send_error(res, 404, "brak subskrypcji");
       const ApplyResult r = engine.remove_subscription(n);
       json out = api::result_json(r);

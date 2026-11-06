@@ -158,7 +158,7 @@ TEST_CASE("encoder HTTP: login, sessions and 401 without a session") {
   const json h = json::parse(health->body);
   CHECK(h["service"] == "ok");
   CHECK(h["product"] == "Bounce Encoder");
-  CHECK(h["version"] == "1.0.0");
+  CHECK(h["version"] == "1.0.1");
 
   const json state = json::parse(f.client->Get("/api/auth-state")->body);
   CHECK(state["password_set"] == false);
@@ -552,7 +552,7 @@ TEST_CASE("encoder HTTP: status of stations, inputs, streams and PTP") {
       },
       10000));
   CHECK(s["running"] == true);
-  CHECK(s["version"] == "1.0.0");
+  CHECK(s["version"] == "1.0.1");
   CHECK(s["ptp"]["enabled"] == false);
   CHECK(s["ptp"]["state"] == "disabled");
   CHECK(s["ptp"]["free_run"] == true);
@@ -777,13 +777,21 @@ TEST_CASE("encoder HTTP: failed logins are throttled without holding a request t
   f.setup_and_login();
   const int64_t t0 = bp::monotonic_ns();
   for (int i = 0; i < 5; ++i) CHECK(f.client->Post("/api/login", R"({"password":"zlehaslo123"})", "application/json")->status == 401);
-  CHECK(bp::monotonic_ns() - t0 < 1'500'000'000);  // no sleeping per failure
+  CHECK(bp::monotonic_ns() - t0 < 2'400'000'000);  // no sleeping per failure (5 x 500 ms would be 2.5 s)
   // the address is now refused for a while, even with the right password
   auto r = f.client->Post("/api/login", json{{"password", kPassword}}.dump(), "application/json");
   REQUIRE(r);
   CHECK(r->status == 429);
   CHECK(json::parse(r->body)["error"] == "zbyt wiele nieudanych prób, spróbuj za chwilę");
   // a session already open is not affected
+  f.get("/api/config");
+}
+
+TEST_CASE("encoder HTTP: concurrent failed logins cannot outrun the throttle") {
+  Fixture f;
+  f.setup_and_login();
+  check_login_burst(concurrent_wrong_logins(f.server->port(), 24), 24);
+  CHECK(f.client->Post("/api/login", json{{"password", kPassword}}.dump(), "application/json")->status == 429);
   f.get("/api/config");
 }
 

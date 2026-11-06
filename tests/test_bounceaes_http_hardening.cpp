@@ -190,9 +190,11 @@ TEST_CASE("BounceAES HTTP: one request per connection, whatever httplib makes of
       CAPTURE(offset);
       const RawExchange x = raw_exchange(port, hiding_request(head, offset, tail + kLastRequest));
       CHECK(x.closed);
-      CHECK(x.statuses.size() <= 1);  // a reset may (rarely) cost the client even the first answer
-      if (!x.statuses.empty()) CHECK(x.statuses[0] >= 400);
       CHECK_FALSE(f.password_set());
+      // exactly one answer, a refusal; on Windows a reset may (rarely) cost the client even that one
+      if (kResetMayLoseAnswer && x.statuses.empty()) continue;
+      CHECK(x.statuses.size() == 1);
+      if (!x.statuses.empty()) CHECK(x.statuses[0] >= 400);
     }
   };
   auto with = [](std::string method, std::string headers) {
@@ -405,7 +407,7 @@ TEST_CASE("BounceAES HTTP: failed logins are throttled without holding a request
   f.setup_and_login();
   const int64_t t0 = bp::monotonic_ns();
   for (int i = 0; i < 5; ++i) CHECK(f.client->Post("/api/login", R"({"password":"zlehaslo123"})", "application/json")->status == 401);
-  CHECK(bp::monotonic_ns() - t0 < 1'500'000'000);  // no sleeping per failure
+  CHECK(bp::monotonic_ns() - t0 < 2'400'000'000);  // no sleeping per failure (5 x 500 ms would be 2.5 s)
   // the address is now refused for a while, even with the right password
   auto r = f.client->Post("/api/login", json{{"password", kPassword}}.dump(), "application/json");
   REQUIRE(r);
@@ -415,6 +417,36 @@ TEST_CASE("BounceAES HTTP: failed logins are throttled without holding a request
   // 30 s later the address may try again
   bam::testing::set_http_clock_offset_ns(31'000'000'000);
   CHECK(f.client->Post("/api/login", json{{"password", kPassword}}.dump(), "application/json")->status == 200);
+}
+
+TEST_CASE("BounceAES HTTP: concurrent failed logins cannot outrun the throttle") {
+  Fixture f;
+  f.setup_and_login();
+  check_login_burst(concurrent_wrong_logins(f.port, 24), 24);
+  // the address is blocked now, even with the right password; the open session is not affected
+  CHECK(f.client->Post("/api/login", json{{"password", kPassword}}.dump(), "application/json")->status == 429);
+  CHECK(f.get_status("/api/config", f.auth) == 200);
+}
+
+TEST_CASE("BounceAES HTTP: an output or subscription number too large for an int is 404, not 500") {
+  Fixture f;
+  f.setup_and_login();
+  const std::string huge = "99999999999999999999";
+  for (const std::string& path : {"/api/outputs/" + huge + "/sdp", "/api/devices/" + huge + "/sdp"}) {
+    auto r = f.client->Get(path, f.auth);
+    REQUIRE(r);
+    CHECK_MESSAGE(r->status == 404, path);
+    CHECK(json::parse(r->body)["error"] == "brak wyjścia");
+  }
+  auto out = f.client->Delete("/api/outputs/" + huge, f.auth);
+  REQUIRE(out);
+  CHECK(out->status == 404);
+  CHECK(json::parse(out->body)["error"] == "brak wyjścia");
+  auto sub = f.client->Delete("/api/subscriptions/" + huge, f.auth);
+  REQUIRE(sub);
+  CHECK(sub->status == 404);
+  CHECK(json::parse(sub->body)["error"] == "brak subskrypcji");
+  CHECK(f.client->Get("/api/outputs/1/sdp", f.auth)->status == 200);  // a normal number still works
 }
 
 TEST_CASE("BounceAES HTTP: the live feed ends with its session; a password change ends the other sessions") {

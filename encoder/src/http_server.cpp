@@ -522,15 +522,16 @@ struct EncoderHttpServer::Impl {
       const uint64_t generation = sessions_generation();  // before the hash: see create_session
       const std::string stored = engine.config().password_hash;
       if (stored.empty()) return send_error(res, 409, "hasło nie jest jeszcze ustawione");
-      // guessing is limited by counting failures (429), not by holding a request thread
-      if (!throttle.allowed(req.remote_addr, now_ns()))
-        return send_error(res, 429, "zbyt wiele nieudanych prób, spróbuj za chwilę");
+      // guessing is limited by counting failures (429), not by holding a request thread; the ticket
+      // counts this attempt until it ends, so attempts sent at once cannot all get past the limit
+      auto attempt = throttle.attempt(req.remote_addr, now_ns());
+      if (!attempt) return send_error(res, 429, "zbyt wiele nieudanych prób, spróbuj za chwilę");
       if (!verify_password(text(*body, "password"), stored)) {
-        throttle.failed(req.remote_addr, now_ns());
+        attempt.failed(now_ns());
         log_warning("Nieudane logowanie do panelu z " + req.remote_addr);
         return send_error(res, 401, "nieprawidłowe hasło");
       }
-      throttle.succeeded(req.remote_addr);
+      attempt.succeeded();
       {
         std::lock_guard hook(g_hook_mutex);
         if (g_login_verified_hook) g_login_verified_hook();

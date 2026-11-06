@@ -28,7 +28,7 @@ Konfiguracja i logi znajdują się w `C:\ProgramData\BounceAES Master\` (`config
 
 1. Kliknij dwukrotnie ikonę BounceAES Master w zasobniku albo otwórz `http://127.0.0.1:8067` na tym komputerze.
 2. Ustaw hasło panelu (co najmniej 8 znaków). Pierwsze hasło można ustawić **tylko z tego komputera** i tylko z panelu otwartego pod `http://127.0.0.1:8067` albo `http://localhost:8067` (nie przez nazwę komputera).
-3. Panel jest dostępny również z innych komputerów pod `http://<adres-komputera>:8067`, po zalogowaniu. Jeśli panel ma być dostępny z zewnątrz, wystaw go przez odwrotne proxy z HTTPS.
+3. Panel jest dostępny również z innych komputerów pod `http://<adres-komputera>:8067`, po zalogowaniu. Jeśli panel ma być dostępny z zewnątrz, wystaw go przez odwrotne proxy z HTTPS. Proxy na tym samym komputerze sprawia, że dla usługi każde żądanie przychodzi z tego komputera: pierwsze hasło dałoby się wtedy ustawić z zewnątrz (ustaw je przed uruchomieniem proxy), a nieudane logowania wszystkich klientów liczą się razem, więc blokada po błędnych hasłach dotyczy wszystkich naraz.
 
 Kolory ikony w zasobniku:
 
@@ -102,9 +102,9 @@ Konfiguracja 1.0 przenosi się sama przy pierwszym uruchomieniu 1.1 (kopia: `con
 ### Co nowego w 1.2.2: bezpieczeństwo panelu
 Panel dostał te same zabezpieczenia co Bounce Encoder 1.0; dźwięk, ASIO, bridge i routing działają bez zmian.
 - Jedno żądanie na połączenie: żądanie ukryte w treści innego żądania nigdy nie zostanie wykonane.
-- Panel przyjmuje tylko metody GET, POST, PUT i DELETE, treść wyłącznie jako JSON (`Content-Type: application/json`) z nagłówkiem `Content-Length`, najwyżej 1 MB; bez kompresji (`Content-Encoding`), przesyłania w częściach, formularzy i `multipart`. Własne skrypty i narzędzia muszą wysyłać JSON (wbudowany panel, ikona w zasobniku i przykłady `curl` z tej instrukcji już to robią); POST bez treści (np. wylogowanie) jest dozwolony.
+- Panel przyjmuje tylko metody GET, POST, PUT i DELETE, treść wyłącznie jako JSON (`Content-Type: application/json`) z nagłówkiem `Content-Length`, najwyżej 1 MB; bez kompresji (`Content-Encoding`), przesyłania w częściach, formularzy i `multipart`. Własne skrypty i narzędzia muszą wysyłać JSON (wbudowany panel, ikona w zasobniku i przykłady `curl` z tej instrukcji już to robią); POST bez treści (np. wylogowanie) jest dozwolony, ale też musi mieć nagłówek `Content-Length: 0` (przeglądarki wysyłają go same; w `curl` użyj `-d ''`).
 - Pierwsze hasło tylko z panelu otwartego pod `127.0.0.1` lub `localhost` (ochrona przed DNS rebinding).
-- Nieudane logowania: po 5 błędnych hasłach w ciągu minuty adres jest blokowany na 30 s (odpowiedź „zbyt wiele nieudanych prób”).
+- Nieudane logowania: po 5 błędnych hasłach w ciągu minuty adres jest blokowany na 30 s (odpowiedź „zbyt wiele nieudanych prób”), także gdy próby przychodzą równocześnie. Po 20 błędnych hasłach w ciągu minuty ze wszystkich innych komputerów razem logowanie z sieci jest wstrzymane na 30 s; z tego komputera (`127.0.0.1`) można się wtedy nadal zalogować.
 - Zmiana hasła wylogowuje wszystkie inne sesje (inne karty, inne komputery); podgląd na żywo kończy się po wylogowaniu i nie przedłuża sesji.
 
 ### Aktualizacja: zgodność wersji usługi i sterownika
