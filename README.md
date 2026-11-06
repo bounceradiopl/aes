@@ -65,7 +65,7 @@ Osobny program z tego samego repozytorium (wspólny rdzeń AES67/PTP): **enkoder
 - Bez processingu, RDS i metadanych; PTP tylko jako slave.
 - Wersja 1.0.1: blokada logowania działa też przy równoległych próbach (wspólna poprawka z BounceAES Master 1.2.2).
 
-Instrukcja: [docs/ENCODER-INSTALL.md](docs/ENCODER-INSTALL.md), testy i odbiór: [docs/ENCODER-TESTING.md](docs/ENCODER-TESTING.md), specyfikacja: [docs/superpowers/specs/2026-11-05-bounce-encoder-design.md](docs/superpowers/specs/2026-11-05-bounce-encoder-design.md). Licencja fdk-aac nie jest zgodna z GPL, a AAC jest objęty patentami: instalator z kodekiem AAC jest do użytku wewnętrznego ([LICENSING.md](LICENSING.md)).
+Instrukcja: [docs/ENCODER-INSTALL.md](docs/ENCODER-INSTALL.md), testy i odbiór: [docs/ENCODER-TESTING.md](docs/ENCODER-TESTING.md), specyfikacja: [docs/superpowers/specs/2026-11-05-bounce-encoder-design.md](docs/superpowers/specs/2026-11-05-bounce-encoder-design.md). Licencja Bounce Encoder (GPLv3) ma dodatkowe uprawnienie na połączenie z fdk-aac; w Bounce instalator z AAC jest bez ograniczeń, a przed przekazaniem poza firmę trzeba sprawdzić patenty AAC ([LICENSING.md](LICENSING.md)).
 
 ## Budowanie
 

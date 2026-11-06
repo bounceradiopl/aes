@@ -5,15 +5,18 @@ BounceAES Master i Bounce Encoder są udostępniane na licencji **GPL-3.0-or-lat
 
 ## Osobna licencja dla Ricochetu
 
-Jedynym autorem i właścicielem praw autorskich do kodu BounceAES Master (poza katalogiem
-`third_party/`) jest Daniel Bobrowski. Jako właściciel praw udziela on dodatkowej, osobnej
-licencji na ten kod dla systemu emisyjnego **Ricochet** (Bounce):
+Jedynym autorem i właścicielem praw autorskich do kodu BounceAES Master i Bounce Encoder (poza
+katalogiem `third_party/` i kodekami pobieranymi przy budowaniu) jest Daniel Bobrowski. Jako
+właściciel praw udziela on dodatkowej, osobnej licencji na ten kod dla systemu emisyjnego
+**Ricochet** (Bounce):
 
-- Ricochet może używać kodu BounceAES Master, przenosić go (także przepisywać na inny język,
+- Ricochet może używać kodu BounceAES Master i Bounce Encoder (w tym `encoder/`,
+  `encoder_service/`, `encoder_tray/`, `http/`), przenosić go (także przepisywać na inny język,
   np. Rust), zmieniać i rozpowszechniać na własnej, zamkniętej licencji Ricochetu, bez
   obowiązków z GPLv3;
-- ta licencja nie zmienia licencji GPLv3 dla innych odbiorców BounceAES Master;
-- kod, który Ricochet przejmie, ma w Ricochecie notkę o pochodzeniu z BounceAES Master.
+- ta licencja nie zmienia licencji GPLv3 dla innych odbiorców BounceAES Master i Bounce Encoder;
+- kod, który Ricochet przejmie, ma w Ricochecie notkę o pochodzeniu z BounceAES Master albo
+  Bounce Encoder.
 
 ## Kod firm trzecich (`third_party/`)
 
@@ -63,17 +66,41 @@ Bounce Encoder, może otrzymać odpowiadający im pełny kod źródłowy: to rep
 kodeków. Kto przekazuje pliki binarne dalej, przekazuje razem z nimi ten kod albo informację, skąd
 go pobrać.
 
-**FDK AAC.** Fakty:
-- licencja Fraunhofer FDK AAC nie jest zgodna z GPL;
-- licencja Fraunhofera nie obejmuje patentów: AAC (także HE-AAC) jest objęty patentami, a licencję
-  patentową trzeba uzyskać osobno;
-- w Bounce Encoder fdk-aac jest osobnym plikiem `libfdk-aac-2.dll`, ładowanym w czasie pracy; to
-  nie usuwa niezgodności licencji z GPL;
-- instalator i pliki z `libfdk-aac-2.dll` są rozpowszechniane wyłącznie do użytku wewnętrznego
-  właściciela projektu. Przekazanie ich poza firmę wymaga decyzji właściciela projektu (licencje
-  kodu i patentów).
+## Dodatkowe uprawnienie dla FDK AAC (GPLv3, sekcja 7)
+
+Licencja Fraunhofer FDK AAC nie jest zgodna z GPL. Żeby Bounce Encoder razem z fdk-aac można było
+legalnie używać i rozpowszechniać, właściciel praw autorskich do Bounce Encoder dodaje do jego
+licencji GPLv3 poniższe dodatkowe uprawnienie (sekcja 7 GPLv3). Obowiązuje tekst angielski:
+
+> **Additional permission under GNU GPL version 3 section 7**
+>
+> If you modify this Program, or any covered work, by linking or combining it with the Fraunhofer
+> FDK AAC Codec Library (or a modified version of that library), containing parts covered by the
+> terms of the Software License for The Fraunhofer FDK AAC Codec Library for Android, the licensors
+> of this Program grant you additional permission to convey the resulting work. Corresponding Source
+> for a non-source form of such a combination shall include the source code for the parts of the
+> Fraunhofer FDK AAC Codec Library used as well as that of the covered work.
+
+Po polsku: Bounce Encoder można łączyć z biblioteką Fraunhofer FDK AAC i przekazywać dalej razem z
+nią; kod źródłowy do przekazanych plików obejmuje wtedy także źródła fdk-aac (archiwum z tabeli
+wyżej). Uprawnienie dotyczy kodu Bounce Encoder (katalogi `encoder/`, `encoder_service/`,
+`encoder_tray/` i używany przez nie kod wspólny projektu). Kto zmienia Bounce Encoder, może to
+uprawnienie zachować albo usunąć ze swojej wersji.
+
+## Jak wolno używać plików Bounce Encoder
+
+- **W Bounce** (wszystkie komputery i stacje firmy): bez ograniczeń, z kodekiem AAC.
+- **Przekazanie poza Bounce** (np. stacjom partnerskim): licencje kodu na to pozwalają (GPLv3 z
+  powyższym uprawnieniem, LGPL dla LAME, licencja Fraunhofera dla fdk-aac, BSD dla reszty), pod
+  warunkiem dołączenia tekstów licencji (folder `licencje\`) i informacji, skąd pobrać kod źródłowy.
+  **Patenty AAC to osobna sprawa:** licencja Fraunhofera wprost nie obejmuje patentów, a AAC i
+  HE-AAC są objęte patentami (pula Via LA). Przed przekazaniem instalatora z `libfdk-aac-2.dll` poza
+  firmę sprawdź licencję patentową albo przekaż pakiet bez tego pliku: wtedy MP3 i FLAC działają,
+  a strumienie AAC są w panelu wyłączone z wyjaśnieniem.
+
+To opis przyjętych zasad, nie porada prawna.
 
 Bez tego pliku Bounce Encoder działa z MP3 i FLAC, a strumienie AAC są wyłączone z wyjaśnieniem w
 panelu.
 
-Osobna licencja dla Ricochetu (wyżej) nie obejmuje kodeków: mają one własne licencje z tabeli.
+Osobna licencja dla Ricochetu (wyżej) nie obejmuje kodeków: mają one własne licencje z tabeli. Ricochet, który chce używać AAC, korzysta z fdk-aac na licencji Fraunhofera (z jej warunkami i bez licencji patentowej) albo z innego kodera AAC.

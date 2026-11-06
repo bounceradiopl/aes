@@ -309,7 +309,7 @@ Bounce Encoder jest na licencji GPL-3.0-or-later. Kodeki MP3 i AAC to osobne bib
 | libogg 1.3.5, libFLAC 1.4.3 | BSD-3-Clause | wkompilowane w `BounceEncoder.exe` |
 | libsamplerate 0.2.2 | BSD-2-Clause | wkompilowane |
 
-**Instalator z kodekiem AAC jest przeznaczony wyłącznie do użytku wewnętrznego.** Przekazanie go poza firmę wymaga decyzji właściciela projektu (licencja FDK AAC jest niezgodna z GPL, AAC wymaga licencji patentowej). Pełne teksty licencji są w folderze programu (`licencje\`) i w pliku `LICENCJE.md`.
+Licencja FDK AAC nie jest zgodna z GPL, dlatego licencja Bounce Encoder ma dodatkowe uprawnienie (GPLv3, sekcja 7), które pozwala łączyć go z fdk-aac i przekazywać razem (LICENCJE.md). **W Bounce instalatora z AAC używasz bez ograniczeń.** Przed przekazaniem go poza firmę sprawdź licencję patentową AAC (licencja Fraunhofera nie obejmuje patentów) albo przekaż pakiet bez `libfdk-aac-2.dll`: MP3 i FLAC działają dalej. Pełne teksty licencji są w folderze programu (`licencje\`) i w pliku `LICENCJE.md`.
 
 ## 15. Aktualizacja, odinstalowanie, podpisywanie
 

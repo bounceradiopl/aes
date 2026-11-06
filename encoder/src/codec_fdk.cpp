@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Additional permission under GNU GPL version 3 section 7 for combining with the Fraunhofer FDK AAC
+// Codec Library: see LICENSING.md ("Dodatkowe uprawnienie dla FDK AAC").
 // AAC-LC / HE-AAC / HE-AACv2 through fdk-aac, loaded at run time (spec §5.3): CBR, ADTS,
 // afterburner on, 16-bit PCM input converted from float with saturation.
 #include <aacenc_lib.h>
