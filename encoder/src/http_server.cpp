@@ -5,7 +5,10 @@
 #include <httplib.h>
 
 #include <atomic>
+#include <cctype>
 #include <cmath>
+#include <cstdio>
+#include <fstream>
 #include <functional>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -21,6 +24,7 @@
 #include "bam/platform/time.hpp"
 #include "bam/platform/udp.hpp"
 #include "codec_impl.hpp"
+#include "login_throttle.hpp"
 
 namespace bam::encoder {
 
@@ -334,14 +338,40 @@ void explain_dropped_passwords(std::vector<EncoderConfigIssue>& issues, const En
 struct EncoderHttpServer::Impl {
   EncoderEngine& engine;
   const std::string config_path;
-  httplib::Server server;
-  SessionStore sessions;
+  // A failed bind leaves an httplib::Server unusable, so start() builds a fresh one (with its
+  // routes, registered once per server) when the previous attempt failed.
+  std::unique_ptr<httplib::Server> server;
+  bool server_used = false;  // a bind was tried on `server`
+  std::mutex sessions_mutex;
+  std::shared_ptr<SessionStore> sessions_ = std::make_shared<SessionStore>();  // replaced on a password change
+  detail::LoginThrottle throttle;
   std::mutex change_mutex;  // one configuration change (build, validate, save, apply) at a time
   std::thread thread;
   std::atomic<bool> stopping{false};
   uint16_t port = 0;
 
-  Impl(EncoderEngine& e, std::string path) : engine(e), config_path(std::move(path)) {}
+  Impl(EncoderEngine& e, std::string path) : engine(e), config_path(std::move(path)) { make_server(); }
+
+  void make_server() {
+    server = std::make_unique<httplib::Server>();
+    server_used = false;
+    server->new_task_queue = [] { return new httplib::ThreadPool(kHttpThreads); };
+    routes(*server);
+  }
+
+  std::shared_ptr<SessionStore> sessions() {
+    std::lock_guard lock(sessions_mutex);
+    return sessions_;
+  }
+
+  // Every session ends except a new one, returned (its token), for whoever changed the password.
+  std::string restart_sessions() {
+    auto fresh = std::make_shared<SessionStore>();
+    std::string token = fresh->create(platform::monotonic_ns());
+    std::lock_guard lock(sessions_mutex);
+    sessions_ = std::move(fresh);
+    return token;
+  }
 
   void set_session_cookie(httplib::Response& res, const std::string& token, bool clear = false) {
     std::string c = std::string(kCookie) + "=" + (clear ? "" : token) + "; Path=/; HttpOnly; SameSite=Strict";
@@ -351,7 +381,7 @@ struct EncoderHttpServer::Impl {
 
   bool authorized(const httplib::Request& req) {
     const std::string token = session_cookie(req);
-    return !token.empty() && sessions.valid(token, platform::monotonic_ns());
+    return !token.empty() && sessions()->valid(token, platform::monotonic_ns());
   }
 
   // Saves `next` and hands it to the engine. Caller holds change_mutex.
@@ -398,17 +428,56 @@ struct EncoderHttpServer::Impl {
     send_json(res, out);
   }
 
-  // The panel password: saved like any other change, nothing else is touched.
-  bool set_password_hash(const std::string& hash) {
+  enum class PasswordResult { Saved, AlreadySet, SaveFailed };
+  // The panel password: saved like any other change, nothing else is touched. `first`: only when
+  // no password is set yet (checked under the change lock: two first-time setups cannot both win).
+  PasswordResult set_password_hash(const std::string& hash, bool first) {
     std::lock_guard lock(change_mutex);
     EncoderConfig next = engine.config();
+    if (first && !next.password_hash.empty()) return PasswordResult::AlreadySet;
     next.password_hash = hash;
     std::string err;
     if (!store(next, &err)) {
       log_error("Nie można zapisać hasła panelu: " + err);
+      return PasswordResult::SaveFailed;
+    }
+    return PasswordResult::Saved;
+  }
+
+  // httplib reads chunked and length-less bodies without any limit, so only bodies with a
+  // Content-Length within kMaxApiBodyBytes are accepted, and only as JSON (a form or text/plain
+  // POST is what another web site could send cross-origin without a CORS preflight).
+  // true: refused (answered), the body is never read into memory. "Connection: close" asks the
+  // client to drop the connection; bytes it still sends are parsed line by line as requests (and
+  // refused), never buffered as a body.
+  static bool refuse_body(const httplib::Request& req, httplib::Response& res) {
+    auto refuse = [&](int status, const std::string& message) {
+      send_error(res, status, message);
+      res.set_header("Connection", "close");
+      return true;
+    };
+    if (req.has_header("Transfer-Encoding"))
+      return refuse(411, "treść żądania musi mieć nagłówek Content-Length (przesyłanie w częściach nie jest obsługiwane)");
+    const bool with_body = req.method == "POST" || req.method == "PUT" || req.method == "PATCH";
+    if (!req.has_header("Content-Length")) {
+      if (with_body) return refuse(411, "treść żądania musi mieć nagłówek Content-Length");
       return false;
     }
-    return true;
+    const std::string value = req.get_header_value("Content-Length");
+    uint64_t length = 0;
+    if (value.empty() || value.size() > 19 || value.find_first_not_of("0123456789") != std::string::npos)
+      return refuse(400, "nieprawidłowy nagłówek Content-Length");
+    length = std::stoull(value);
+    if (length > kMaxApiBodyBytes)
+      return refuse(413, "treść żądania jest za duża (najwyżej " + std::to_string(kMaxApiBodyBytes / (1024 * 1024)) + " MB)");
+    if (length > 0 || req.path == "/api/setup") {
+      std::string type = req.get_header_value("Content-Type");
+      type = type.substr(0, type.find(';'));
+      while (!type.empty() && type.back() == ' ') type.pop_back();
+      for (char& c : type) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      if (type != "application/json") return refuse(415, "oczekiwano treści typu application/json");
+    }
+    return false;
   }
 
   static std::optional<size_t> find_station(const json& doc, const std::string& id) {
@@ -418,8 +487,8 @@ struct EncoderHttpServer::Impl {
     return std::nullopt;
   }
 
-  void routes() {
-    server.set_payload_max_length(kMaxApiBodyBytes);
+  void routes(httplib::Server& server) {
+    server.set_payload_max_length(kMaxApiBodyBytes);  // a second line of defence: checked before routing below
     server.set_error_handler([](const httplib::Request&, httplib::Response& res) {
       if (!res.body.empty()) return httplib::Server::HandlerResponse::Unhandled;
       if (res.status == 413) {
@@ -432,11 +501,12 @@ struct EncoderHttpServer::Impl {
       return httplib::Server::HandlerResponse::Handled;
     });
 
-    // Authorization before the body is read: without a session nothing is parsed.
+    // Runs on the headers, before any body is read: the body checks, then authorization.
     server.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
       res.set_header("X-Frame-Options", "DENY");
       res.set_header("X-Content-Type-Options", "nosniff");
       res.set_header("Cache-Control", "no-store");
+      if (refuse_body(req, res)) return httplib::Server::HandlerResponse::Handled;
       const bool open = req.path == "/api/health" || req.path == "/api/login" || req.path == "/api/setup" ||
                         req.path == "/api/auth-state" || req.path.rfind("/api/", 0) != 0;
       if (open || authorized(req)) return httplib::Server::HandlerResponse::Unhandled;
@@ -466,9 +536,13 @@ struct EncoderHttpServer::Impl {
       if (!body) return;
       const std::string pw = text(*body, "password");
       if (pw.size() < 8) return send_error(res, 400, "hasło musi mieć co najmniej 8 znaków");
-      if (!set_password_hash(make_password_hash(pw))) return send_error(res, 500, "nie można zapisać hasła");
+      switch (set_password_hash(make_password_hash(pw), true)) {
+        case PasswordResult::AlreadySet: return send_error(res, 409, "hasło jest już ustawione");
+        case PasswordResult::SaveFailed: return send_error(res, 500, "nie można zapisać hasła");
+        case PasswordResult::Saved: break;
+      }
       log_info("Ustawiono hasło panelu");
-      set_session_cookie(res, sessions.create(platform::monotonic_ns()));
+      set_session_cookie(res, sessions()->create(platform::monotonic_ns()));
       send_json(res, {{"ok", true}});
     });
 
@@ -477,18 +551,22 @@ struct EncoderHttpServer::Impl {
       if (!body) return;
       const std::string stored = engine.config().password_hash;
       if (stored.empty()) return send_error(res, 409, "hasło nie jest jeszcze ustawione");
+      // guessing is limited by counting failures (429), not by holding a request thread
+      if (!throttle.allowed(req.remote_addr, platform::monotonic_ns()))
+        return send_error(res, 429, "zbyt wiele nieudanych prób, spróbuj za chwilę");
       if (!verify_password(text(*body, "password"), stored)) {
+        throttle.failed(req.remote_addr, platform::monotonic_ns());
         log_warning("Nieudane logowanie do panelu z " + req.remote_addr);
-        platform::sleep_ns(500'000'000);  // slows down guessing
         return send_error(res, 401, "nieprawidłowe hasło");
       }
-      set_session_cookie(res, sessions.create(platform::monotonic_ns()));
+      throttle.succeeded(req.remote_addr);
+      set_session_cookie(res, sessions()->create(platform::monotonic_ns()));
       send_json(res, {{"ok", true}});
     });
 
     // ---- authorized ----
     server.Post("/api/logout", [this](const httplib::Request& req, httplib::Response& res) {
-      sessions.remove(session_cookie(req));
+      sessions()->remove(session_cookie(req));
       set_session_cookie(res, "", true);
       send_json(res, {{"ok", true}});
     });
@@ -501,7 +579,10 @@ struct EncoderHttpServer::Impl {
         return send_error(res, 403, "obecne hasło jest nieprawidłowe");
       const std::string pw = text(*body, "password");
       if (pw.size() < 8) return send_error(res, 400, "hasło musi mieć co najmniej 8 znaków");
-      if (!set_password_hash(make_password_hash(pw))) return send_error(res, 500, "nie można zapisać hasła");
+      if (set_password_hash(make_password_hash(pw), false) != PasswordResult::Saved)
+        return send_error(res, 500, "nie można zapisać hasła");
+      // every other session (other tabs, other computers) ends; this one goes on with a new cookie
+      set_session_cookie(res, restart_sessions());
       log_info("Zmieniono hasło panelu");
       send_json(res, {{"ok", true}});
     });
@@ -593,10 +674,11 @@ struct EncoderHttpServer::Impl {
     });
 
     // Server-sent events: the /api/status document 5 times a second (meters, stream states).
-    server.Get("/api/live", [this](const httplib::Request&, httplib::Response& res) {
+    // The session is checked before every event: logout, expiry or a password change ends it.
+    server.Get("/api/live", [this](const httplib::Request& req, httplib::Response& res) {
       res.set_header("X-Accel-Buffering", "no");
-      res.set_chunked_content_provider("text/event-stream", [this](size_t, httplib::DataSink& sink) {
-        if (stopping) return false;
+      res.set_chunked_content_provider("text/event-stream", [this, token = session_cookie(req)](size_t, httplib::DataSink& sink) {
+        if (stopping || !sessions()->valid(token, platform::monotonic_ns())) return false;
         const std::string msg = "event: status\ndata: " + status_json(engine.status()).dump() + "\n\n";
         if (!sink.write(msg.data(), msg.size())) return false;
         platform::sleep_ns(kLiveIntervalNs);
@@ -633,15 +715,16 @@ bool EncoderHttpServer::start(const std::string& bind, uint16_t port, std::strin
     if (error) *error = "panel już działa";
     return false;
   }
-  m.server.new_task_queue = [] { return new httplib::ThreadPool(kHttpThreads); };
-  m.routes();
-  const int bound = port == 0 ? m.server.bind_to_any_port(bind) : (m.server.bind_to_port(bind, port) ? port : -1);
+  if (m.server_used) m.make_server();  // the last attempt failed (or the server was stopped)
+  m.server_used = true;
+  m.stopping = false;
+  const int bound = port == 0 ? m.server->bind_to_any_port(bind) : (m.server->bind_to_port(bind, port) ? port : -1);
   if (bound <= 0) {
     if (error) *error = "nie można otworzyć portu panelu " + bind + ":" + std::to_string(port);
     return false;
   }
   m.port = static_cast<uint16_t>(bound);
-  m.thread = std::thread([&m] { m.server.listen_after_bind(); });
+  m.thread = std::thread([&m] { m.server->listen_after_bind(); });
   log_info("Panel Bounce Encoder dostępny pod http://" + (bind == "0.0.0.0" ? std::string("127.0.0.1") : bind) + ":" +
            std::to_string(m.port));
   return true;
@@ -651,7 +734,7 @@ void EncoderHttpServer::stop() {
   auto& m = *impl_;
   if (!m.thread.joinable()) return;
   m.stopping = true;
-  m.server.stop();
+  m.server->stop();
   m.thread.join();
 }
 
@@ -689,7 +772,11 @@ void reset_global(EncoderConfig& c, const std::string& field) {
   const EncoderConfig d = default_encoder_config();
   if (field == "interface_ip") c.interface_ip = d.interface_ip;
   if (field == "ptp_domain") c.ptp_domain = d.ptp_domain;
-  if (field == "http_bind") c.http_bind = d.http_bind;
+  if (field == "http_bind") {
+    // fail closed: a mistyped address must not open the panel on every interface
+    c.http_bind = "127.0.0.1";
+    log_error("Nieprawidłowy adres panelu w konfiguracji: panel dostępny tylko z tego komputera (127.0.0.1)");
+  }
   if (field == "http_port") c.http_port = d.http_port;
   if (field == "stations" && c.stations.size() > static_cast<size_t>(kMaxStations)) c.stations.resize(kMaxStations);
 }
@@ -759,6 +846,27 @@ EncoderConfig load_startup_config(const std::string& path) {
   EncoderConfig fallback = default_encoder_config();
   fallback.password_hash = cfg.password_hash;
   return fallback;
+}
+
+bool write_panel_file(const std::string& path, const std::string& bind, int port, std::string* error) {
+  const std::string tmp = path + ".tmp";
+  {
+    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+    out << json{{"bind", bind}, {"port", port}}.dump(2) << "\n";
+    out.flush();
+    if (!out) {
+      if (error) *error = "nie można zapisać pliku " + tmp;
+      out.close();
+      std::remove(tmp.c_str());
+      return false;
+    }
+  }
+  if (!platform::replace_file(tmp, path)) {
+    if (error) *error = "nie można zastąpić pliku " + path;
+    std::remove(tmp.c_str());
+    return false;
+  }
+  return true;
 }
 
 }  // namespace bam::encoder

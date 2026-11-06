@@ -5,17 +5,23 @@
 #include <doctest/doctest.h>
 #include <httplib.h>
 
+#include <atomic>
 #include <cstdio>
 #include <fstream>
 #include <functional>
 #include <nlohmann/json.hpp>
+#include <sstream>
+#include <thread>
+#include <vector>
 
 #include "bam/auth.hpp"
 #include "bam/encoder/engine.hpp"
 #include "bam/encoder/http_server.hpp"
 #include "bam/platform/process.hpp"
+#include "bam/platform/tcp.hpp"
 #include "bam/platform/time.hpp"
 #include "bam/sdp.hpp"
+#include "../encoder/src/login_throttle.hpp"  // LoginThrottle (the login counter behind 429)
 #include "test_util.hpp"
 
 namespace be = bam::encoder;
@@ -79,6 +85,34 @@ bool wait_for(const std::function<bool()>& pred, int timeout_ms) {
   return pred();
 }
 
+// Sends `request` as it is and returns the status of the response that arrives within
+// `timeout_ms` (0 = none).
+int raw_status(uint16_t port, const std::string& request, int timeout_ms = 3000) {
+  std::string err;
+  auto s = bp::TcpStream::connect(kLoopback, port, 2000, &err);
+  REQUIRE_MESSAGE(s, err);
+  REQUIRE(s->send_all({reinterpret_cast<const uint8_t*>(request.data()), request.size()}, 2000));
+  std::string got;
+  uint8_t buf[4096];
+  const int64_t end = bp::monotonic_ns() + int64_t(timeout_ms) * 1'000'000;
+  while (got.find("\r\n\r\n") == std::string::npos && bp::monotonic_ns() < end) {
+    const int n = s->recv(buf, 100);
+    if (n == 0) break;
+    if (n > 0) got.append(reinterpret_cast<const char*>(buf), static_cast<size_t>(n));
+  }
+  if (got.rfind("HTTP/1.1 ", 0) != 0) return 0;
+  return std::stoi(got.substr(9, 3));
+}
+
+std::string chunked_request(const std::string& method, const std::string& path, const std::string& body,
+                            const std::string& cookie = "") {
+  std::ostringstream hex;
+  hex << std::hex << body.size();
+  return method + " " + path + " HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n" +
+         (cookie.empty() ? std::string() : "Cookie: " + cookie + "\r\n") + "Transfer-Encoding: chunked\r\n\r\n" + hex.str() +
+         "\r\n" + body + "\r\n0\r\n\r\n";
+}
+
 struct Fixture {
   std::string config_path = unique_path("http");
   be::EncoderEngine engine{[] {
@@ -130,6 +164,7 @@ struct Fixture {
   httplib::Result put(const std::string& path, const json& body) { return client->Put(path, auth, body.dump(), "application/json"); }
   httplib::Result post(const std::string& path, const json& body) { return client->Post(path, auth, body.dump(), "application/json"); }
   json file() { return json::parse(read_file(config_path)); }
+  std::string cookie() const { return auth.begin()->second; }
 };
 
 }  // namespace
@@ -160,6 +195,10 @@ TEST_CASE("encoder HTTP: login, sessions and 401 without a session") {
   CHECK(f.client->Put("/api/config", "{}", "application/json")->status == 401);
   CHECK(f.client->Post("/api/stations", "{}", "application/json")->status == 401);
   CHECK(f.client->Delete("/api/stations/s1")->status == 401);
+  CHECK(f.client->Put("/api/stations/s1", "{}", "application/json")->status == 401);
+  CHECK(f.client->Post("/api/password", R"({"current":"a","password":"bbbbbbbb"})", "application/json")->status == 401);
+  CHECK(f.client->Post("/api/logout", "", "application/json")->status == 401);
+  CHECK(f.client->Get("/api/live")->status == 401);
   CHECK(f.client->Post("/api/login", json{{"password", kPassword}}.dump(), "application/json")->status == 409);  // no password yet
 
   // first password: at least 8 characters, only once
@@ -299,12 +338,18 @@ TEST_CASE("encoder HTTP: config get and put, passwords never leave the server") 
   CHECK(json::parse(r->body)["notices"].dump().find("ponownym uruchomieniu") != std::string::npos);
   CHECK(f.file()["http_port"] == 8071);
 
-  // a body over 1 MB is refused before it is parsed
+  // a body over 1 MB is refused on its headers and never read: the server answers 413 at once, so a
+  // client still sending may see the connection reset instead of the answer
   const std::string huge(be::kMaxApiBodyBytes + 1, ' ');
   r = f.client->Put("/api/config", f.auth, huge, "application/json");
-  REQUIRE(r);
-  CHECK(r->status == 413);
-  CHECK(json::parse(r->body)["error"].get<std::string>().find("za duża") != std::string::npos);
+  if (r) {
+    CHECK(r->status == 413);
+    CHECK(json::parse(r->body)["error"].get<std::string>().find("za duża") != std::string::npos);
+  }
+  CHECK(raw_status(f.server->port(), "PUT /api/config HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nCookie: " +
+                                         f.cookie() + "\r\nContent-Length: " + std::to_string(be::kMaxApiBodyBytes + 1) + "\r\n\r\n") == 413);
+  CHECK(f.file()["http_port"] == 8071);
+  f.get("/api/config");  // still answering
 }
 
 TEST_CASE("encoder HTTP: stations are added, edited and deleted") {
@@ -566,6 +611,16 @@ TEST_CASE("encoder service: startup configuration") {
     CHECK(json::parse(read_file(path))["http_port"] == 70000);  // the file is not rewritten
     std::remove(path.c_str());
   }
+  SUBCASE("an invalid panel address fails closed: 127.0.0.1, not every interface") {
+    const std::string path = unique_path("start");
+    json j = json::parse(be::config_to_json(be::default_encoder_config()));
+    j["http_bind"] = "127.0.0.l";  // a typo for a local-only address
+    std::ofstream(path) << j.dump();
+    const be::EncoderConfig c = be::load_startup_config(path);
+    CHECK(be::validate_config(c).empty());
+    CHECK(c.http_bind == "127.0.0.1");
+    std::remove(path.c_str());
+  }
   SUBCASE("a station still invalid while disabled is left out, the file kept as .bad") {
     const std::string path = unique_path("start");
     json j = json::parse(be::config_to_json(be::default_encoder_config()));
@@ -581,5 +636,222 @@ TEST_CASE("encoder service: startup configuration") {
     std::remove(path.c_str());
     std::remove((path + ".bad").c_str());
   }
+}
+
+TEST_CASE("encoder HTTP: bodies without a length, chunked or too large are refused before they are read") {
+  Fixture f;
+  const uint16_t port = f.server->port();
+
+  // public endpoint, chunked: refused, the handler never ran
+  CHECK(raw_status(port, chunked_request("POST", "/api/setup", json{{"password", kPassword}}.dump())) == 411);
+  CHECK(json::parse(f.client->Get("/api/auth-state")->body)["password_set"] == false);
+  // no Content-Length at all (the body would run until the connection closes)
+  CHECK(raw_status(port, "POST /api/login HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n"
+                         "{\"password\":\"zlehaslo123\"}") == 411);
+  // a 3 MB chunk announced: refused on the headers
+  CHECK(raw_status(port, "POST /api/login HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+                         "Transfer-Encoding: chunked\r\n\r\n300000\r\n" + std::string(65536, 'a')) == 411);
+
+  // with a session the same
+  f.setup_and_login();
+  CHECK(raw_status(port, chunked_request("PUT", "/api/config", R"({"ptp_domain":7})", f.cookie())) == 411);
+  CHECK(f.file()["ptp_domain"] == 0);
+  // a Content-Length over 1 MB: 413 at once, without waiting for (or skipping) the body
+  CHECK(raw_status(port, "PUT /api/config HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nCookie: " +
+                             f.cookie() + "\r\nContent-Length: 2000000000\r\n\r\n", 2000) == 413);
+  // the server still answers normally
+  f.get("/api/config");
+}
+
+TEST_CASE("encoder HTTP: a body must be JSON (no cross-origin simple requests)") {
+  Fixture f;
+  // a form or text/plain POST is what another web page can send without CORS: refused
+  auto r = f.client->Post("/api/setup", json{{"password", kPassword}}.dump(), "text/plain");
+  REQUIRE(r);
+  CHECK(r->status == 415);
+  CHECK(json::parse(r->body)["error"].get<std::string>().find("application/json") != std::string::npos);
+  CHECK(f.client->Post("/api/setup", "password=tajnehaslo1", "application/x-www-form-urlencoded")->status == 415);
+  CHECK(json::parse(f.client->Get("/api/auth-state")->body)["password_set"] == false);
+  CHECK(f.client->Post("/api/login", json{{"password", kPassword}}.dump(), "text/plain")->status == 415);
+
+  f.setup_and_login();
+  CHECK(f.client->Put("/api/config", f.auth, R"({"ptp_domain":3})", "text/plain")->status == 415);
+  CHECK(f.file()["ptp_domain"] == 0);
+  CHECK(f.client->Put("/api/config", f.auth, R"({"ptp_domain":3})", "application/json; charset=utf-8")->status == 200);
+  // a POST without a body needs no type
+  CHECK(f.client->Post("/api/logout", f.auth)->status == 200);
+}
+
+TEST_CASE("encoder HTTP: failed logins are throttled without holding a request thread") {
+  Fixture f;
+  f.setup_and_login();
+  const int64_t t0 = bp::monotonic_ns();
+  for (int i = 0; i < 5; ++i) CHECK(f.client->Post("/api/login", R"({"password":"zlehaslo123"})", "application/json")->status == 401);
+  CHECK(bp::monotonic_ns() - t0 < 1'500'000'000);  // no sleeping per failure
+  // the address is now refused for a while, even with the right password
+  auto r = f.client->Post("/api/login", json{{"password", kPassword}}.dump(), "application/json");
+  REQUIRE(r);
+  CHECK(r->status == 429);
+  CHECK(json::parse(r->body)["error"] == "zbyt wiele nieudanych prób, spróbuj za chwilę");
+  // a session already open is not affected
+  f.get("/api/config");
+}
+
+TEST_CASE("encoder login throttle: per address, overall ceiling, expiry") {
+  using T = be::detail::LoginThrottle;
+  constexpr int64_t s = 1'000'000'000;
+  const std::string a = "192.168.1.10", b = "192.168.1.11", local = "127.0.0.1";
+
+  SUBCASE("5 failures within 60 s block the address for 30 s") {
+    T t;
+    for (int i = 0; i < 5; ++i) {
+      CHECK(t.allowed(a, i * s));
+      t.failed(a, i * s);
+    }
+    CHECK_FALSE(t.allowed(a, 5 * s));
+    CHECK(t.allowed(b, 5 * s));            // another address is not affected
+    CHECK_FALSE(t.allowed(a, 4 * s + 29 * s));
+    CHECK(t.allowed(a, 4 * s + 31 * s));   // the block is over
+  }
+  SUBCASE("failures older than the window do not count; a success clears the address") {
+    T t;
+    for (int i = 0; i < 4; ++i) t.failed(a, i * s);
+    t.failed(a, 70 * s);  // the first four are older than 60 s by now
+    CHECK(t.allowed(a, 70 * s));
+    for (int i = 0; i < 4; ++i) t.failed(b, i * s);
+    t.succeeded(b);
+    t.failed(b, 5 * s);
+    CHECK(t.allowed(b, 5 * s));
+  }
+  SUBCASE("too many failures overall block every remote address, never the local one") {
+    T::Limits l;
+    l.overall = 6;
+    T t(l);
+    for (int i = 0; i < 6; ++i) t.failed("10.0.0." + std::to_string(i), s);  // one or two per address
+    CHECK_FALSE(t.allowed("10.0.0.99", 2 * s));
+    CHECK(t.allowed(local, 2 * s));
+    CHECK(t.allowed("10.0.0.99", 32 * s));
+  }
+  SUBCASE("the local address has its own counter") {
+    T t;
+    for (int i = 0; i < 5; ++i) t.failed(local, s);
+    CHECK_FALSE(t.allowed(local, 2 * s));
+  }
+  SUBCASE("the number of tracked addresses is bounded") {
+    T::Limits l;
+    l.max_addresses = 8;
+    l.overall = 1'000'000;
+    T t(l);
+    for (int i = 0; i < 100; ++i) t.failed("10.1.0." + std::to_string(i), s);
+    for (int i = 0; i < 5; ++i) t.failed(a, s);
+    CHECK_FALSE(t.allowed(a, 2 * s));  // a blocked address is still found
+  }
+}
+
+TEST_CASE("encoder HTTP: only one first password, even when set concurrently") {
+  Fixture f;
+  std::atomic<int> ok{0}, conflict{0};
+  std::vector<std::thread> threads;
+  for (int i = 0; i < 4; ++i) {  // within httplib's listen backlog of 5
+    threads.emplace_back([&, i] {
+      httplib::Client c(kLoopback, f.server->port());
+      c.set_read_timeout(10, 0);
+      auto r = c.Post("/api/setup", json{{"password", "haslo-nr-" + std::to_string(i)}}.dump(), "application/json");
+      if (r && r->status == 200) ++ok;
+      if (r && r->status == 409) ++conflict;
+      if (!r || (r->status != 200 && r->status != 409)) MESSAGE("setup " << i << ": " << (r ? std::to_string(r->status) + " " + r->body : httplib::to_string(r.error())));
+    });
+  }
+  for (auto& t : threads) t.join();
+  CHECK(ok == 1);
+  CHECK(conflict == 3);
+}
+
+TEST_CASE("encoder HTTP: the live feed ends with its session; a password change ends the other sessions") {
+  Fixture f;
+  f.setup_and_login();
+
+  // reads /api/live with `cookie` until the server ends it (true) or 5 s pass (false)
+  auto watch = [&](const std::string& cookie, std::atomic<int>& events, std::atomic<bool>& ended) {
+    httplib::Client c(kLoopback, f.server->port());
+    c.set_read_timeout(10, 0);
+    const int64_t deadline = bp::monotonic_ns() + 5'000'000'000;
+    bool gave_up = false;
+    c.Get("/api/live", httplib::Headers{{"Cookie", cookie}}, [&](const char*, size_t) {
+      ++events;
+      if (bp::monotonic_ns() > deadline) gave_up = true;
+      return !gave_up;
+    });
+    ended = !gave_up;
+  };
+
+  {  // logout
+    std::atomic<int> events{0};
+    std::atomic<bool> ended{false};
+    std::thread t([&] { watch(f.cookie(), events, ended); });
+    REQUIRE(wait_for([&] { return events > 0; }, 3000));
+    CHECK(f.client->Post("/api/logout", f.auth)->status == 200);
+    t.join();
+    CHECK(ended);
+  }
+
+  // two sessions; the second changes the password
+  auto first = f.client->Post("/api/login", json{{"password", kPassword}}.dump(), "application/json");
+  REQUIRE(first->status == 200);
+  const std::string other = first->get_header_value("Set-Cookie").substr(0, first->get_header_value("Set-Cookie").find(';'));
+  auto second = f.client->Post("/api/login", json{{"password", kPassword}}.dump(), "application/json");
+  REQUIRE(second->status == 200);
+  f.take_cookie(second);
+
+  std::atomic<int> events{0};
+  std::atomic<bool> ended{false};
+  std::thread t([&] { watch(other, events, ended); });
+  REQUIRE(wait_for([&] { return events > 0; }, 3000));
+  auto change = f.post("/api/password", {{"current", kPassword}, {"password", "nowehaslo99"}});
+  REQUIRE(change->status == 200);
+  t.join();
+  CHECK(ended);
+  CHECK(f.client->Get("/api/config", httplib::Headers{{"Cookie", other}})->status == 401);
+  // the session that changed the password goes on (with the cookie it was given)
+  if (!change->get_header_value("Set-Cookie").empty()) f.take_cookie(change);
+  f.get("/api/config");
+}
+
+TEST_CASE("encoder HTTP: a start that failed to bind can be retried") {
+  be::EncoderEngine engine{[] {
+    be::EncoderEngineOptions o;
+    o.enable_ptp = false;
+    return o;
+  }()};
+  std::string err;
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  REQUIRE(engine.start(cfg, &err));
+  auto taken = bp::TcpListener::listen(kLoopback, 0, &err);
+  REQUIRE(taken);
+  be::EncoderHttpServer server(engine, "");
+  CHECK_FALSE(server.start(kLoopback, taken->port(), &err));
+  CHECK(err.find("nie można otworzyć portu panelu") != std::string::npos);
+  REQUIRE_MESSAGE(server.start(kLoopback, 0, &err), err);
+  httplib::Client c(kLoopback, server.port());
+  auto r = c.Get("/api/health");
+  REQUIRE(r);
+  CHECK(r->status == 200);
+  CHECK(c.Get("/api/config")->status == 401);
+  server.stop();
+}
+
+TEST_CASE("encoder service: the panel address file for the tray") {
+  const std::string path = unique_path("panel");
+  std::string err;
+  REQUIRE_MESSAGE(be::write_panel_file(path, "127.0.0.1", 8070, &err), err);
+  json j = json::parse(read_file(path));
+  CHECK(j == json({{"bind", "127.0.0.1"}, {"port", 8070}}));
+  REQUIRE(be::write_panel_file(path, "0.0.0.0", 8071, &err));
+  j = json::parse(read_file(path));
+  CHECK(j["bind"] == "0.0.0.0");
+  CHECK(j["port"] == 8071);
+  CHECK_FALSE(exists(path + ".tmp"));
+  std::remove(path.c_str());
 }
 #endif  // BAM_WITH_CODECS
