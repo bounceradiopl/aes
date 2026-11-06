@@ -114,8 +114,8 @@ LangString AclWarn ${LANG_POLISH} "Nie udało się ustawić uprawnień folderu $
 LangString AclWarn ${LANG_ENGLISH} "Could not set the permissions of $APPDATA\Bounce Encoder (code $1). config.json with the stream passwords may be readable by other users of this computer: set the permissions by hand (INSTRUKCJA.md, section 2)."
 LangString InstAclWarn ${LANG_POLISH} "Nie udało się ustawić uprawnień folderu programu $INSTDIR (kod $1). Inni użytkownicy tego komputera mogą podmienić pliki usługi Bounce Encoder: zainstaluj program w Program Files albo ustaw uprawnienia ręcznie (administratorzy i SYSTEM: pełna kontrola, Użytkownicy: odczyt i wykonanie)."
 LangString InstAclWarn ${LANG_ENGLISH} "Could not set the permissions of the program folder $INSTDIR (code $1). Other users of this computer may replace the Bounce Encoder service files: install the program in Program Files or set the permissions by hand (Administrators and SYSTEM: full control, Users: read & execute)."
-LangString ForeignDirWarn ${LANG_POLISH} "Folder $INSTDIR już istniał i nie jest folderem Bounce Encoder, więc jego uprawnienia nie zostały zmienione. Jeśli inni użytkownicy tego komputera mogą w nim zapisywać, mogą też podmienić pliki usługi: zainstaluj program w Program Files albo w nowym folderze."
-LangString ForeignDirWarn ${LANG_ENGLISH} "The folder $INSTDIR already existed and is not a Bounce Encoder folder, so its permissions were not changed. If other users of this computer can write to it, they can also replace the service files: install the program in Program Files or in a new folder."
+LangString ForeignDirWarn ${LANG_POLISH} "Folder $INSTDIR już istniał, zawiera inne pliki i nie jest folderem Bounce Encoder, więc jego uprawnienia nie zostały zmienione. Jeśli inni użytkownicy tego komputera mogą w nim zapisywać, mogą też podmienić pliki usługi: zainstaluj program w Program Files albo w nowym folderze."
+LangString ForeignDirWarn ${LANG_ENGLISH} "The folder $INSTDIR already existed, holds other files and is not a Bounce Encoder folder, so its permissions were not changed. If other users of this computer can write to it, they can also replace the service files: install the program in Program Files or in a new folder."
 LangString RootDir ${LANG_POLISH} "Wybierz folder dla programu (np. $PROGRAMFILES64\Bounce Encoder), nie katalog główny dysku."
 LangString RootDir ${LANG_ENGLISH} "Choose a folder for the program (e.g. $PROGRAMFILES64\Bounce Encoder), not the root of a drive."
 LangString DelConfig ${LANG_POLISH} "Usunąć także konfigurację i logi Bounce Encoder ($APPDATA\Bounce Encoder)?$\r$\n$\r$\nKonfiguracja zawiera stacje, strumienie z hasłami Icecast i hasło panelu. Wybierz Nie, jeśli zamierzasz zainstalować program ponownie."
@@ -168,10 +168,10 @@ FunctionEnd
 ; files). Otherwise a local user could replace BounceEncoder.exe or a codec DLL and have the
 ; LocalSystem service run it. Runs before the files are written (they inherit the DACL), in the
 ; same order as the data folder below: Administrators take ownership, the folder gets its final
-; DACL in one call, then what is inside goes back to inherited ACEs only. Only a folder that is
-; ours ($5 = 1: new, or an earlier installation of Bounce Encoder): the ACL of a folder that
-; existed with other contents (which could be anything, e.g. a user's profile) is never replaced,
-; the user is warned instead.
+; DACL in one call, then what is inside ($8 = 1) goes back to inherited ACEs only; any failed step
+; shows InstAclWarn. Only a folder that is ours ($5 = 1: new, empty, or an earlier installation of
+; Bounce Encoder): the ACL of a folder that existed with other contents (which could be anything,
+; e.g. a user's profile) is never replaced, the user is warned instead.
 !macro PROTECT_INSTDIR
   StrCpy $2 "$PROGRAMFILES64\"
   StrLen $3 $2
@@ -202,10 +202,15 @@ FunctionEnd
       ${EndIf}
     ${EndIf}
     ${If} $0 == 0
-      ; an update or an existing folder: what is inside inherits the final DACL (no stray ACEs)
-      ${If} ${FileExists} "$INSTDIR\*.*"
+      ; an update: what is inside inherits the final DACL (no stray ACEs); a new or empty folder
+      ; has nothing to reset (icacls would fail on the empty wildcard)
+      ${If} $8 == 1
         nsExec::ExecToLog 'icacls "$INSTDIR\*" /reset /T /C /Q'
         Pop $0
+        ${If} $0 != 0
+        ${AndIf} $1 == 0
+          StrCpy $1 $0
+        ${EndIf}
       ${EndIf}
     ${ElseIf} $1 == 0
       StrCpy $1 $0
@@ -238,11 +243,25 @@ Section "Bounce Encoder" SecMain
   !insertmacro CHECK_INSTDIR
   !insertmacro STOP_COMPONENTS
   SetShellVarContext all
-  ; $5 = 1: the program folder is ours to protect (new, or an earlier installation)
+  ; $8 = 1: the program folder exists with something in it (anything but . and ..);
+  ; $5 = 1: the folder is ours to protect (new, empty, or an earlier installation)
   StrCpy $5 1
+  StrCpy $8 0
   ${If} ${FileExists} "$INSTDIR\*.*"
-  ${AndIfNot} ${FileExists} "$INSTDIR\BounceEncoder.exe"
-    StrCpy $5 0
+    FindFirst $6 $7 "$INSTDIR\*.*"
+    ${DoWhile} $7 != ""
+      ${If} $7 != "."
+      ${AndIf} $7 != ".."
+        StrCpy $8 1
+        ${ExitDo}
+      ${EndIf}
+      FindNext $6 $7
+    ${Loop}
+    FindClose $6
+    ${If} $8 == 1
+    ${AndIfNot} ${FileExists} "$INSTDIR\BounceEncoder.exe"
+      StrCpy $5 0
+    ${EndIf}
   ${EndIf}
   SetOutPath "$INSTDIR"
   !insertmacro PROTECT_INSTDIR

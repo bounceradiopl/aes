@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <algorithm>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -345,8 +346,10 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
       add(sp + ".streams", label + "najwyżej " + std::to_string(kMaxStreamsPerStation) + " strumieni (jest " +
                                std::to_string(st.streams.size()) + ")");
 
-    // group:port|sender -> input index: one source received twice would be mixed twice (+6 dB)
-    std::map<std::string, size_t> sources;
+    // group:port -> (sender filter, input index) of the inputs on it: one source received twice
+    // would be mixed twice (+6 dB). An input without a filter receives every sender on its group
+    // and port, so it duplicates any input there; two different filters are two senders.
+    std::map<std::string, std::vector<std::pair<std::string, size_t>>> sources;
     for (size_t j = 0; j < st.inputs.size(); ++j) {
       const auto& in = st.inputs[j];
       const std::string f = input_path(i, j) + ".";
@@ -371,12 +374,17 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
         add(f + "sdp", p + "SDP: " + r.error);
         continue;
       }
-      const std::string source = lower(r.stream->multicast_address) + ":" + std::to_string(r.stream->port) + "|" +
-                                 lower(r.stream->source_filter);
-      if (auto [it, inserted] = sources.emplace(source, j); !inserted) {
+      auto& on_group = sources[lower(r.stream->multicast_address) + ":" + std::to_string(r.stream->port)];
+      const std::string filter = lower(r.stream->source_filter);
+      const auto same = std::find_if(on_group.begin(), on_group.end(), [&](const auto& other) {
+        return other.first == filter || other.first.empty() || filter.empty();
+      });
+      if (same != on_group.end()) {
         add(f + "sdp", p + "ten sam strumień źródła (" + r.stream->multicast_address + ":" + std::to_string(r.stream->port) +
-                           ") co wejście " + std::to_string(it->second + 1) +
+                           ") co wejście " + std::to_string(same->second + 1) +
                            " tej stacji: dźwięk byłby zmiksowany dwa razy (+6 dB); wyłącz lub usuń jedno z wejść");
+      } else {
+        on_group.emplace_back(filter, j);
       }
       if (latency_in_range && in.latency_us < min_rx_latency_us(*r.stream)) {
         char buf[48];

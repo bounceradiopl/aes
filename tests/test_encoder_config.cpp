@@ -405,6 +405,38 @@ TEST_CASE("encoder config: one station may not receive the same source twice") {
   c.stations[0].inputs[1].sdp = sdp;
   CHECK(find_issue(be::validate_config(c), "stations[0].inputs[1].sdp"));
 
+  // an input without a source filter receives every sender on its group and port, the filtered
+  // one's too: also the same source, whichever comes first
+  const auto unfiltered = [] {
+    be::InputConfig in = orban_input();
+    const size_t at = in.sdp.find("a=source-filter:");
+    REQUIRE(at != std::string::npos);
+    in.sdp.erase(at, in.sdp.find('\n', at) + 1 - at);
+    REQUIRE(in.sdp.find("source-filter") == std::string::npos);
+    return in;
+  };
+  c = sample();
+  c.stations[0].inputs.push_back(unfiltered());
+  issues = be::validate_config(c);
+  i = find_issue(issues, "stations[0].inputs[1].sdp");
+  REQUIRE_MESSAGE(i, dump(issues));
+  CHECK_MESSAGE(contains(i->message, "Stacja „Radio Bounce”, wejście 2: "), i->message);
+  CHECK_MESSAGE(contains(i->message, "wejście 1"), i->message);
+  c = sample();
+  c.stations[0].inputs.insert(c.stations[0].inputs.begin(), unfiltered());
+  CHECK_MESSAGE(find_issue(be::validate_config(c), "stations[0].inputs[1].sdp"), dump(be::validate_config(c)));
+
+  // two different senders on one group and port (each filtered to its own): two sources
+  c = sample();
+  c.stations[0].inputs.push_back(orban_input());
+  {
+    std::string& sdp = c.stations[0].inputs[1].sdp;
+    const std::string sender = "239.1.14.100 10.80.14.100";
+    REQUIRE(contains(sdp, sender));
+    sdp.replace(sdp.find(sender), sender.size(), "239.1.14.100 10.80.14.101");
+  }
+  CHECK_MESSAGE(be::validate_config(c).empty(), dump(be::validate_config(c)));
+
   // a disabled duplicate is allowed (it is not received), and so is the same source in another station
   c = sample();
   c.stations[0].inputs.push_back(orban_input());
