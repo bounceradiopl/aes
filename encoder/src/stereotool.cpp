@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Stereo Tool binding (spec §4): libStereoTool loaded at run time, only from the program folder
 // (full paths, never a bare name; on Windows with the restricted DLL search of DynamicLibrary),
-// web interface and UECP bound to 127.0.0.1, and every call into the library guarded.
+// only version 11.07, web interface and UECP bound to 127.0.0.1, and every call into the
+// library guarded.
 #include "bam/encoder/stereotool.hpp"
 
+#include <atomic>
 #include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <mutex>
 
 #ifdef _MSC_VER
+#include <malloc.h>  // _resetstkoflw
 #include <windows.h>
 #endif
 
@@ -44,10 +47,19 @@ namespace {
 
 constexpr const char* kBindIp = "127.0.0.1";
 
+// Instances abandoned after a structured exception (process-wide, see StereoToolInstance).
+std::atomic<int> g_abandoned{0};
+
+// Create3, Delete, LoadPreset and SavePreset of all instances, one at a time. Always taken
+// outside guarded(): a structured exception unwinds no locals of the frames it leaves.
+std::mutex g_api_mutex;
+
+enum class Outcome { Ok, Exception, Crash };
+
 #ifdef _MSC_VER
 // MSVC builds also catch structured exceptions (access violation, ...) thrown inside the
 // library. A C++ exception (SEH code 0xE06D7363) is left to the C++ handler of guarded(), which
-// can read its message.
+// can read its message and knows the library unwound in order.
 constexpr unsigned long kMsvcCppException = 0xE06D7363;
 
 int seh_filter(unsigned long code) {
@@ -66,28 +78,30 @@ bool seh_call(F& f, unsigned long* code) {
 }
 #endif
 
-// Runs f (one call into the library). false and a Polish reason when it threw.
+// Runs f (one call into the library); on failure a Polish reason.
 template <typename F>
-bool guarded(const char* function, F& f, std::string* reason) {
+Outcome guarded(const char* function, F& f, std::string* reason) {
   try {
 #ifdef _MSC_VER
     unsigned long code = 0;
     if (!seh_call(f, &code)) {
+      // the stack guard page back, now that the handler is left (the instance is abandoned anyway)
+      if (code == EXCEPTION_STACK_OVERFLOW) _resetstkoflw();
       char hex[16];
       std::snprintf(hex, sizeof hex, "0x%08lX", code);
       *reason = std::string("awaria Stereo Tool w ") + function + " (wyjątek systemowy " + hex + ")";
-      return false;
+      return Outcome::Crash;
     }
 #else
     f();
 #endif
-    return true;
+    return Outcome::Ok;
   } catch (const std::exception& e) {
     *reason = std::string("Stereo Tool zgłosił wyjątek w ") + function + ": " + e.what();
   } catch (...) {
     *reason = std::string("Stereo Tool zgłosił nieznany wyjątek w ") + function;
   }
-  return false;
+  return Outcome::Exception;
 }
 
 // A message that may come from the library must not carry the licence key.
@@ -103,9 +117,13 @@ bool resolve(const platform::DynamicLibrary& lib, const char* name, Fn& fn) {
   return fn != nullptr;
 }
 
+std::filesystem::path fs_path(const std::string& utf8) {
+  return std::filesystem::path(reinterpret_cast<const char8_t*>(utf8.c_str()));
+}
+
 bool file_exists(const std::string& utf8) {
   std::error_code ec;
-  return std::filesystem::is_regular_file(std::filesystem::path(reinterpret_cast<const char8_t*>(utf8.c_str())), ec);
+  return std::filesystem::is_regular_file(fs_path(utf8), ec);
 }
 
 std::string join(const std::vector<std::string>& v, const char* sep) {
@@ -117,7 +135,17 @@ std::string join(const std::vector<std::string>& v, const char* sep) {
   return s;
 }
 
-std::shared_ptr<const detail::StereoToolApi> load(const std::vector<std::string>& dirs, StereoToolInfo& info) {
+// 11070 -> "11.07 (11070)"
+std::string version_text(int v) {
+  char buf[48];
+  std::snprintf(buf, sizeof buf, "%d.%02d (%d)", v / 1000, (v % 1000) / 10, v);
+  return buf;
+}
+
+using ApiPtr = std::shared_ptr<const detail::StereoToolApi>;
+
+// `kept` receives every library that was opened: none is ever unloaded.
+ApiPtr load(const std::vector<std::string>& dirs, std::vector<ApiPtr>& kept, StereoToolInfo& info) {
   info = {};
   const auto names = stereotool_library_names();
   if (names.empty()) {
@@ -140,6 +168,7 @@ std::shared_ptr<const detail::StereoToolApi> load(const std::vector<std::string>
   }
   auto api = std::make_shared<detail::StereoToolApi>();
   api->lib = std::move(*lib);
+  kept.push_back(api);
   const auto& l = api->lib;
   const char* missing = nullptr;
   auto need = [&](const char* name, auto& fn) {
@@ -157,47 +186,68 @@ std::shared_ptr<const detail::StereoToolApi> load(const std::vector<std::string>
   need("stereoTool_CheckLicenseValid", api->check_license_valid);
   need("stereoTool_GetUnlicensedUsedFeatures", api->get_unlicensed_used_features);
   if (missing) {
-    info.error = "biblioteka Stereo Tool " + l.path() + " nie ma funkcji " + missing + " (potrzebna wersja 11.07)";
+    info.error = "biblioteka Stereo Tool " + l.path() + " nie ma funkcji " + missing + " (potrzebna wersja " +
+                 version_text(kStereoToolVersion) + ")";
+    return nullptr;
+  }
+  // the parameter indices (stereotool_api.hpp) are those of 11.07: another version is not used
+  std::string reason;
+  auto version = [&] { api->version = api->get_software_version(); };
+  if (guarded("stereoTool_GetSoftwareVersion", version, &reason) != Outcome::Ok) {
+    info.error = reason;
+    return nullptr;
+  }
+  info.version = api->version;
+  if (api->version != kStereoToolVersion) {
+    info.error = "nieobsługiwana wersja Stereo Tool " + version_text(api->version) + " w " + l.path() +
+                 ": Bounce Encoder używa tylko wersji " + version_text(kStereoToolVersion);
     return nullptr;
   }
   // before any instance exists: the web interface and UECP servers listen on 127.0.0.1 only; a
   // library that cannot be told so is not used
-  std::string reason;
   auto bind = [&] { api->set_bind_ip(kBindIp, kBindIp); };
-  auto version = [&] { api->version = api->get_software_version(); };
-  if (!guarded("stereoTool_global_setBindIp", bind, &reason) ||
-      !guarded("stereoTool_GetSoftwareVersion", version, &reason)) {
+  if (guarded("stereoTool_global_setBindIp", bind, &reason) != Outcome::Ok) {
     info.error = reason;
     return nullptr;
   }
   info.available = true;
   info.path = l.path();
-  info.version = api->version;
   return api;
 }
 
-// Loaded once per search-dir setting. A library once loaded is never unloaded (Stereo Tool may
-// keep threads of its own running after its last instance): `kept` is never destroyed.
+// Loaded once per search-dir setting (stereotool_reload() retries a failed load). A library once
+// opened is never unloaded (Stereo Tool may keep threads of its own running after its last
+// instance): `kept` is never destroyed.
 struct Cache {
   std::mutex mutex;
   bool dirs_set = false;
   std::vector<std::string> dirs;
   bool tried = false;
-  std::shared_ptr<const detail::StereoToolApi> api;
+  ApiPtr api;
   StereoToolInfo info;
-  std::vector<std::shared_ptr<const detail::StereoToolApi>>* kept =
-      new std::vector<std::shared_ptr<const detail::StereoToolApi>>;
+  std::vector<ApiPtr>* kept = new std::vector<ApiPtr>;
 
+  // absolute dirs only: a relative one would depend on the working directory
   std::vector<std::string> search_dirs() const {
-    if (dirs_set) return dirs;
+    std::vector<std::string> out;
+    if (dirs_set) {
+      for (const auto& d : dirs)
+        if (!d.empty() && fs_path(d).is_absolute()) out.push_back(d);
+      return out;
+    }
     const std::string exe = platform::executable_dir();
-    return exe.empty() ? std::vector<std::string>{} : std::vector<std::string>{exe};
+    if (!exe.empty() && fs_path(exe).is_absolute()) out.push_back(exe);
+    return out;
   }
   void ensure_loaded() {
     if (tried) return;
-    api = load(search_dirs(), info);
-    if (api) kept->push_back(api);
+    api = load(search_dirs(), *kept, info);
     tried = true;
+  }
+  StereoToolInfo current() const {
+    StereoToolInfo i = info;
+    i.abandoned = g_abandoned.load();
+    return i;
   }
 };
 
@@ -206,11 +256,11 @@ Cache& cache() {
   return c;
 }
 
-std::shared_ptr<const detail::StereoToolApi> stereotool_api(StereoToolInfo* info) {
+ApiPtr stereotool_api(StereoToolInfo* info) {
   auto& c = cache();
   std::lock_guard<std::mutex> lock(c.mutex);
   c.ensure_loaded();
-  if (info) *info = c.info;
+  if (info) *info = c.current();
   return c.api;
 }
 
@@ -220,6 +270,15 @@ StereoToolInfo stereotool_info() {
   StereoToolInfo info;
   stereotool_api(&info);
   return info;
+}
+
+StereoToolInfo stereotool_reload() {
+  auto& c = cache();
+  std::lock_guard<std::mutex> lock(c.mutex);
+  // a loaded library is kept; after an abandoned instance nothing is loaded again
+  if (!c.api && g_abandoned.load() == 0) c.tried = false;
+  c.ensure_loaded();
+  return c.current();
 }
 
 std::vector<std::string> stereotool_library_names() {
@@ -238,6 +297,12 @@ std::vector<std::string> stereotool_library_names() {
 #endif
 }
 
+std::vector<std::string> stereotool_library_candidates() {
+  auto& c = cache();
+  std::lock_guard<std::mutex> lock(c.mutex);
+  return detail::library_candidates(c.search_dirs(), stereotool_library_names());
+}
+
 void set_stereotool_library_dirs(std::vector<std::string> dirs) {
   auto& c = cache();
   std::lock_guard<std::mutex> lock(c.mutex);
@@ -247,6 +312,10 @@ void set_stereotool_library_dirs(std::vector<std::string> dirs) {
   c.api.reset();
   c.info = {};
 }
+
+namespace testing {
+void set_stereotool_abandoned(int count) { g_abandoned.store(count); }
+}  // namespace testing
 
 // ---- StereoToolInstance ----
 
@@ -261,6 +330,10 @@ std::unique_ptr<StereoToolInstance> StereoToolInstance::create(const std::string
     if (error) *error = info.error;
     return nullptr;
   }
+  if (g_abandoned.load() >= kStereoToolMaxAbandoned) {
+    if (error) *error = "Stereo Tool uległ awarii — uruchom ponownie usługę Bounce Encoder (do tego czasu bez processingu)";
+    return nullptr;
+  }
   gStereoTool* st = nullptr;
   std::string reason;
   auto create3 = [&] {
@@ -268,8 +341,15 @@ std::unique_ptr<StereoToolInstance> StereoToolInstance::create(const std::string
                       home_dir.empty() ? nullptr : home_dir.c_str(), false);
   };
   const std::string what = "nie udało się utworzyć instancji Stereo Tool" + (name.empty() ? "" : " " + name);
-  if (!guarded("stereoTool_Create3", create3, &reason)) {
-    // whatever the library did, no instance pointer came back: nothing to delete
+  Outcome outcome;
+  {
+    std::lock_guard<std::mutex> lock(g_api_mutex);
+    outcome = guarded("stereoTool_Create3", create3, &reason);
+  }
+  if (outcome != Outcome::Ok) {
+    // no instance pointer came back: nothing to delete; after a crash the library's state is
+    // unknown, as if an instance had been abandoned
+    if (outcome == Outcome::Crash) ++g_abandoned;
     if (error) *error = what + ": " + without_key(reason, key);
     return nullptr;
   }
@@ -281,25 +361,41 @@ std::unique_ptr<StereoToolInstance> StereoToolInstance::create(const std::string
 }
 
 StereoToolInstance::~StereoToolInstance() {
-  if (!st_ || failed_) return;  // a failed instance is abandoned, not deleted
+  if (!st_ || abandoned_) return;
+  // also after a C++ exception: the library unwound in order, so its ports and memory are freed
   std::string reason;
   auto destroy = [&] { api_->destroy(st_); };
-  guarded("stereoTool_Delete", destroy, &reason);
+  Outcome outcome;
+  {
+    std::lock_guard<std::mutex> lock(g_api_mutex);
+    outcome = guarded("stereoTool_Delete", destroy, &reason);
+  }
+  if (outcome == Outcome::Crash) ++g_abandoned;
 }
 
 template <typename F>
 bool StereoToolInstance::call(const char* function, F&& f) {
   if (failed_) return false;
   std::string reason;
-  if (guarded(function, f, &reason)) return true;
+  const Outcome outcome = guarded(function, f, &reason);
+  if (outcome == Outcome::Ok) return true;
   failed_ = true;
   failure_ = std::move(reason);
+  if (outcome == Outcome::Crash) {
+    abandoned_ = true;
+    ++g_abandoned;
+  }
   return false;
 }
 
 bool StereoToolInstance::load_preset(const std::string& sts_path, std::string* error) {
   bool ok = false;
-  if (!call("stereoTool_LoadPreset", [&] { ok = api_->load_preset(st_, sts_path.c_str(), detail::st::kSaveAllSettings); })) {
+  bool called;
+  {
+    std::lock_guard<std::mutex> lock(g_api_mutex);
+    called = call("stereoTool_LoadPreset", [&] { ok = api_->load_preset(st_, sts_path.c_str(), detail::st::kSaveAllSettings); });
+  }
+  if (!called) {
     if (error) *error = failure_;
     return false;
   }
@@ -318,7 +414,12 @@ bool StereoToolInstance::load_preset(const std::string& sts_path, std::string* e
 
 bool StereoToolInstance::save_preset(const std::string& sts_path, std::string* error) {
   bool ok = false;
-  if (!call("stereoTool_SavePreset", [&] { ok = api_->save_preset(st_, sts_path.c_str(), detail::st::kSaveAllSettings); })) {
+  bool called;
+  {
+    std::lock_guard<std::mutex> lock(g_api_mutex);
+    called = call("stereoTool_SavePreset", [&] { ok = api_->save_preset(st_, sts_path.c_str(), detail::st::kSaveAllSettings); });
+  }
+  if (!called) {
     if (error) *error = failure_;
     return false;
   }
@@ -338,16 +439,22 @@ bool StereoToolInstance::set_web_interface(bool enabled, int port) {
   return apply_web_interface();
 }
 
+bool StereoToolInstance::set_sts(int index, const std::string& value) {
+  bool ok = false;
+  return call("stereoTool_SetStsValue", [&] { ok = api_->set_sts_value(st_, index, 0, value.c_str()); }) && ok;
+}
+
 bool StereoToolInstance::apply_web_interface() {
-  bool port_ok = true, enable_ok = false;
+  bool port_ok = true;
   if (web_enabled_) {
-    // the port first, so the server starts on it
-    const std::string port = std::to_string(web_port_);
-    call("stereoTool_SetStsValue", [&] { port_ok = api_->set_sts_value(st_, detail::st::kParamWebserverPort, 0, port.c_str()); });
+    // the port first: the server is switched on only once it is set (else it would start on
+    // whatever port the library had)
+    port_ok = set_sts(detail::st::kParamWebserverPort, std::to_string(web_port_));
+    if (failed_) return false;
+    if (!port_ok) web_enabled_ = false;
   }
-  const char* on = web_enabled_ ? "1" : "0";
-  call("stereoTool_SetStsValue", [&] { enable_ok = api_->set_sts_value(st_, detail::st::kParamWebserverEnable, 0, on); });
-  return !failed_ && port_ok && enable_ok;
+  const bool enable_ok = set_sts(detail::st::kParamWebserverEnable, web_enabled_ ? "1" : "0");
+  return port_ok && enable_ok;
 }
 
 bool StereoToolInstance::process(float* stereo, int32_t frames) {

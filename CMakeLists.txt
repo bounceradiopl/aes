@@ -166,6 +166,11 @@ if(TARGET bam_encoder)
       COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:BounceEncoder>"
       COMMAND ${CMAKE_COMMAND} -E copy_if_different "${BAM_STEREOTOOL_DLL}" "$<TARGET_FILE_DIR:BounceEncoder>/libStereoTool_64.dll"
       VERBATIM)
+  else()
+    # Stereo Tool switched off in an existing build folder: no stale copy next to the encoder
+    foreach(_bam_cfg_dir "" ${CMAKE_CONFIGURATION_TYPES})
+      file(REMOVE "${PROJECT_BINARY_DIR}/${_bam_cfg_dir}/libStereoTool_64.dll")
+    endforeach()
   endif()
 endif()
 

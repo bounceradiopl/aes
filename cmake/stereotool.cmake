@@ -114,6 +114,11 @@ endif()
 set(BAM_STEREOTOOL_INCLUDE_DIR "${_bam_st_dir}/include")
 if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8)
   set(BAM_STEREOTOOL_DLL "${_bam_st_dir}/lib/Windows/64/libStereoTool_64.dll")
+  if(MINGW)
+    message(WARNING "MinGW build with libStereoTool_64.dll: a crash (structured exception) or an MSVC C++ "
+      "exception inside Stereo Tool is not caught and ends the encoder. For development only; "
+      "release builds of Bounce Encoder are made with MSVC, which catches both.")
+  endif()
 else()
   set(BAM_STEREOTOOL_DLL "")
 endif()

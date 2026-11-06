@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "../encoder/src/stereotool_api.hpp"  // the parameter indices the binding uses (11.07)
 #include "bam/encoder/stereotool.hpp"
 #include "bam/platform/dynlib.hpp"
 #include "bam/platform/process.hpp"
@@ -25,9 +26,10 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr int kWebserverEnable = 524;  // ParameterEnum.h 11.07
-constexpr int kWebserverPort = 525;
-constexpr long long kSaveAllSettings = 20386;  // ID_SAVE_ALLSETTINGS
+namespace st = be::detail::st;
+constexpr int kWebserverEnable = st::kParamWebserverEnable;
+constexpr int kWebserverPort = st::kParamWebserverPort;
+constexpr long long kSaveAllSettings = st::kSaveAllSettings;
 const std::string kUnlicensed = "Fake: Declipper, Fake: Multiband";
 
 // The fake's control functions, from the same library file the binding loads (shared state).
@@ -80,7 +82,10 @@ struct UseFake {
     be::set_stereotool_library_dirs({BAM_FAKE_STEREOTOOL_DIR});
     fake().reset();
   }
-  ~UseFake() { be::set_stereotool_library_dirs({}); }
+  ~UseFake() {
+    be::set_stereotool_library_dirs({});
+    be::testing::set_stereotool_abandoned(0);
+  }
   UseFake(const UseFake&) = delete;
   UseFake& operator=(const UseFake&) = delete;
 };
@@ -323,7 +328,7 @@ TEST_CASE("stereotool: licence validity and the unlicensed features") {
   CHECK_FALSE(st->failed());
 }
 
-TEST_CASE("stereotool: an exception in process is caught, the instance is failed and abandoned") {
+TEST_CASE("stereotool: a C++ exception in process is caught, the instance is failed and then deleted") {
   UseFake use;
   fake().set("latency", 0);
   fake().set("gain", 2);
@@ -352,11 +357,121 @@ TEST_CASE("stereotool: an exception in process is caught, the instance is failed
   CHECK(fake().value("latency_calls") == 0);
   CHECK(fake().value("license_calls") == 0);
   CHECK(fake().value("load_calls") == 0);
-  // abandoned: no stereoTool_Delete on an instance in an unknown state
+  // a C++ exception unwinds in order: the instance is deleted (its ports and memory freed), not abandoned
+  CHECK(be::stereotool_info().abandoned == 0);
   st.reset();
-  CHECK(fake().value("deleted") == 0);
+  CHECK(fake().value("deleted") == 1);
   CHECK(fake().value("delete_unknown") == 0);
+  CHECK(be::stereotool_info().abandoned == 0);
+  auto next = make("station-throw-2");  // and the next instance is allowed
 }
+
+TEST_CASE("stereotool: an exception from Create3 is reported without the licence key") {
+  UseFake use;
+  fake().set("create_throws", 1);  // the fake's exception text contains the key
+  std::string err;
+  CHECK(be::StereoToolInstance::create("SECRET-KEY-456", "station-ct", "", &err) == nullptr);
+  CHECK_MESSAGE(err.find("nie udało się utworzyć instancji Stereo Tool") != std::string::npos, err);
+  CHECK_MESSAGE(err.find("wyjątek") != std::string::npos, err);
+  CHECK_MESSAGE(err.find("fake Create3 failure") != std::string::npos, err);
+  CHECK_MESSAGE(err.find("SECRET-KEY-456") == std::string::npos, err);
+  CHECK(fake().value("create_calls") == 1);
+  CHECK(fake().value("created") == 0);
+}
+
+TEST_CASE("stereotool: the search candidates are absolute paths, a relative folder is never searched") {
+  UseFake use;
+  const auto names = be::stereotool_library_names();
+  be::set_stereotool_library_dirs({BAM_FAKE_STEREOTOOL_DIR});
+  auto candidates = be::stereotool_library_candidates();
+  REQUIRE(candidates.size() == names.size());
+  for (const auto& c : candidates) CHECK_MESSAGE(fs::path(c).is_absolute(), c);
+  CHECK(same_file(candidates.front(), BAM_FAKE_STEREOTOOL_PATH));
+  // the default: the program folder, absolute as well
+  be::set_stereotool_library_dirs({});
+  candidates = be::stereotool_library_candidates();
+  REQUIRE_FALSE(candidates.empty());
+  for (const auto& c : candidates) CHECK_MESSAGE(fs::path(c).is_absolute(), c);
+  // a relative folder (resolved against the working directory) is left out: nothing to search
+  CwdGuard cwd(fs::path(BAM_FAKE_STEREOTOOL_DIR).parent_path());
+  const std::string relative = fs::path(BAM_FAKE_STEREOTOOL_DIR).filename().string();
+  be::set_stereotool_library_dirs({relative});
+  CHECK(be::stereotool_library_candidates().empty());
+  const auto info = be::stereotool_info();
+  CHECK_FALSE(info.available);
+  CHECK_MESSAGE(info.error.find("brak biblioteki Stereo Tool") != std::string::npos, info.error);
+}
+
+TEST_CASE("stereotool: after an abandoned instance no further instance is created") {
+  UseFake use;
+  CHECK(be::stereotool_info().abandoned == 0);
+  be::testing::set_stereotool_abandoned(1);  // what a crash in the library leaves behind (MSVC test below)
+  CHECK(be::stereotool_info().abandoned == 1);
+  CHECK(be::stereotool_info().available);  // the library itself is still there
+  std::string err;
+  CHECK(be::StereoToolInstance::create("", "station-after-crash", "", &err) == nullptr);
+  CHECK_MESSAGE(err.find("Stereo Tool uległ awarii") != std::string::npos, err);
+  CHECK_MESSAGE(err.find("uruchom ponownie usługę Bounce Encoder") != std::string::npos, err);
+  CHECK(fake().value("create_calls") == 0);  // refused before the library is asked
+  // no reload either: the abandoned instance still lives in this library
+  CHECK(be::stereotool_reload().abandoned == 1);
+  be::testing::set_stereotool_abandoned(0);
+  auto st = make("station-after-restart");
+}
+
+TEST_CASE("stereotool: only version 11.07 is used (the parameter indices are those of 11.07)") {
+  UseFake use;
+  fake().set("version", 11080);
+  auto info = be::stereotool_info();
+  CHECK_FALSE(info.available);
+  CHECK(info.version == 11080);
+  CHECK_MESSAGE(info.error.find("11080") != std::string::npos, info.error);
+  CHECK_MESSAGE(info.error.find("11070") != std::string::npos, info.error);
+  std::string err;
+  CHECK(be::StereoToolInstance::create("", "station-ver", "", &err) == nullptr);
+  CHECK(err == info.error);
+  CHECK(fake().value("create_calls") == 0);
+  CHECK(fake().value("bind_calls") == 0);  // nothing but the version asked of a wrong library
+
+  // a failed load stays cached, until a reload (e.g. "restart processing" after replacing the DLL)
+  fake().set("version", 11070);
+  CHECK_FALSE(be::stereotool_info().available);
+  info = be::stereotool_reload();
+  REQUIRE_MESSAGE(info.available, info.error);
+  CHECK(info.version == 11070);
+  CHECK(be::stereotool_info().available);
+  CHECK(fake().value("bind_calls") == 1);
+  auto st = make("station-ver-ok");
+  // a reload of a library that is loaded changes nothing
+  CHECK(be::stereotool_reload().available);
+  CHECK(fake().value("bind_calls") == 1);
+}
+
+#ifdef _MSC_VER
+// Only MSVC builds catch structured exceptions (__try/__except); a crash inside the library
+// elsewhere ends the process, so there is nothing to test there.
+TEST_CASE("stereotool: an access violation in process is caught, the instance is abandoned and the next refused") {
+  UseFake use;
+  auto st = make("station-crash");
+  fake().set("process_crashes", 1);
+  auto buf = ramp(480);
+  CHECK_FALSE(st->process(buf.data(), 480));
+  CHECK(st->failed());
+  CHECK_MESSAGE(st->failure().find("wyjątek systemowy 0xC0000005") != std::string::npos, st->failure());
+  CHECK(be::stereotool_info().abandoned == 1);
+  fake().set("process_crashes", 0);
+  CHECK_FALSE(st->process(buf.data(), 480));
+  CHECK(fake().value("process_calls") == 1);
+  CHECK(st->latency_frames() == 0);
+  CHECK(fake().value("latency_calls") == 0);
+  st.reset();
+  CHECK(fake().value("deleted") == 0);  // abandoned: its state is unknown
+  CHECK(be::stereotool_info().abandoned == 1);
+  std::string err;
+  CHECK(be::StereoToolInstance::create("", "station-crash-2", "", &err) == nullptr);
+  CHECK_MESSAGE(err.find("uruchom ponownie usługę Bounce Encoder") != std::string::npos, err);
+}
+#endif
 
 TEST_CASE("stereotool: the web interface port is set per instance and kept across preset loads") {
   UseFake use;
@@ -382,6 +497,11 @@ TEST_CASE("stereotool: the web interface port is set per instance and kept acros
 
   REQUIRE(st->set_web_interface(false, 0));
   CHECK(fake().sts("station-web", kWebserverEnable) == std::optional<std::string>("0"));
+  // a port the library refuses: the web interface is not switched on (it would use another port)
+  fake().set("sts_rejects", kWebserverPort);
+  CHECK_FALSE(st->set_web_interface(true, 8106));
+  CHECK(fake().sts("station-web", kWebserverEnable) == std::optional<std::string>("0"));
+  fake().set("sts_rejects", -1);
   REQUIRE_MESSAGE(st->load_preset(path, &err), err);
   CHECK(fake().sts("station-web", kWebserverEnable) == std::optional<std::string>("0"));
   // still only on 127.0.0.1

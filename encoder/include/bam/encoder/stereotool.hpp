@@ -21,12 +21,15 @@ struct StereoToolApi;  // stereotool.cpp
 // Stereo Tool always runs on the station mix: 48 kHz, interleaved stereo float.
 inline constexpr int32_t kStereoToolRate = 48000;
 inline constexpr int32_t kStereoToolChannels = 2;
+inline constexpr int kStereoToolVersion = 11070;     // the only version used (parameter indices of 11.07)
+inline constexpr int kStereoToolMaxAbandoned = 1;    // see StereoToolInstance
 
 struct StereoToolInfo {
   bool available = false;
   std::string path;    // the library that was loaded
   int version = 0;     // stereoTool_GetSoftwareVersion(): 11070 for 11.07
   std::string error;   // Polish, for the panel, when not available
+  int abandoned = 0;   // instances abandoned after a crash in the library (process-wide)
 };
 
 // The library, loaded once per search-dir setting (default: the program folder). Before the
@@ -43,11 +46,34 @@ std::vector<std::string> stereotool_library_names();
 // Tests: search these dirs instead of the program folder (empty: back to the program folder).
 void set_stereotool_library_dirs(std::vector<std::string> dirs);
 
+// The full paths searched for the current dir setting (absolute dirs only, never a bare name).
+std::vector<std::string> stereotool_library_candidates();
+
+// Tries again to load a library that failed to load (e.g. "restart processing" after the DLL
+// was replaced); a library that is loaded, or one holding an abandoned instance, is kept.
+StereoToolInfo stereotool_reload();
+
+namespace testing {
+// Test hook: sets the process-wide count of abandoned instances.
+void set_stereotool_abandoned(int count);
+}  // namespace testing
+
 // One Stereo Tool instance (one per processed station; one licence key per instance).
-// Not thread-safe: one thread uses an instance at a time.
-// Every call into the library is guarded: a C++ exception (and on MSVC builds a structured
-// exception, e.g. an access violation) is caught, the instance is marked failed and is not
-// called again -- not even stereoTool_Delete: its state is unknown, so it is abandoned.
+// Not thread-safe: one thread (the station's processing worker) uses an instance at a time;
+// failed()/failure() are that thread's state too, so other threads (HTTP) ask the worker.
+// Create3, Delete, LoadPreset and SavePreset of all instances are serialised by one process-wide
+// mutex (never Process).
+//
+// Every call into the library is guarded, and the first failure marks the instance failed: it
+// is not called again, except for one thing:
+// - a C++ exception (ordered unwinding): the instance is still deleted when destroyed;
+// - a structured exception (an access violation, a stack overflow, ...; caught by MSVC builds
+//   only): its state is unknown, so it is abandoned, never deleted. Its memory stays taken and so
+//   does its web interface port (that station's web interface stays off until the service
+//   restarts). At most kStereoToolMaxAbandoned instance is abandoned per process: after that
+//   create() refuses ("uruchom ponownie usługę Bounce Encoder") and processing stays bypassed.
+// MinGW builds (development only; releases are built with MSVC) catch no structured exception,
+// nor a C++ exception of the MSVC-built real DLL: a crash there ends the process.
 class StereoToolInstance {
  public:
   // stereoTool_Create3(has_gui = false, key, name, home_dir, load_ini = false); an empty key,
@@ -56,7 +82,7 @@ class StereoToolInstance {
   // never contains the key.
   static std::unique_ptr<StereoToolInstance> create(const std::string& key, const std::string& name,
                                                     const std::string& home_dir, std::string* error);
-  ~StereoToolInstance();  // stereoTool_Delete (unless failed)
+  ~StereoToolInstance();  // stereoTool_Delete (unless abandoned)
   StereoToolInstance(const StereoToolInstance&) = delete;
   StereoToolInstance& operator=(const StereoToolInstance&) = delete;
 
@@ -65,8 +91,9 @@ class StereoToolInstance {
   bool load_preset(const std::string& sts_path, std::string* error);
   bool save_preset(const std::string& sts_path, std::string* error);
 
-  // The instance's web interface (enable + port, through stereoTool_SetStsValue), reachable on
-  // 127.0.0.1 only (the global bind address). Port 1..65535 when enabled.
+  // The instance's web interface (port, then enable, through stereoTool_SetStsValue), reachable
+  // on 127.0.0.1 only (the global bind address). Port 1..65535 when enabled. When the library
+  // refuses the port, the web interface is switched off (false).
   bool set_web_interface(bool enabled, int port);
 
   // In place, `frames` frames of interleaved stereo at 48 kHz. false when the instance has
@@ -90,10 +117,12 @@ class StereoToolInstance {
   template <typename F>
   bool call(const char* function, F&& f);
   bool apply_web_interface();
+  bool set_sts(int index, const std::string& value);
 
   std::shared_ptr<const detail::StereoToolApi> api_;
   gStereoTool* st_ = nullptr;
   bool failed_ = false;
+  bool abandoned_ = false;
   std::string failure_;
   bool web_set_ = false, web_enabled_ = false;
   int web_port_ = 0;

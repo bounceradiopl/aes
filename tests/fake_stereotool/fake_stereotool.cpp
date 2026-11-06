@@ -9,8 +9,10 @@
 // arguments); they open this library by its path, so they share its state with the binding.
 // Options (fake_stereotool_set; defaults after fake_stereotool_reset):
 //   gain 0.5, latency 512 (frames; both copied into an instance when it is created),
-//   version 11070, license_valid 1, create_fails 0, process_throws 0, process_sleep_us 0,
-//   save_fails 0.
+//   version 11070, license_valid 1, create_fails 0, create_throws 0 (a C++ exception whose text
+//   holds the key), process_throws 0 (a C++ exception), process_crashes 0 (Windows: an access
+//   violation, a structured exception), process_sleep_us 0, save_fails 0, sts_rejects -1 (the
+//   .sts index SetStsValue refuses).
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -25,7 +27,10 @@
 #include <thread>
 #include <vector>
 
+#include "../../encoder/src/stereotool_api.hpp"  // the parameter indices the binding uses
+
 #ifdef _WIN32
+#include <windows.h>
 #define FAKE_ST_EXPORT extern "C" __declspec(dllexport)
 #else
 #define FAKE_ST_EXPORT extern "C" __attribute__((visibility("default")))
@@ -49,9 +54,8 @@ class gStereoTool {
 
 namespace {
 
-// The ParameterEnum.h 11.07 indices the binding sets (web interface enable / port).
-constexpr int kWebserverEnable = 524;
-constexpr int kWebserverPort = 525;
+constexpr int kWebserverEnable = bam::encoder::detail::st::kParamWebserverEnable;
+constexpr int kWebserverPort = bam::encoder::detail::st::kParamWebserverPort;
 
 struct State {
   std::mutex mutex;
@@ -62,8 +66,9 @@ struct State {
 
   void defaults() {
     options = {{"gain", 0.5},          {"latency", 512},      {"version", 11070},
-               {"license_valid", 1},   {"create_fails", 0},   {"process_throws", 0},
-               {"process_sleep_us", 0}, {"save_fails", 0}};
+               {"license_valid", 1},   {"create_fails", 0},   {"create_throws", 0},
+               {"process_throws", 0},  {"process_crashes", 0}, {"process_sleep_us", 0},
+               {"save_fails", 0},      {"sts_rejects", -1}};
     values.clear();
     texts.clear();
   }
@@ -86,6 +91,15 @@ State& state() {
 }
 
 [[noreturn]] void fail_process() { throw std::runtime_error("fake Stereo Tool process failure"); }
+[[noreturn]] void fail_create(const std::string& key) {
+  throw std::runtime_error("fake Create3 failure, key " + key);
+}
+
+void crash_process() {
+#ifdef _WIN32
+  RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
+#endif
+}
 
 const char* kUnlicensed = "Fake: Declipper, Fake: Multiband";
 
@@ -111,13 +125,19 @@ FAKE_ST_EXPORT int stereoTool_GetSoftwareVersion() {
 FAKE_ST_EXPORT gStereoTool* stereoTool_Create3(const bool has_gui, const char* key, const char* st_name,
                                                const char* home_path, bool load_ini) {
   auto& s = state();
+  bool throws = false;
+  {
+    std::lock_guard<std::mutex> lock(s.mutex);
+    ++s.values["create_calls"];
+    s.values["create_has_gui"] = has_gui;
+    s.values["create_load_ini"] = load_ini;
+    s.text("create_key", key);
+    s.text("create_name", st_name);
+    s.text("create_home", home_path);
+    throws = s.opt("create_throws") != 0;
+  }
+  if (throws) fail_create(key ? key : "");  // no lock held (see stereoTool_Process)
   std::lock_guard<std::mutex> lock(s.mutex);
-  ++s.values["create_calls"];
-  s.values["create_has_gui"] = has_gui;
-  s.values["create_load_ini"] = load_ini;
-  s.text("create_key", key);
-  s.text("create_name", st_name);
-  s.text("create_home", home_path);
   if (s.opt("create_fails") != 0) return nullptr;
   auto* st = new gStereoTool;
   st->name = st_name ? st_name : "";
@@ -148,7 +168,7 @@ FAKE_ST_EXPORT void stereoTool_Process(gStereoTool* st, float* samples, int32_t 
                                        int32_t samplerate) {
   auto& s = state();
   long long sleep_us = 0;
-  bool throws = false;
+  bool throws = false, crashes = false;
   {
     std::lock_guard<std::mutex> lock(s.mutex);
     ++s.values["process_calls"];
@@ -156,10 +176,12 @@ FAKE_ST_EXPORT void stereoTool_Process(gStereoTool* st, float* samples, int32_t 
     s.values["process_channels"] = channels;
     s.values["process_rate"] = samplerate;
     throws = s.opt("process_throws") != 0;
+    crashes = s.opt("process_crashes") != 0;
     sleep_us = (long long)s.opt("process_sleep_us");
   }
   // thrown with no lock held: MSVC (/EHsc) need not unwind an extern "C" function's locals
   if (throws) fail_process();
+  if (crashes) crash_process();
   if (sleep_us > 0) std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
   if (channels != st->channels) {
     st->channels = channels;
@@ -231,7 +253,7 @@ FAKE_ST_EXPORT bool stereoTool_SetStsValue(gStereoTool* st, int index, int subin
   auto& s = state();
   std::lock_guard<std::mutex> lock(s.mutex);
   ++s.values["sts_set_calls"];
-  if (subindex != 0 || !value) return false;
+  if (subindex != 0 || !value || index == int(s.opt("sts_rejects"))) return false;
   st->sts[index] = value;
   return true;
 }
