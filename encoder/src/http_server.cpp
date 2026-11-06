@@ -81,6 +81,12 @@ std::string text(const json& body, const char* key) {
   return it != body.end() && it->is_string() ? it->get<std::string>() : std::string();
 }
 
+std::atomic<int64_t> g_clock_offset_ns{0};  // testing::set_http_clock_offset_ns
+std::mutex g_hook_mutex;
+std::function<void()> g_login_verified_hook;  // testing::set_login_verified_hook
+
+int64_t now_ns() { return platform::monotonic_ns() + g_clock_offset_ns.load(); }
+
 double round1(double v) { return std::round(v * 10.0) / 10.0; }
 
 json peaks(const float (&p)[2]) { return json::array({round1(p[0]), round1(p[1])}); }
@@ -126,7 +132,7 @@ json ptp_json(const EncoderStatus& s) {
 }
 
 json status_json(const EncoderStatus& s) {
-  const int64_t now = platform::monotonic_ns();
+  const int64_t now = platform::monotonic_ns();  // the engine's times are monotonic
   json stations = json::array();
   for (const StationStatus& st : s.stations) {
     json inputs = json::array();
@@ -344,6 +350,7 @@ struct EncoderHttpServer::Impl {
   bool server_used = false;  // a bind was tried on `server`
   std::mutex sessions_mutex;
   std::shared_ptr<SessionStore> sessions_ = std::make_shared<SessionStore>();  // replaced on a password change
+  uint64_t sessions_generation_ = 0;  // counts the replacements (sessions_mutex)
   detail::LoginThrottle throttle;
   std::mutex change_mutex;  // one configuration change (build, validate, save, apply) at a time
   std::thread thread;
@@ -364,12 +371,26 @@ struct EncoderHttpServer::Impl {
     return sessions_;
   }
 
+  uint64_t sessions_generation() {
+    std::lock_guard lock(sessions_mutex);
+    return sessions_generation_;
+  }
+
+  // A new session, unless the sessions were restarted (password change) since `generation` was
+  // read: a login that checked the old password must not outlive the change. Empty = refused.
+  std::string create_session(uint64_t generation) {
+    std::lock_guard lock(sessions_mutex);
+    if (generation != sessions_generation_) return {};
+    return sessions_->create(now_ns());
+  }
+
   // Every session ends except a new one, returned (its token), for whoever changed the password.
   std::string restart_sessions() {
     auto fresh = std::make_shared<SessionStore>();
-    std::string token = fresh->create(platform::monotonic_ns());
+    std::string token = fresh->create(now_ns());
     std::lock_guard lock(sessions_mutex);
     sessions_ = std::move(fresh);
+    ++sessions_generation_;
     return token;
   }
 
@@ -381,7 +402,7 @@ struct EncoderHttpServer::Impl {
 
   bool authorized(const httplib::Request& req) {
     const std::string token = session_cookie(req);
-    return !token.empty() && sessions()->valid(token, platform::monotonic_ns());
+    return !token.empty() && sessions()->valid(token, now_ns());
   }
 
   // Saves `next` and hands it to the engine. Caller holds change_mutex.
@@ -444,40 +465,69 @@ struct EncoderHttpServer::Impl {
     return PasswordResult::Saved;
   }
 
-  // httplib reads chunked and length-less bodies without any limit, so only bodies with a
-  // Content-Length within kMaxApiBodyBytes are accepted, and only as JSON (a form or text/plain
-  // POST is what another web site could send cross-origin without a CORS preflight).
-  // true: refused (answered), the body is never read into memory. "Connection: close" asks the
-  // client to drop the connection; bytes it still sends are parsed line by line as requests (and
-  // refused), never buffered as a body.
-  static bool refuse_body(const httplib::Request& req, httplib::Response& res) {
-    auto refuse = [&](int status, const std::string& message) {
-      send_error(res, status, message);
-      res.set_header("Connection", "close");
+  enum Access { kPublic, kSession };
+
+  // Answers `status` with a JSON error and makes httplib close the connection right after it, so
+  // the unread body is never parsed as further requests. httplib 0.18.7 ignores a response's
+  // "Connection: close"; it closes when writing the response fails. The content provider writes
+  // the whole answer and then returns false, which httplib takes as a failed write (the client
+  // has the complete response) and ends the connection.
+  static void answer_and_close(httplib::Response& res, int status, const std::string& message) {
+    auto body = std::make_shared<std::string>(json{{"error", message}}.dump());
+    res.status = status;
+    res.set_header("Connection", "close");
+    res.set_content_provider(body->size(), "application/json; charset=utf-8",
+                             [body](size_t offset, size_t length, httplib::DataSink& sink) {
+                               sink.write(body->data() + offset, length);
+                               return false;  // everything written: end the connection
+                             });
+  }
+
+  // Requests httplib would read without a bound or not in step: chunked (Transfer-Encoding), a
+  // POST/PUT/PATCH without Content-Length (read until the connection closes), a malformed
+  // or repeated Content-Length, or more than kMaxApiBodyBytes (which httplib would first read
+  // and discard). true: answered and the connection closes.
+  static bool refuse_unreadable(const httplib::Request& req, httplib::Response& res) {
+    if (req.has_header("Transfer-Encoding")) {
+      answer_and_close(res, 411, "treść żądania musi mieć nagłówek Content-Length (przesyłanie w częściach nie jest obsługiwane)");
       return true;
-    };
-    if (req.has_header("Transfer-Encoding"))
-      return refuse(411, "treść żądania musi mieć nagłówek Content-Length (przesyłanie w częściach nie jest obsługiwane)");
-    const bool with_body = req.method == "POST" || req.method == "PUT" || req.method == "PATCH";
+    }
     if (!req.has_header("Content-Length")) {
-      if (with_body) return refuse(411, "treść żądania musi mieć nagłówek Content-Length");
-      return false;
+      // httplib reads these until the connection closes; a DELETE without a length has no body
+      const bool with_body = req.method == "POST" || req.method == "PUT" || req.method == "PATCH";
+      if (with_body) answer_and_close(res, 411, "treść żądania musi mieć nagłówek Content-Length");
+      return with_body;
     }
     const std::string value = req.get_header_value("Content-Length");
-    uint64_t length = 0;
-    if (value.empty() || value.size() > 19 || value.find_first_not_of("0123456789") != std::string::npos)
-      return refuse(400, "nieprawidłowy nagłówek Content-Length");
-    length = std::stoull(value);
-    if (length > kMaxApiBodyBytes)
-      return refuse(413, "treść żądania jest za duża (najwyżej " + std::to_string(kMaxApiBodyBytes / (1024 * 1024)) + " MB)");
-    if (length > 0 || req.path == "/api/setup") {
-      std::string type = req.get_header_value("Content-Type");
-      type = type.substr(0, type.find(';'));
-      while (!type.empty() && type.back() == ' ') type.pop_back();
-      for (char& c : type) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-      if (type != "application/json") return refuse(415, "oczekiwano treści typu application/json");
+    if (req.get_header_value_count("Content-Length") != 1 || value.empty() || value.size() > 19 ||
+        value.find_first_not_of("0123456789") != std::string::npos) {
+      answer_and_close(res, 400, "nieprawidłowy nagłówek Content-Length");
+      return true;
+    }
+    if (std::stoull(value) > kMaxApiBodyBytes) {
+      answer_and_close(res, 413, "treść żądania jest za duża (najwyżej " + std::to_string(kMaxApiBodyBytes / (1024 * 1024)) + " MB)");
+      return true;
     }
     return false;
+  }
+
+  // A body is only accepted as JSON: a form or text/plain POST is what another web site could send
+  // cross-origin without a CORS preflight. /api/setup always needs the JSON type.
+  static bool json_body_ok(const httplib::Request& req) {
+    if (req.body.empty() && req.path != "/api/setup") return true;
+    std::string type = req.get_header_value("Content-Type");
+    type = type.substr(0, type.find(';'));
+    while (!type.empty() && type.back() == ' ') type.pop_back();
+    for (char& c : type) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return type == "application/json";
+  }
+
+  httplib::Server::Handler guard(Access access, httplib::Server::Handler handler) {
+    return [this, access, handler = std::move(handler)](const httplib::Request& req, httplib::Response& res) {
+      if (access == kSession && !authorized(req)) return send_error(res, 401, "wymagane logowanie");
+      if (!json_body_ok(req)) return send_error(res, 415, "oczekiwano treści typu application/json");
+      handler(req, res);
+    };
   }
 
   static std::optional<size_t> find_station(const json& doc, const std::string& id) {
@@ -490,7 +540,7 @@ struct EncoderHttpServer::Impl {
   void routes(httplib::Server& server) {
     server.set_payload_max_length(kMaxApiBodyBytes);  // a second line of defence: checked before routing below
     server.set_error_handler([](const httplib::Request&, httplib::Response& res) {
-      if (!res.body.empty()) return httplib::Server::HandlerResponse::Unhandled;
+      if (res.has_header("Content-Type")) return httplib::Server::HandlerResponse::Unhandled;  // already answered
       if (res.status == 413) {
         send_error(res, 413, "treść żądania jest za duża (najwyżej " + std::to_string(kMaxApiBodyBytes / (1024 * 1024)) + " MB)");
       } else if (res.status == 400) {
@@ -501,23 +551,29 @@ struct EncoderHttpServer::Impl {
       return httplib::Server::HandlerResponse::Handled;
     });
 
-    // Runs on the headers, before any body is read: the body checks, then authorization.
-    server.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
+    // Runs on the headers, before any body is read. Only requests whose body cannot be read safely
+    // are answered here (and their connection closed); everything else is read in full (at most
+    // kMaxApiBodyBytes) and checked by guard(), so the connection stays in step: a refused
+    // request's body is never parsed as further requests.
+    server.set_pre_routing_handler([](const httplib::Request& req, httplib::Response& res) {
       res.set_header("X-Frame-Options", "DENY");
       res.set_header("X-Content-Type-Options", "nosniff");
       res.set_header("Cache-Control", "no-store");
-      if (refuse_body(req, res)) return httplib::Server::HandlerResponse::Handled;
-      const bool open = req.path == "/api/health" || req.path == "/api/login" || req.path == "/api/setup" ||
-                        req.path == "/api/auth-state" || req.path.rfind("/api/", 0) != 0;
-      if (open || authorized(req)) return httplib::Server::HandlerResponse::Unhandled;
-      send_error(res, 401, "wymagane logowanie");
-      return httplib::Server::HandlerResponse::Handled;
+      return refuse_unreadable(req, res) ? httplib::Server::HandlerResponse::Handled : httplib::Server::HandlerResponse::Unhandled;
     });
 
-    // ---- public ----
-    server.Get("/api/health", [this](const httplib::Request&, httplib::Response& res) { send_json(res, health_json(engine.status())); });
+    // Every route goes through guard(): the session (kSession) and a JSON body, checked after the
+    // body was read.
+    using Handler = httplib::Server::Handler;
+    auto get = [&](const std::string& pattern, Access a, Handler h) { server.Get(pattern, guard(a, std::move(h))); };
+    auto post = [&](const std::string& pattern, Access a, Handler h) { server.Post(pattern, guard(a, std::move(h))); };
+    auto put = [&](const std::string& pattern, Access a, Handler h) { server.Put(pattern, guard(a, std::move(h))); };
+    auto del = [&](const std::string& pattern, Access a, Handler h) { server.Delete(pattern, guard(a, std::move(h))); };
 
-    server.Get("/api/auth-state", [this](const httplib::Request& req, httplib::Response& res) {
+    // ---- public ----
+    get("/api/health", kPublic, [this](const httplib::Request&, httplib::Response& res) { send_json(res, health_json(engine.status())); });
+
+    get("/api/auth-state", kPublic, [this](const httplib::Request& req, httplib::Response& res) {
       json logo = nullptr;
       for (size_t i = 0; i < kEncoderPanelAssetCount; ++i) {
         const std::string path = kEncoderPanelAssets[i].path;
@@ -529,7 +585,7 @@ struct EncoderHttpServer::Impl {
                       {"logo", logo}});
     });
 
-    server.Post("/api/setup", [this](const httplib::Request& req, httplib::Response& res) {
+    post("/api/setup", kPublic, [this](const httplib::Request& req, httplib::Response& res) {
       if (!engine.config().password_hash.empty()) return send_error(res, 409, "hasło jest już ustawione");
       if (!is_local(req)) return send_error(res, 403, "pierwsze hasło można ustawić tylko z tego komputera (127.0.0.1)");
       auto body = parse_body(req, res);
@@ -542,36 +598,43 @@ struct EncoderHttpServer::Impl {
         case PasswordResult::Saved: break;
       }
       log_info("Ustawiono hasło panelu");
-      set_session_cookie(res, sessions()->create(platform::monotonic_ns()));
+      set_session_cookie(res, sessions()->create(now_ns()));
       send_json(res, {{"ok", true}});
     });
 
-    server.Post("/api/login", [this](const httplib::Request& req, httplib::Response& res) {
+    post("/api/login", kPublic, [this](const httplib::Request& req, httplib::Response& res) {
       auto body = parse_body(req, res);
       if (!body) return;
+      const uint64_t generation = sessions_generation();  // before the hash: see create_session
       const std::string stored = engine.config().password_hash;
       if (stored.empty()) return send_error(res, 409, "hasło nie jest jeszcze ustawione");
       // guessing is limited by counting failures (429), not by holding a request thread
-      if (!throttle.allowed(req.remote_addr, platform::monotonic_ns()))
+      if (!throttle.allowed(req.remote_addr, now_ns()))
         return send_error(res, 429, "zbyt wiele nieudanych prób, spróbuj za chwilę");
       if (!verify_password(text(*body, "password"), stored)) {
-        throttle.failed(req.remote_addr, platform::monotonic_ns());
+        throttle.failed(req.remote_addr, now_ns());
         log_warning("Nieudane logowanie do panelu z " + req.remote_addr);
         return send_error(res, 401, "nieprawidłowe hasło");
       }
       throttle.succeeded(req.remote_addr);
-      set_session_cookie(res, sessions()->create(platform::monotonic_ns()));
+      {
+        std::lock_guard hook(g_hook_mutex);
+        if (g_login_verified_hook) g_login_verified_hook();
+      }
+      const std::string token = create_session(generation);
+      if (token.empty()) return send_error(res, 401, "hasło zostało właśnie zmienione, zaloguj się ponownie");
+      set_session_cookie(res, token);
       send_json(res, {{"ok", true}});
     });
 
     // ---- authorized ----
-    server.Post("/api/logout", [this](const httplib::Request& req, httplib::Response& res) {
+    post("/api/logout", kSession, [this](const httplib::Request& req, httplib::Response& res) {
       sessions()->remove(session_cookie(req));
       set_session_cookie(res, "", true);
       send_json(res, {{"ok", true}});
     });
 
-    server.Post("/api/password", [this](const httplib::Request& req, httplib::Response& res) {
+    post("/api/password", kSession, [this](const httplib::Request& req, httplib::Response& res) {
       auto body = parse_body(req, res);
       if (!body) return;
       if (!body->is_object()) return send_error(res, 400, "oczekiwano obiektu JSON");
@@ -587,11 +650,11 @@ struct EncoderHttpServer::Impl {
       send_json(res, {{"ok", true}});
     });
 
-    server.Get("/api/config", [this](const httplib::Request&, httplib::Response& res) { send_json(res, api_config(engine.config())); });
+    get("/api/config", kSession, [this](const httplib::Request&, httplib::Response& res) { send_json(res, api_config(engine.config())); });
 
     // The whole configuration or some of its top-level keys ("stations" replaces every station);
     // keys left out keep their value. Stream passwords sent as "" keep the stored ones (E7).
-    server.Put("/api/config", [this](const httplib::Request& req, httplib::Response& res) {
+    put("/api/config", kSession, [this](const httplib::Request& req, httplib::Response& res) {
       auto body = parse_body(req, res);
       if (!body) return;
       if (!body->is_object()) return send_error(res, 400, "oczekiwano obiektu JSON");
@@ -603,7 +666,7 @@ struct EncoderHttpServer::Impl {
     });
 
     // A new station (the station object of the configuration); it always gets a new id.
-    server.Post("/api/stations", [this](const httplib::Request& req, httplib::Response& res) {
+    post("/api/stations", kSession, [this](const httplib::Request& req, httplib::Response& res) {
       auto body = parse_body(req, res);
       if (!body) return;
       if (!body->is_object()) return send_error(res, 400, "oczekiwano obiektu JSON stacji");
@@ -618,7 +681,7 @@ struct EncoderHttpServer::Impl {
     });
 
     // One station replaced (the id comes from the path); the others stay as they are.
-    server.Put(R"(/api/stations/([A-Za-z0-9_-]+))", [this](const httplib::Request& req, httplib::Response& res) {
+    put(R"(/api/stations/([A-Za-z0-9_-]+))", kSession, [this](const httplib::Request& req, httplib::Response& res) {
       const std::string id = req.matches[1];
       auto body = parse_body(req, res);
       if (!body) return;
@@ -638,7 +701,7 @@ struct EncoderHttpServer::Impl {
           [&](json& out, const EncoderConfig&) { out["id"] = id; });
     });
 
-    server.Delete(R"(/api/stations/([A-Za-z0-9_-]+))", [this](const httplib::Request& req, httplib::Response& res) {
+    del(R"(/api/stations/([A-Za-z0-9_-]+))", kSession, [this](const httplib::Request& req, httplib::Response& res) {
       const std::string id = req.matches[1];
       change(res, [&](json& doc) {
         const auto i = find_station(doc, id);
@@ -651,11 +714,11 @@ struct EncoderHttpServer::Impl {
       });
     });
 
-    server.Get("/api/status", [this](const httplib::Request&, httplib::Response& res) { send_json(res, status_json(engine.status())); });
+    get("/api/status", kSession, [this](const httplib::Request&, httplib::Response& res) { send_json(res, status_json(engine.status())); });
 
-    server.Get("/api/codecs", [](const httplib::Request&, httplib::Response& res) { send_json(res, codecs_json()); });
+    get("/api/codecs", kSession, [](const httplib::Request&, httplib::Response& res) { send_json(res, codecs_json()); });
 
-    server.Get("/api/logs", [](const httplib::Request&, httplib::Response& res) {
+    get("/api/logs", kSession, [](const httplib::Request&, httplib::Response& res) {
       json out = json::array();
       for (const auto& e : Logger::instance().recent()) {
         const char* level = e.level == LogLevel::Error ? "error" : e.level == LogLevel::Warning ? "warning" : "info";
@@ -664,7 +727,7 @@ struct EncoderHttpServer::Impl {
       send_json(res, out);
     });
 
-    server.Get("/api/interfaces", [](const httplib::Request&, httplib::Response& res) {
+    get("/api/interfaces", kSession, [](const httplib::Request&, httplib::Response& res) {
       json out = json::array();
       for (const auto& i : platform::list_interfaces()) {
         if (i.loopback) continue;
@@ -675,10 +738,10 @@ struct EncoderHttpServer::Impl {
 
     // Server-sent events: the /api/status document 5 times a second (meters, stream states).
     // The session is checked before every event: logout, expiry or a password change ends it.
-    server.Get("/api/live", [this](const httplib::Request& req, httplib::Response& res) {
+    get("/api/live", kSession, [this](const httplib::Request& req, httplib::Response& res) {
       res.set_header("X-Accel-Buffering", "no");
       res.set_chunked_content_provider("text/event-stream", [this, token = session_cookie(req)](size_t, httplib::DataSink& sink) {
-        if (stopping || !sessions()->valid(token, platform::monotonic_ns())) return false;
+        if (stopping || !sessions()->alive(token, now_ns())) return false;  // alive: an open feed does not extend the session
         const std::string msg = "event: status\ndata: " + status_json(engine.status()).dump() + "\n\n";
         if (!sink.write(msg.data(), msg.size())) return false;
         platform::sleep_ns(kLiveIntervalNs);
@@ -687,7 +750,7 @@ struct EncoderHttpServer::Impl {
     });
 
     // ---- embedded panel ----
-    server.Get(R"(/(.*))", [](const httplib::Request& req, httplib::Response& res) {
+    get(R"(/(.*))", kPublic, [](const httplib::Request& req, httplib::Response& res) {
       const std::string path = req.path == "/" ? "/index.html" : req.path;
       for (size_t i = 0; i < kEncoderPanelAssetCount; ++i) {
         if (path == kEncoderPanelAssets[i].path) {
@@ -844,9 +907,18 @@ EncoderConfig load_startup_config(const std::string& path) {
   log_error("Konfiguracja nieprawidłowa, użyto ustawień domyślnych (kopia pliku: " + path + ".bad)");
   if (!backed_up) platform::copy_file(path, path + ".bad");
   EncoderConfig fallback = default_encoder_config();
+  fallback.http_bind = "127.0.0.1";  // fail closed: the panel only on this computer
   fallback.password_hash = cfg.password_hash;
   return fallback;
 }
+
+namespace testing {
+void set_http_clock_offset_ns(int64_t offset_ns) { g_clock_offset_ns = offset_ns; }
+void set_login_verified_hook(std::function<void()> hook) {
+  std::lock_guard lock(g_hook_mutex);
+  g_login_verified_hook = std::move(hook);
+}
+}  // namespace testing
 
 bool write_panel_file(const std::string& path, const std::string& bind, int port, std::string* error) {
   const std::string tmp = path + ".tmp";

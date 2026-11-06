@@ -11,6 +11,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -66,5 +67,13 @@ EncoderConfig load_startup_config(const std::string& path);
 // only): writes {"bind": "<address>", "port": <n>} to `path` (panel.json next to config.json)
 // atomically (a temporary file, then a rename over it). Nothing secret is in it.
 bool write_panel_file(const std::string& path, const std::string& bind, int port, std::string* error);
+
+namespace testing {
+// Test hook: shifts the clock every EncoderHttpServer uses for sessions and login throttling.
+void set_http_clock_offset_ns(int64_t offset_ns);
+// Test hook: runs inside a login after the password was verified, before the session is created
+// (empty = none).
+void set_login_verified_hook(std::function<void()> hook);
+}  // namespace testing
 
 }  // namespace bam::encoder

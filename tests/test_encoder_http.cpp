@@ -6,6 +6,7 @@
 #include <httplib.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <fstream>
 #include <functional>
@@ -104,6 +105,73 @@ int raw_status(uint16_t port, const std::string& request, int timeout_ms = 3000)
   return std::stoi(got.substr(9, 3));
 }
 
+// Everything the server answers to `request` on one connection, until it closes the connection or
+// `timeout_ms` pass.
+struct RawExchange {
+  std::vector<int> statuses;  // every response status line, in order
+  bool closed = false;        // the server closed the connection
+  std::string text;
+};
+RawExchange raw_exchange(uint16_t port, const std::string& request, int timeout_ms = 3000) {
+  RawExchange x;
+  std::string err;
+  auto s = bp::TcpStream::connect(kLoopback, port, 2000, &err);
+  REQUIRE_MESSAGE(s, err);
+  size_t sent = 0;
+  uint8_t buf[8192];
+  const int64_t end = bp::monotonic_ns() + int64_t(timeout_ms) * 1'000'000;
+  while (bp::monotonic_ns() < end) {
+    if (sent < request.size()) {
+      const int n = s->send_some({reinterpret_cast<const uint8_t*>(request.data()) + sent, request.size() - sent}, 10);
+      if (n > 0) sent += static_cast<size_t>(n);
+    }
+    const int n = s->recv_some(buf, 10);
+    if (n < 0) {
+      x.closed = true;
+      break;
+    }
+    x.text.append(reinterpret_cast<const char*>(buf), static_cast<size_t>(n));
+  }
+  // a response follows the previous body directly; no body here contains "HTTP/1.1 "
+  for (size_t pos = 0; (pos = x.text.find("HTTP/1.1 ", pos)) != std::string::npos; pos += 9)
+    if (pos + 12 <= x.text.size()) x.statuses.push_back(std::stoi(x.text.substr(pos + 9, 3)));
+  return x;
+}
+
+// The reviewer's attack: a complete first-password request hidden in another request's body.
+std::string smuggled_setup(const std::string& password) {
+  const std::string body = json{{"password", password}}.dump();
+  return "POST /api/setup HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: " +
+         std::to_string(body.size()) + "\r\n\r\n" + body + "\r\n";
+}
+// A whole request whose body hides 60 copies of the first-password request, the first copy
+// starting exactly `offset` bytes into the connection: httplib reads ahead in 4 KB blocks and
+// drops the read-ahead with the request, so a refused request's leftover body is parsed from a
+// 4 KB boundary on. `head(body_size)` gives everything before the body; `tail` follows it.
+std::string hiding_request(const std::function<std::string(size_t)>& head, size_t offset, const std::string& tail = "") {
+  std::string copies;
+  for (int i = 0; i < 60; ++i) copies += smuggled_setup("przejete" + std::to_string(i));
+  size_t body_size = copies.size() + offset;
+  for (int i = 0; i < 4; ++i) {  // the head's length field depends on the body size
+    const size_t h = head(body_size).size();
+    REQUIRE(offset >= h + 2);
+    body_size = (offset - h - 2) + 2 + copies.size();
+  }
+  const std::string hd = head(body_size);
+  const std::string body = std::string(offset - hd.size() - 2, 'x') + "\r\n" + copies;
+  REQUIRE(body.size() == body_size);
+  REQUIRE((hd + body).compare(offset, 24, "POST /api/setup HTTP/1.0") == 0);
+  return hd + body + tail;
+}
+std::string head_with_length(const std::string& method, const std::string& path, const std::string& type, size_t body_size,
+                             const std::string& cookie = "", const std::string& length = "") {
+  return method + " " + path + " HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: " + type + "\r\n" +
+         (cookie.empty() ? std::string() : "Cookie: " + cookie + "\r\n") + "Content-Length: " +
+         (length.empty() ? std::to_string(body_size) : length) + "\r\n\r\n";
+}
+// Ends a raw exchange: a last request on the same connection, after which the server closes.
+const std::string kLastRequest = "GET /api/auth-state HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+
 std::string chunked_request(const std::string& method, const std::string& path, const std::string& body,
                             const std::string& cookie = "") {
   std::ostringstream hex;
@@ -112,6 +180,14 @@ std::string chunked_request(const std::string& method, const std::string& path, 
          (cookie.empty() ? std::string() : "Cookie: " + cookie + "\r\n") + "Transfer-Encoding: chunked\r\n\r\n" + hex.str() +
          "\r\n" + body + "\r\n0\r\n\r\n";
 }
+
+// Joins a test thread however the test leaves its scope (a failed REQUIRE included).
+struct JoinOnExit {
+  std::thread& t;
+  ~JoinOnExit() {
+    if (t.joinable()) t.join();
+  }
+};
 
 struct Fixture {
   std::string config_path = unique_path("http");
@@ -853,5 +929,151 @@ TEST_CASE("encoder service: the panel address file for the tray") {
   CHECK(j["port"] == 8071);
   CHECK_FALSE(exists(path + ".tmp"));
   std::remove(path.c_str());
+}
+
+TEST_CASE("encoder HTTP: a request hidden in a refused request's body is never executed") {
+  Fixture f;
+  const uint16_t port = f.server->port();
+  auto password_set = [&] { return json::parse(f.client->Get("/api/auth-state")->body)["password_set"].get<bool>(); };
+  // read-ahead boundaries, and next to them
+  const std::vector<size_t> offsets = {4096, 4095, 4097, 8192, 2000};
+
+  SUBCASE("(a) inside a text/plain body: 415, the body is read as a body, the connection stays in step") {
+    for (size_t offset : offsets) {
+      CAPTURE(offset);
+      const auto head = [](size_t n) { return head_with_length("POST", "/api/setup", "text/plain", n); };
+      const RawExchange x = raw_exchange(port, hiding_request(head, offset, kLastRequest));
+      CHECK(x.statuses == std::vector<int>{415, 200});  // the outer request and the last one, nothing in between
+      CHECK(x.text.find("\"password_set\":false") != std::string::npos);
+      CHECK_FALSE(password_set());
+    }
+  }
+  SUBCASE("(b) behind a Content-Length over 1 MB: 413 and the server closes the connection") {
+    for (size_t offset : offsets) {
+      CAPTURE(offset);
+      const auto head = [](size_t n) { return head_with_length("POST", "/api/setup", "application/json", n, "", "2000000"); };
+      const RawExchange x = raw_exchange(port, hiding_request(head, offset, kLastRequest));
+      CHECK(x.closed);
+      CHECK(x.statuses == std::vector<int>{413});
+      CHECK(x.text.find("za duża") != std::string::npos);  // the client gets the whole answer before the close
+      CHECK_FALSE(password_set());
+    }
+  }
+  SUBCASE("(c) inside a chunked body, or a body without Content-Length: 411 and the server closes the connection") {
+    for (size_t offset : offsets) {
+      CAPTURE(offset);
+      const auto chunked = [](size_t n) {
+        std::ostringstream hex;
+        hex << std::hex << n;
+        return "POST /api/login HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n" +
+               hex.str() + "\r\n";
+      };
+      RawExchange x = raw_exchange(port, hiding_request(chunked, offset, "\r\n0\r\n\r\n" + kLastRequest));
+      CHECK(x.closed);
+      CHECK(x.statuses == std::vector<int>{411});
+      const auto no_length = [](size_t) {
+        return std::string("POST /api/login HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n");
+      };
+      x = raw_exchange(port, hiding_request(no_length, offset, kLastRequest));
+      CHECK(x.closed);
+      CHECK(x.statuses == std::vector<int>{411});
+      CHECK_FALSE(password_set());
+    }
+  }
+  SUBCASE("(d) inside an unauthenticated request to a protected endpoint: 401, nothing else") {
+    for (const std::string path : {"/api/stations", "/api/password", "/api/logout", "/api/config"}) {
+      for (size_t offset : offsets) {
+        CAPTURE(path);
+        CAPTURE(offset);
+        const auto head = [&](size_t n) { return head_with_length(path == "/api/config" ? "PUT" : "POST", path, "application/json", n); };
+        const RawExchange x = raw_exchange(port, hiding_request(head, offset, kLastRequest));
+        CHECK(x.statuses == std::vector<int>{401, 200});
+        CHECK_FALSE(password_set());
+      }
+    }
+  }
+}
+
+TEST_CASE("encoder HTTP: an open live feed does not keep its session alive") {
+  struct ResetClock {
+    ~ResetClock() { be::testing::set_http_clock_offset_ns(0); }
+  } reset;
+  Fixture f;
+  f.setup_and_login();
+  constexpr int64_t hour = 3600LL * 1'000'000'000;
+  std::atomic<int> events{0};
+  std::atomic<bool> ended{false};
+  std::thread t([&] {
+    httplib::Client c(kLoopback, f.server->port());
+    c.set_read_timeout(10, 0);
+    const int64_t deadline = bp::monotonic_ns() + 8'000'000'000;
+    bool gave_up = false;
+    c.Get("/api/live", f.auth, [&](const char*, size_t) {
+      ++events;
+      gave_up = bp::monotonic_ns() > deadline;
+      return !gave_up;
+    });
+    ended = !gave_up;
+  });
+  JoinOnExit join{t};
+  REQUIRE(wait_for([&] { return events > 0; }, 3000));
+  // 11 h 59 min later the feed still runs; a sliding check would now have moved the expiry on
+  be::testing::set_http_clock_offset_ns(12 * hour - 60'000'000'000);
+  const int seen = events;
+  REQUIRE(wait_for([&] { return events > seen + 2; }, 3000));
+  CHECK_FALSE(ended);
+  // 12 h after the login (not after the last event) the session is over and the feed ends
+  be::testing::set_http_clock_offset_ns(12 * hour + 1'000'000'000);
+  REQUIRE(wait_for([&] { return ended.load(); }, 3000));
+  t.join();
+  CHECK(ended);
+  CHECK(f.client->Get("/api/config", f.auth)->status == 401);
+}
+
+TEST_CASE("encoder HTTP: a login that checked the old password does not survive a password change") {
+  struct ResetHook {
+    ~ResetHook() { be::testing::set_login_verified_hook({}); }
+  } reset;
+  Fixture f;
+  f.setup_and_login();  // the session that will change the password
+
+  std::mutex m;
+  std::condition_variable cv;
+  bool in_login = false, changed = false;
+  be::testing::set_login_verified_hook([&] {
+    std::unique_lock lock(m);
+    in_login = true;
+    cv.notify_all();
+    cv.wait_for(lock, std::chrono::seconds(5), [&] { return changed; });
+  });
+  int login_status = 0;
+  std::string login_cookie;
+  std::thread t([&] {
+    httplib::Client c(kLoopback, f.server->port());
+    c.set_read_timeout(10, 0);
+    auto r = c.Post("/api/login", json{{"password", kPassword}}.dump(), "application/json");
+    if (r) {
+      login_status = r->status;
+      login_cookie = r->get_header_value("Set-Cookie");
+    }
+  });
+  JoinOnExit join{t};
+  {
+    std::unique_lock lock(m);
+    REQUIRE(cv.wait_for(lock, std::chrono::seconds(5), [&] { return in_login; }));
+  }
+  auto change = f.post("/api/password", {{"current", kPassword}, {"password", "nowehaslo99"}});
+  REQUIRE(change->status == 200);
+  {
+    std::lock_guard lock(m);
+    changed = true;
+  }
+  cv.notify_all();
+  t.join();
+  be::testing::set_login_verified_hook({});
+  CHECK(login_status == 401);
+  CHECK(login_cookie.empty());
+  f.take_cookie(change);
+  f.get("/api/config");  // the session that changed it goes on
 }
 #endif  // BAM_WITH_CODECS

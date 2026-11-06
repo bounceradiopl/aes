@@ -230,6 +230,12 @@ bool SessionStore::valid(std::string_view token, int64_t now_ns) {
   return true;
 }
 
+bool SessionStore::alive(std::string_view token, int64_t now_ns) {
+  std::lock_guard lock(mutex_);
+  auto it = expiry_.find(token);
+  return it != expiry_.end() && it->second >= now_ns;
+}
+
 void SessionStore::remove(std::string_view token) {
   std::lock_guard lock(mutex_);
   auto it = expiry_.find(token);
