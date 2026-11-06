@@ -230,6 +230,13 @@ namespace testing {
 void set_processing_stop_timeout_ms(int ms);
 }  // namespace testing
 
+// A change of a worker's state or reason (ProcessingWorker::events_since), for the engine's log.
+struct ProcessingEvent {
+  uint64_t seq = 0;  // 1, 2, ... per worker
+  ProcessingState state = ProcessingState::Off;
+  std::string reason;  // Polish, as in ProcessingStatus (empty when running)
+};
+
 // Stereo Tool between a station and its streams (spec §3), one per station with processing.
 //
 // Threads: the station thread only copies its mix into the bounded queue (push). The output
@@ -247,19 +254,33 @@ void set_processing_stop_timeout_ms(int ms);
 // shrinks; when it grows the output pauses for the difference (the streams get the audio later,
 // nothing is skipped or inserted). Every switch processed <-> unprocessed is a kRampFrames
 // crossfade of the two, aligned.
+// For the engine: that pause happens once, when Stereo Tool becomes ready (about 90 ms with the
+// real library: 4096 + 240 frames): for that long the streams get nothing at all, then the audio
+// goes on where it stopped; no silence is inserted. A restart pauses again only if the latency
+// grew. Audio pushed before Stereo Tool is ready comes out unprocessed with no delay.
 //
 // Bypass (spec §3): until Stereo Tool is ready and its licence was found valid for the settings
 // (checked after kLicenceFirstCheckFrames of processed audio, then every kLicenceCheckFrames);
-// for good on a licence found invalid, a Stereo Tool failure, or when the worker stays behind the
-// station for more than kMaxBehindNs ("kolejka > 200 ms"). restart() leaves the bypass.
+// for good on a licence found invalid or a Stereo Tool failure; and when Stereo Tool cannot keep
+// up ("kolejka > 200 ms"): a call out for longer than kMaxBehindNs (stuck), a backlog of more
+// than kMaxBehindNs of audio that has not shrunk over kBehindWindowNs (slower than real time; the
+// window is long enough for a Stereo Tool at 95 % CPU to show its drain above the 10 ms jitter of
+// the queue), or a backlog of kMaxBacklogFrames (the queue would overflow). A burst after a station stall that
+// Stereo Tool drains never trips it. restart() leaves the bypass. Every change of state or
+// reason is an event (events_since) the engine logs.
 class ProcessingWorker {
  public:
   static constexpr size_t kQueueFrames = size_t(kStationRate) * 2;  // 2 s from the station
   static constexpr size_t kBlockFrames = 480;                       // 10 ms per Stereo Tool call
   static constexpr uint32_t kMaxLatencyFrames = kStationRate / 2;   // a longer latency is refused
   static constexpr int64_t kMaxBehindNs = 200'000'000;
+  static constexpr size_t kBehindFrames = size_t(kStationRate) / 5;          // kMaxBehindNs of audio
+  static constexpr int64_t kBehindWindowNs = 500'000'000;
+  static constexpr size_t kMaxBacklogFrames = size_t(kStationRate) * 3 / 2;  // 1.5 s: bypass before the queue drops
   static constexpr uint64_t kLicenceFirstCheckFrames = kStationRate / 2;
-  static constexpr uint64_t kLicenceCheckFrames = kStationRate;
+  // Re-checked every 250 ms of audio (cheap in the fake; Task 7 measures the real library's cost).
+  static constexpr uint64_t kLicenceCheckFrames = kStationRate / 4;
+  static constexpr size_t kEventSlots = 32;  // events kept for events_since()
 
   // Starts both threads; the instance is built on the Stereo Tool thread (meanwhile, and on any
   // failure, the streams get the unprocessed mix).
@@ -278,6 +299,9 @@ class ProcessingWorker {
   // service restarts; while Stereo Tool is stuck in a call, the restart waits for it to return.
   void restart();
   ProcessingStatus status() const;
+  // Any thread: the state changes after event `since` (0: all kept), oldest first; returns the
+  // seq to pass next time. Only the last kEventSlots are kept: the caller sees the gap in seq.
+  uint64_t events_since(uint64_t since, std::vector<ProcessingEvent>* out) const;
   uint32_t delay_frames() const { return delay_.load(std::memory_order_relaxed); }
   // Stops both threads; waits for the Stereo Tool thread at most the stop timeout (a call stuck
   // in the library leaves that thread behind, logged). Idempotent.
@@ -295,10 +319,11 @@ class ProcessingWorker {
   bool take_result(bool wait);    // a finished Stereo Tool command, handled; false when none
   void wait_job();
   void go_dry(Reason why, ProcessingState state);
-  void set_state(ProcessingState state, Reason why);
+  void set_state(ProcessingState state, Reason why);  // output thread (and constructor / stop())
+  std::string reason_text(Reason why) const;
+  bool falling_behind(int64_t now);
   void emit();
   void deliver(const float* stereo, size_t frames);
-  void note_backlog(int64_t now);
 
   const std::string station_id_;
   AudioQueue in_;
@@ -307,7 +332,9 @@ class ProcessingWorker {
 
   std::mutex streams_m_;
   std::shared_ptr<const std::vector<std::shared_ptr<StreamWorker>>> pending_streams_;
-  std::vector<std::shared_ptr<const void>> graveyard_;  // released by set_streams()/stop()
+  // At most the one list the output thread let go of since the last set_streams() (it takes one
+  // pending list at a time); released by set_streams()/stop().
+  std::vector<std::shared_ptr<const void>> graveyard_;
   std::atomic<bool> has_pending_streams_{false};
 
   // output thread only
@@ -324,12 +351,15 @@ class ProcessingWorker {
   bool licence_ok_ = false;    // the current session's licence check passed
   Pending pending_ = Pending::None;
   bool restart_wanted_ = false;
-  int64_t behind_since_ = 0;   // monotonic ns since the queue has not been empty, 0 = it was
+  int64_t job_posted_ns_ = 0;  // when the block at the Stereo Tool thread was handed over
+  int64_t window_ns_ = 0;      // start of the backlog window (0: backlog under kBehindFrames)
+  size_t window_backlog_ = 0;  // the backlog at window_ns_
   GainRamp mix_{0.0};          // share of the processed signal
 
   std::atomic<uint32_t> delay_{0};
-  std::atomic<int> state_{int(ProcessingState::Bypass)};
-  std::atomic<int> reason_{int(Reason::Starting)};
+  std::atomic<uint32_t> status_{0};  // state << 16 | reason, read together
+  std::array<std::atomic<uint32_t>, kEventSlots> event_slots_{};  // status_ values, by seq
+  std::atomic<uint64_t> event_seq_{0};
   std::atomic<bool> restart_{false};
   std::atomic<bool> running_{true};
   std::atomic<bool> stopped_{false};

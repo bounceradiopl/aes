@@ -335,7 +335,11 @@ std::unique_ptr<StereoToolInstance> StereoToolInstance::create(const std::string
   StereoToolInfo info;
   auto api = stereotool_api(&info);
   if (!api) {
-    if (error) *error = info.error;
+    if (error) {
+      *error = info.error;
+      // after a crash (e.g. while loading) nothing is loaded again until the service restarts
+      if (info.abandoned > 0) *error += " — uruchom ponownie usługę Bounce Encoder";
+    }
     return nullptr;
   }
   const char* const crashed = "Stereo Tool uległ awarii — uruchom ponownie usługę Bounce Encoder (do tego czasu bez processingu)";

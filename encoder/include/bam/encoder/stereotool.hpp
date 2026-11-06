@@ -83,7 +83,7 @@ class StereoToolInstance {
   // stereoTool_Create3(has_gui = false, key, name, home_dir, load_ini = false); an empty key,
   // name or home_dir is passed as NULL (no licence / the library's defaults). nullptr and a
   // Polish message when the library is missing or the instance cannot be created; the message
-  // never contains the key.
+  // never contains the key, and asks for a service restart when that is the only way out.
   static std::unique_ptr<StereoToolInstance> create(const std::string& key, const std::string& name,
                                                     const std::string& home_dir, std::string* error);
   ~StereoToolInstance();  // stereoTool_Delete (unless abandoned)
@@ -114,6 +114,7 @@ class StereoToolInstance {
   std::string unlicensed_features();
 
   bool failed() const { return failed_; }
+  bool abandoned() const { return abandoned_; }  // this instance crashed (a structured exception)
   const std::string& failure() const { return failure_; }  // Polish, empty unless failed()
 
  private:

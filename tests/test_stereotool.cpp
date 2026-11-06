@@ -387,6 +387,19 @@ TEST_CASE("stereotool: a create waiting for another one re-checks the abandoned 
   a.reset();
 }
 
+TEST_CASE("stereotool: a library that failed to load after a crash says the service needs a restart") {
+  UseFake use;
+  be::testing::set_stereotool_abandoned(1);  // e.g. a crash while it was loaded
+  fake().set("version", 11080);              // and it is not available
+  std::string err;
+  CHECK(be::StereoToolInstance::create("", "station-hint", "", &err) == nullptr);
+  CHECK_MESSAGE(err.find("11080") != std::string::npos, err);
+  CHECK_MESSAGE(err.find("uruchom ponownie usługę Bounce Encoder") != std::string::npos, err);
+  be::testing::set_stereotool_abandoned(0);
+  CHECK(be::StereoToolInstance::create("", "station-hint", "", &err) == nullptr);
+  CHECK_MESSAGE(err.find("uruchom ponownie") == std::string::npos, err);  // no crash: no such hint
+}
+
 #ifdef _MSC_VER
 TEST_CASE("stereotool: a crash while loading the library counts as an abandoned instance") {
   for (const char* option : {"version_crashes", "bind_crashes"}) {
@@ -405,6 +418,7 @@ TEST_CASE("stereotool: a crash while loading the library counts as an abandoned 
     CHECK(fake().value("version_calls") == versions);
     std::string err;
     CHECK(be::StereoToolInstance::create("", "station-load-crash", "", &err) == nullptr);
+    CHECK_MESSAGE(err.find("uruchom ponownie usługę Bounce Encoder") != std::string::npos, err);
     CHECK(fake().value("create_calls") == 0);
   }
 }

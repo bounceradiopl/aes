@@ -214,6 +214,20 @@ be::ProcessingStatus status_when(PW& w, const std::function<bool(const be::Proce
 
 bool contains(const std::string& s, const char* what) { return s.find(what) != std::string::npos; }
 
+// The worker's events as "state: reason" lines, oldest first.
+std::vector<std::string> event_lines(const bd::ProcessingWorker& w) {
+  std::vector<bd::ProcessingEvent> ev;
+  const uint64_t seq = w.events_since(0, &ev);
+  std::vector<std::string> lines;
+  uint64_t expect = ev.empty() ? seq : ev.front().seq;
+  for (const auto& e : ev) {
+    CHECK(e.seq == expect++);
+    lines.push_back(std::string(be::processing_state_name(e.state)) + ": " + e.reason);
+  }
+  CHECK(expect == (ev.empty() ? seq : seq + 1));  // nothing missing up to the returned seq
+  return lines;
+}
+
 struct TempDir {
   std::string path;
   explicit TempDir(const std::string& tag) {
@@ -439,6 +453,19 @@ TEST_CASE("processing: an exception in process bypasses with a crossfade, restar
   w.restart();
   REQUIRE(feed_until(w, input, be::ProcessingState::Running));
   CHECK(fake().value("created") == 2);
+  // every change was an event, in order (the engine logs them)
+  const auto lines = event_lines(w);
+  REQUIRE(lines.size() == 7);
+  CHECK(lines[0] == "bypass: uruchamianie Stereo Tool");
+  CHECK(contains(lines[1], "bypass: sprawdzanie licencji"));
+  CHECK(lines[2] == "running: ");
+  CHECK_MESSAGE(contains(lines[3], "bypass: Stereo Tool zgłosił wyjątek w stereoTool_Process"), lines[3]);
+  CHECK(lines[4] == "bypass: uruchamianie Stereo Tool");
+  CHECK(contains(lines[5], "bypass: sprawdzanie licencji"));
+  CHECK(lines[6] == "running: ");
+  std::vector<bd::ProcessingEvent> none;
+  CHECK(w.events_since(w.events_since(0, nullptr), &none) == 7);
+  CHECK(none.empty());
   feed(w, input, 9600);
   REQUIRE(drained(w, col, input));
   const auto out = col.copy();
@@ -460,11 +487,15 @@ TEST_CASE("processing: a Stereo Tool too slow or stuck bypasses after 200 ms beh
   SUBCASE("too slow: 15 ms per 10 ms block") { fake().set("process_sleep_us", 15000); }
   SUBCASE("stuck: one call takes 1.5 s") { fake().set("process_sleep_us", 1500000); }
   const int64_t t0 = bp::monotonic_ns();
-  feed(w, input, 48000, 10'000'000);  // real time, as the station pushes
+  feed(w, input, 96000, 10'000'000);  // real time, as the station pushes
   const auto st = w.status();
   CHECK(st.state == be::ProcessingState::Bypass);
   CHECK_MESSAGE(contains(st.reason, "nie nadąża"), st.reason);
-  CHECK(bp::monotonic_ns() - t0 < 3'000'000'000);  // the station was never held up
+  CHECK(bp::monotonic_ns() - t0 < 4'000'000'000);  // the station was never held up
+  const auto lines = event_lines(w);
+  REQUIRE(lines.size() >= 4);
+  CHECK(lines[lines.size() - 2] == "running: ");
+  CHECK(contains(lines.back(), "bypass: Stereo Tool nie nadąża"));
   REQUIRE(drained(w, col, input));
   const auto out = col.copy();
   const Path p = analyse(input.in, out, 0.5f);
@@ -476,6 +507,63 @@ TEST_CASE("processing: a Stereo Tool too slow or stuck bypasses after 200 ms beh
   fake().set("process_sleep_us", 0);
   w.stop();
   CHECK(wait_until([] { return fake().value("live") == 0; }, 5000));
+}
+
+TEST_CASE("processing: a station catch-up burst that Stereo Tool drains keeps processing") {
+  // The station pushes nothing during a stall, then the backlog in passes of up to 0.5 s; a
+  // Stereo Tool that is faster than real time drains it, so processing goes on.
+  UseFake use;
+  fake().set("gain", 0.5);
+  fake().set("latency", 512);
+  int sleep_us = 0, stall_ms = 0;
+  // CPU as measured: a sleep in the fake overshoots (macOS: 8 ms per 10 ms block measures 91-95 %)
+  SUBCASE("about 50 % CPU, 0.3 s stall") { sleep_us = 4000, stall_ms = 300; }
+  SUBCASE("about 50 % CPU, 0.5 s stall") { sleep_us = 4000, stall_ms = 500; }
+  SUBCASE("about 80 % CPU, 0.1 s stall") { sleep_us = 6500, stall_ms = 100; }
+  SUBCASE("about 80 % CPU, 0.3 s stall") { sleep_us = 6500, stall_ms = 300; }
+  SUBCASE("8 ms per block (the review's case), 0.1 s stall") { sleep_us = 8000, stall_ms = 100; }
+  CAPTURE(sleep_us);
+  CAPTURE(stall_ms);
+  fake().set("process_sleep_us", sleep_us);
+  Collector col;
+  Input input;
+  PW w(settings(col), "burst");
+  REQUIRE(feed_until(w, input, be::ProcessingState::Running, 10'000'000));
+  feed(w, input, 48000, 10'000'000);
+  const double cpu_before = w.status().cpu_pct;
+  CAPTURE(cpu_before);
+  MESSAGE("Stereo Tool CPU " << cpu_before << " %, stall " << stall_ms << " ms");
+  std::this_thread::sleep_for(std::chrono::milliseconds(stall_ms));
+  for (size_t backlog = size_t(stall_ms) * 48; backlog > 0;) {
+    const size_t n = std::min<size_t>(backlog, 24000);
+    const size_t from = input.frames();
+    input.extend(n);
+    w.push(input.in.data() + from * 2, n);
+    backlog -= n;
+  }
+  feed(w, input, 72000, 10'000'000);  // 1.5 s of real time after it
+  const auto st = w.status();
+  CHECK_MESSAGE(st.state == be::ProcessingState::Running, st.reason << " (cpu " << st.cpu_pct << " %)");
+  fake().set("process_sleep_us", 0);
+  REQUIRE(drained(w, col, input));
+  const Path p = analyse(input.in, col.copy(), 0.5f);
+  CHECK(p.mismatches == 0);
+  CHECK(p.switches.size() == 1);
+}
+
+TEST_CASE("processing: an exception after another station's crash is an exception, not a crash") {
+  UseFake use;
+  Collector col;
+  Input input;
+  PW w(settings(col), "s5b");
+  REQUIRE(feed_until(w, input, be::ProcessingState::Running));
+  be::testing::set_stereotool_abandoned(1);  // another station's instance crashed meanwhile
+  fake().set("process_throws", 1);
+  feed(w, input, 9600);
+  const auto st = status_when(w, [](auto& s) { return s.state != be::ProcessingState::Running; });
+  CHECK(st.state == be::ProcessingState::Bypass);
+  CHECK_MESSAGE(contains(st.reason, "wyjątek"), st.reason);
+  CHECK_MESSAGE(!contains(st.reason, "uległ awarii"), st.reason);
 }
 
 TEST_CASE("processing: after a crash nothing is created again and restart does not loop") {

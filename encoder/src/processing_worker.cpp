@@ -34,7 +34,7 @@ static_assert(kRingFrames >= PW::kMaxLatencyFrames + kRampFrames + 2 * PW::kBloc
 constexpr int kPopWaitMs = 20;                         // the output thread looks at its flags this often
 constexpr auto kWaitSlice = std::chrono::milliseconds(5);  // and at the queue while Stereo Tool works
 constexpr int kDefaultStopTimeoutMs = 5000;
-constexpr size_t kGraveyardSlots = 64;
+constexpr size_t kGraveyardSlots = 1;  // see ProcessingWorker::graveyard_
 
 std::atomic<int> g_stop_timeout_ms{0};
 
@@ -154,7 +154,7 @@ Done setup(Core& c, bool restart, uint32_t* latency) {
 }
 
 Done process_failed(Core& c, bool* crashed) {
-  *crashed = stereotool_info().abandoned > 0;
+  *crashed = c.st->abandoned();  // this instance crashed (not another station's)
   set_failure(c, c.st->failure());
   c.st.reset();  // after a C++ exception deleted now (memory, web port); after a crash abandoned
   c.cpu_pct.store(0);
@@ -257,6 +257,7 @@ ProcessingWorker::ProcessingWorker(const ProcessingSettings& s, std::string stat
   graveyard_.reserve(kGraveyardSlots);
   c.cmd = Cmd::Setup;  // the first thing the Stereo Tool thread does
   pending_ = Pending::Setup;
+  set_state(ProcessingState::Bypass, Reason::Starting);
   st_thread_ = std::thread(st_main, core_);
   out_thread_ = std::thread([this] { run(); });
 }
@@ -316,64 +317,103 @@ void ProcessingWorker::stop() {
   set_state(ProcessingState::Off, Reason::None);
 }
 
-ProcessingStatus ProcessingWorker::status() const {
-  ProcessingStatus s;
-  s.state = ProcessingState(state_.load());
-  const auto why = Reason(reason_.load());
-  std::string failure, unlicensed;
-  {
+std::string ProcessingWorker::reason_text(Reason why) const {
+  std::string failure;
+  if (why == Reason::Setup || why == Reason::Process || why == Reason::Crash) {
     std::lock_guard lock(core_->text_m);
     failure = core_->failure;
-    unlicensed = core_->unlicensed;
   }
   switch (why) {
     case Reason::None: break;
-    case Reason::Starting: s.reason = "uruchamianie Stereo Tool"; break;
-    case Reason::LicenceCheck: s.reason = "sprawdzanie licencji Stereo Tool (do tego czasu sygnał bez processingu)"; break;
-    case Reason::Setup: s.reason = failure; break;
+    case Reason::Starting: return "uruchamianie Stereo Tool";
+    case Reason::LicenceCheck: return "sprawdzanie licencji Stereo Tool (do tego czasu sygnał bez processingu)";
+    case Reason::Setup: return failure;
     case Reason::Licence:
-      s.reason = "licencja Stereo Tool nie obejmuje funkcji używanych w ustawieniach — sygnał bez processingu";
-      break;
-    case Reason::TooSlow: s.reason = "Stereo Tool nie nadąża (ponad 200 ms zaległości) — sygnał bez processingu"; break;
-    case Reason::Process: s.reason = failure + " — sygnał bez processingu"; break;
-    case Reason::Crash:
-      s.reason = "Stereo Tool uległ awarii — uruchom ponownie usługę Bounce Encoder (" + failure + ")";
-      break;
+      return "licencja Stereo Tool nie obejmuje funkcji używanych w ustawieniach — sygnał bez processingu";
+    case Reason::TooSlow: return "Stereo Tool nie nadąża (ponad 200 ms zaległości) — sygnał bez processingu";
+    case Reason::Process: return failure + " — sygnał bez processingu";
+    case Reason::Crash: return "Stereo Tool uległ awarii — uruchom ponownie usługę Bounce Encoder (" + failure + ")";
     case Reason::RestartWaits:
-      s.reason = "Stereo Tool nie odpowiada — ponowne uruchomienie czeka, aż zakończy bieżące wywołanie";
-      break;
+      return "Stereo Tool nie odpowiada — ponowne uruchomienie czeka, aż zakończy bieżące wywołanie";
   }
+  return {};
+}
+
+ProcessingStatus ProcessingWorker::status() const {
+  ProcessingStatus s;
+  const uint32_t packed = status_.load();
+  s.state = ProcessingState(packed >> 16);
+  const auto why = Reason(packed & 0xFFFF);
+  s.reason = reason_text(why);
   s.latency_ms = delay_frames() * 1000.0 / kStationRate;
   const bool feeding = s.state == ProcessingState::Running || why == Reason::LicenceCheck;
   s.cpu_pct = feeding ? core_->cpu_pct.load() : 0.0;
   const int licence = core_->licence.load();
   s.license_valid = licence == 1;
-  if (licence == 0) s.unlicensed_features = std::move(unlicensed);
+  if (licence == 0) {
+    std::lock_guard lock(core_->text_m);
+    s.unlicensed_features = core_->unlicensed;
+  }
   s.queue_dropped_frames = in_.dropped_frames();
   return s;
+}
+
+uint64_t ProcessingWorker::events_since(uint64_t since, std::vector<ProcessingEvent>* out) const {
+  const uint64_t seq = event_seq_.load(std::memory_order_acquire);
+  uint64_t from = std::min(since, seq);
+  if (seq - from > kEventSlots) from = seq - kEventSlots;  // older ones are overwritten
+  for (uint64_t i = from; i < seq; ++i) {
+    const uint32_t packed = event_slots_[i % kEventSlots].load(std::memory_order_relaxed);
+    ProcessingEvent e;
+    e.seq = i + 1;
+    e.state = ProcessingState(packed >> 16);
+    e.reason = reason_text(Reason(packed & 0xFFFF));
+    if (out) out->push_back(std::move(e));
+  }
+  return seq;
 }
 
 // ---- output thread ----
 
 void ProcessingWorker::set_state(ProcessingState state, Reason why) {
-  state_.store(int(state));
-  reason_.store(int(why));
+  const uint32_t packed = uint32_t(state) << 16 | uint32_t(why);
+  if (status_.load(std::memory_order_relaxed) == packed) return;
+  status_.store(packed);
+  // one writer at a time (the output thread; the constructor before it, stop() after it)
+  const uint64_t seq = event_seq_.load(std::memory_order_relaxed);
+  event_slots_[seq % kEventSlots].store(packed, std::memory_order_relaxed);
+  event_seq_.store(seq + 1, std::memory_order_release);
 }
 
 void ProcessingWorker::take_streams() {
   if (!has_pending_streams_.load(std::memory_order_acquire)) return;
   std::lock_guard lock(streams_m_);
   has_pending_streams_.store(false, std::memory_order_relaxed);
+  // one take per set_streams(), so the slot reserved there is free (else released here after all)
   if (streams_ && graveyard_.size() < graveyard_.capacity()) graveyard_.push_back(std::move(streams_));
-  // else (more than kGraveyardSlots lists between two set_streams calls): released here after all
   streams_ = std::move(pending_streams_);
 }
 
-void ProcessingWorker::note_backlog(int64_t now) {
-  if (in_.size_frames() == 0)
-    behind_since_ = 0;
-  else if (behind_since_ == 0)
-    behind_since_ = now;
+bool ProcessingWorker::falling_behind(int64_t now) {
+  if (pending_ == Pending::Job && now - job_posted_ns_ > kMaxBehindNs) return true;  // stuck in a call
+  const size_t backlog = in_.size_frames();
+  if (backlog >= kMaxBacklogFrames) return true;  // the queue is about to drop audio
+  if (backlog <= kBehindFrames) {
+    window_ns_ = 0;
+    return false;
+  }
+  // more than 200 ms waiting: slower than real time only if it has not shrunk over the window (a
+  // burst after a station stall shrinks while Stereo Tool drains it)
+  if (window_ns_ == 0) {
+    window_ns_ = now;
+    window_backlog_ = backlog;
+    return false;
+  }
+  if (now - window_ns_ < kBehindWindowNs) return false;
+  if (backlog >= window_backlog_) return true;
+  window_ns_ = now;
+  window_backlog_ = backlog;
+  return false;
 }
 
 void ProcessingWorker::go_dry(Reason why, ProcessingState state) {
@@ -381,6 +421,7 @@ void ProcessingWorker::go_dry(Reason why, ProcessingState state) {
   if (mode_ == Mode::Processed) mix_.set_target(0.0);
   mode_ = Mode::Dry;
   licence_ok_ = false;
+  window_ns_ = 0;
   set_state(state, why);
 }
 
@@ -457,14 +498,14 @@ bool ProcessingWorker::take_result(bool wait) {
 
 void ProcessingWorker::wait_job() {
   while (running_.load(std::memory_order_relaxed)) {
-    if (take_result(true)) return;
-    const int64_t now = platform::monotonic_ns();
-    note_backlog(now);
-    if (behind_since_ != 0 && now - behind_since_ > kMaxBehindNs) {
-      // "kolejka > 200 ms": the block stays with Stereo Tool; its result, if any, is dropped
+    const bool done = take_result(true);
+    if (mode_ == Mode::Dry) return;  // the result ended processing
+    if (falling_behind(platform::monotonic_ns())) {
+      // "kolejka > 200 ms": a block still at Stereo Tool stays there; its result is dropped
       go_dry(Reason::TooSlow, ProcessingState::Bypass);
       return;
     }
+    if (done) return;
   }
 }
 
@@ -516,15 +557,11 @@ void ProcessingWorker::run() {
       else if (pending_ == Pending::Setup)
         restart_wanted_ = false;  // a (re)start is under way already
       else
-        set_state(ProcessingState(state_.load()), Reason::RestartWaits);  // a block stuck in Stereo Tool
+        set_state(ProcessingState(status_.load() >> 16), Reason::RestartWaits);  // a block stuck in Stereo Tool
     }
 
     const size_t n = in_.pop(block_.data(), kBlockFrames, kPopWaitMs);
-    const int64_t now = platform::monotonic_ns();
-    if (n == 0) {
-      behind_since_ = 0;
-      continue;
-    }
+    if (n == 0) continue;
     for (size_t k = 0; k < n; ++k) {
       const size_t i = size_t((written_ + int64_t(k)) & kRingMask) * 2;
       dry_[i] = block_[k * 2];
@@ -532,25 +569,23 @@ void ProcessingWorker::run() {
     }
     const int64_t start = written_;
     written_ += int64_t(n);
-    note_backlog(now);
 
-    if (mode_ != Mode::Dry) {
-      if (pending_ == Pending::None) {
-        // the block buffer is the Stereo Tool thread's from the post until its result is taken
-        std::copy(block_.begin(), block_.begin() + std::ptrdiff_t(n * 2), core_->job.begin());
-        job_start_ = start;
-        job_frames_ = n;
-        {
-          std::lock_guard lock(core_->m);
-          core_->job_frames = n;
-          core_->cmd = Cmd::Process;
-        }
-        core_->cv.notify_all();
-        pending_ = Pending::Job;
-        wait_job();
-      } else {
-        go_dry(Reason::TooSlow, ProcessingState::Bypass);  // not reached: every block is waited for
+    // Probation and Processed always have the Stereo Tool thread idle here: every block is waited
+    // for, and any way out of waiting (failure, too slow, restart) goes to Dry first
+    if (mode_ != Mode::Dry && pending_ == Pending::None) {
+      // the block buffer is the Stereo Tool thread's from the post until its result is taken
+      std::copy(block_.begin(), block_.begin() + std::ptrdiff_t(n * 2), core_->job.begin());
+      job_start_ = start;
+      job_frames_ = n;
+      {
+        std::lock_guard lock(core_->m);
+        core_->job_frames = n;
+        core_->cmd = Cmd::Process;
       }
+      core_->cv.notify_all();
+      pending_ = Pending::Job;
+      job_posted_ns_ = platform::monotonic_ns();
+      wait_job();
     }
     emit();
   }
