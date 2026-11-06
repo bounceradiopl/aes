@@ -42,22 +42,36 @@ std::wstring program_data() {
   return (n > 0 && n < MAX_PATH) ? std::wstring(buf) : std::wstring(L"C:\\ProgramData");
 }
 
-uint16_t panel_port() {
-  constexpr uint16_t kDefault = bam::encoder::kDefaultEncoderHttpPort;
-  std::ifstream f(std::filesystem::path(program_data() + L"\\Bounce Encoder\\config.json"), std::ios::binary);
-  if (!f) return kDefault;
+// Where the panel listens: the service writes %ProgramData%\Bounce Encoder\panel.json at start
+// ({"bind": "...", "port": n}; config.json itself is for administrators and the service only).
+// A specific bind address is used as it is; 0.0.0.0, a missing file or anything unexpected means
+// 127.0.0.1:8070.
+struct PanelAddress {
+  std::wstring host = L"127.0.0.1";
+  uint16_t port = bam::encoder::kDefaultEncoderHttpPort;
+};
+
+PanelAddress panel_address() {
+  PanelAddress a;
+  std::ifstream f(std::filesystem::path(program_data() + L"\\Bounce Encoder\\panel.json"), std::ios::binary);
+  if (!f) return a;
   try {
     std::stringstream ss;
     ss << f.rdbuf();
-    const int port = nlohmann::json::parse(ss.str()).value("http_port", static_cast<int>(kDefault));
-    return port >= 1 && port <= 65535 ? static_cast<uint16_t>(port) : kDefault;
+    const auto j = nlohmann::json::parse(ss.str());
+    const int port = j.value("port", 0);
+    if (port >= 1 && port <= 65535) a.port = static_cast<uint16_t>(port);
+    const std::string bind = j.value("bind", "");
+    const bool ipv4_text = !bind.empty() && bind.size() <= 15 && bind.find_first_not_of("0123456789.") == std::string::npos;
+    if (ipv4_text && bind != "0.0.0.0") a.host.assign(bind.begin(), bind.end());
   } catch (...) {
-    return kDefault;
   }
+  return a;
 }
 
 std::wstring panel_url(const wchar_t* fragment = L"") {
-  return L"http://127.0.0.1:" + std::to_wstring(panel_port()) + L"/" + fragment;
+  const PanelAddress a = panel_address();
+  return L"http://" + a.host + L":" + std::to_wstring(a.port) + L"/" + fragment;
 }
 
 // Logo with a status badge (resources 2-4), at the DPI-correct notification-area size.
@@ -76,7 +90,8 @@ bool http_health(std::string* body) {
       WinHttpOpen(L"BounceEncoderTray/1.0", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
   if (!session) return false;
   WinHttpSetTimeouts(session, 1000, 1000, 1000, 1500);
-  HINTERNET conn = WinHttpConnect(session, L"127.0.0.1", panel_port(), 0);
+  const PanelAddress a = panel_address();
+  HINTERNET conn = WinHttpConnect(session, a.host.c_str(), a.port, 0);
   HINTERNET req =
       conn ? WinHttpOpenRequest(conn, L"GET", L"/api/health", nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0) : nullptr;
   if (req && WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
