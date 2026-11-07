@@ -23,7 +23,7 @@ BounceAES Master (sterownik ASIO) i Bounce Encoder to dwa niezależne programy. 
 
 1. Uruchom `BounceEncoder-setup.exe` i potwierdź uprawnienia administratora.
 2. Instalator:
-   - kopiuje pliki do `C:\Program Files\Bounce Encoder`, razem z bibliotekami kodeków `libmp3lame.dll` (MP3) i `libfdk-aac-2.dll` (AAC) oraz biblioteką Stereo Tool `libStereoTool_64.dll` (processing, około 117 MB). Program ładuje te biblioteki **tylko ze swojego folderu**. Folder spoza `Program Files` (nowy, pusty albo z poprzednią instalacją) dostaje takie same uprawnienia jak `Program Files`: administratorzy i SYSTEM pełna kontrola, Użytkownicy tylko odczyt i uruchamianie, bez dziedziczenia, bo usługa działa jako SYSTEM i nikt inny nie może podmienić jej plików. Uprawnień istniejącego folderu, w którym są już inne pliki (a nie ma Bounce Encodera), instalator nie zmienia (ostrzega). Jeśli ustawienie uprawnień się nie uda, instalator też ostrzega. Katalog główny dysku nie może być folderem programu;
+   - kopiuje pliki do `C:\Program Files\Bounce Encoder`, razem z bibliotekami kodeków `libmp3lame.dll` (MP3) i `libfdk-aac-2.dll` (AAC) oraz (pełny instalator) biblioteką Stereo Tool `libStereoTool_64.dll` (processing, około 117 MB). Instalator zbudowany automatycznie na GitHubie nie zawiera biblioteki Stereo Tool (rozdział 10, „Instalator bez Stereo Tool”). Program ładuje te biblioteki **tylko ze swojego folderu**. Folder spoza `Program Files` (nowy, pusty albo z poprzednią instalacją) dostaje takie same uprawnienia jak `Program Files`: administratorzy i SYSTEM pełna kontrola, Użytkownicy tylko odczyt i uruchamianie, bez dziedziczenia, bo usługa działa jako SYSTEM i nikt inny nie może podmienić jej plików. Uprawnień istniejącego folderu, w którym są już inne pliki (a nie ma Bounce Encodera), instalator nie zmienia (ostrzega). Jeśli ustawienie uprawnień się nie uda, instalator też ostrzega. Katalog główny dysku nie może być folderem programu;
    - instaluje usługę **Bounce Encoder** (`BounceEncoder`): start automatyczny razem z Windows, restart po awarii po 5 s;
    - rejestruje źródło **Bounce Encoder** w Dzienniku zdarzeń Windows;
    - dodaje regułę zapory dla programu `BounceEncoder.exe`: odbiór AES67 (RTP), PTP 319/320 i panel 8070. Reguła dotyczy tylko tego programu, nie otwiera portów dla innych, ale obowiązuje we **wszystkich profilach sieci** (także „Publiczna”: sieci AoIP Windows zwykle tak klasyfikuje, a bez tego odbiór AES67 by nie działał). Panel jest więc osiągalny z każdej sieci, w której nasłuchuje: ustaw jego adres na kartę sieci administracyjnej (rozdział 4);
@@ -42,6 +42,7 @@ Pliki w `C:\ProgramData\Bounce Encoder\`:
 | `stereotool\presets\*.sts` | presety Stereo Tool wgrane w panelu albo zapisane przyciskiem „Zapisz jako preset…” (rozdział 10) |
 | `stereotool\station-<id>\` | pliki Stereo Tool jednej stacji z processingiem (`<id>` to identyfikator stacji, np. `s3`); usuwane razem ze stacją |
 | `config.json.bad` | kopia pliku, którego nie dało się w całości wczytać (rozdział 13) |
+| `running.marker` | znacznik pracy usługi: jest, dopóki usługa działa, a poprawne zatrzymanie go usuwa. Zostaje po awarii albo zabiciu procesu; wtedy następny start uruchamia stacje bez processingu (rozdział 10, „Po awarii usługi”) |
 
 Ostrzeżenia i błędy trafiają też do Dziennika zdarzeń Windows (Aplikacja, źródło „Bounce Encoder”).
 
@@ -285,9 +286,20 @@ Gdy stacja ma preset, którego nie ma w folderze presetów (np. po ręcznej zmia
 ### Strojenie: interfejs WWW Stereo Tool
 Każda stacja z processingiem ma interfejs WWW swojego Stereo Tool (pełne ustawienia, mierniki), pod adresem `http://127.0.0.1:<port>/`, gdzie port to port bazowy (domyślnie 8100) + numer stacji (0–15). Numer stacja dostaje przy dodaniu i zachowuje go na stałe, także gdy inne stacje są usuwane albo przestawiane (pole **Interfejs WWW** pokazuje adres, gdy processing działa).
 
-- **Otwórz Stereo Tool** otwiera ten interfejs w nowej karcie, ale **tylko w panelu otwartym na komputerze z Bounce Encoderem** (pod `http://127.0.0.1:8070`). Interfejs nasłuchuje wyłącznie na `127.0.0.1`, więc z innego komputera jest nieosiągalny (celowo: nikt z sieci nie zmieni ustawień processingu z pominięciem logowania do panelu). Z innego komputera połącz się z komputerem enkodera przez **pulpit zdalny** i tam otwórz panel. W panelu otwartym zdalnie przycisk jest wyłączony z tym wyjaśnieniem.
+- **Otwórz Stereo Tool** otwiera ten interfejs w nowej karcie, ale **tylko w panelu otwartym na komputerze z Bounce Encoderem** (pod `http://127.0.0.1:8070`). Interfejs nasłuchuje wyłącznie na `127.0.0.1`, więc z innego komputera jest nieosiągalny (celowo). Z innego komputera połącz się z komputerem enkodera przez **pulpit zdalny** i tam otwórz panel. W panelu otwartym zdalnie przycisk jest wyłączony z tym wyjaśnieniem.
+- **Hasło interfejsu WWW.** Adres `127.0.0.1` otworzy każdy, kto pracuje na komputerze enkodera (także inny użytkownik albo program na tym komputerze), dlatego interfejs WWW Stereo Tool pyta o własne hasło Stereo Tool (konto Admin). Bounce Encoder ustawia je sam: losowe, osobne dla każdej stacji. Pokazuje je przycisk **Pokaż hasło** obok „Otwórz Stereo Tool”, tylko po zalogowaniu do panelu, z przyciskiem **Kopiuj** (gdy przeglądarka nie pozwala kopiować, hasło jest zaznaczone: Ctrl+C). Hasła nie ma w logach, w stanie usługi ani w zapisanych presetach. Zostaje to samo przy zmianie presetu i przy **Uruchom ponownie processing**; nowe dostaje nowy Stereo Tool stacji (zmiana klucza albo portu, ponowne uruchomienie usługi). Hasło ustawione w interfejsie WWW zostanie nadpisane przy najbliższym wczytaniu presetu.
 - Zmiany w interfejsie WWW działają od razu, ale **nie są zapisywane w presecie**. Przepadają przy ponownym uruchomieniu usługi, zmianie presetu albo klucza. Żeby je zachować, kliknij **Zapisz jako preset…**, podaj nową nazwę (np. „Radio X strojony.sts”), a potem wybierz ten preset w stacji i zapisz stację. Zapis trwa zwykle ułamek sekundy (najwyżej 10 s); jeśli trwa dłużej niż 0,2 s, stacja na ten czas nadaje bez processingu.
 - **Uruchom ponownie processing** wychodzi z obejścia (np. po poprawieniu ustawień, które nie mieściły się w licencji) i próbuje od nowa. Działający Stereo Tool zostaje z bieżącymi ustawieniami (także z interfejsu WWW); po błędzie powstaje nowy.
+- Presety wybieraj **w panelu**, nie w menu presetów interfejsu WWW Stereo Tool: tylko preset wczytany przez Bounce Encoder przechodzi przez wyłączenie funkcji sieciowych (niżej).
+
+### Funkcje sieciowe Stereo Tool
+Stereo Tool ma własne funkcje sieciowe: wyjście strumieniowe (Icecast/Shoutcast), serwer UECP (RDS), nadawanie i odbiór MicroMPX, Kantar, przekaźnik RDS, wejście Livewire, wykrywanie Livewire/Dante/Ravenna (AES67), a także dwa sposoby samodzielnego wczytywania ustawień (Poll STS i harmonogram presetów). Preset zapisany w Stereo Tool na innym komputerze może mieć którąś z nich włączoną, np. wysyłać strumień do produkcyjnego Icecasta jako drugie źródło albo nasłuchiwać na porcie UECP. Dlatego Bounce Encoder **wyłącza je wszystkie** zaraz po uruchomieniu Stereo Tool stacji i **po każdym wczytaniu presetu**, i sprawdza, że są wyłączone. Działa tylko interfejs WWW tej stacji (na `127.0.0.1`, z hasłem). Jeśli Stereo Tool którejś nie wyłączy, stacja nadaje bez processingu, a stan mówi „Stereo Tool nie wyłączył funkcji sieciowej: …”. Nie włączaj tych funkcji w interfejsie WWW: działałyby do najbliższego wczytania presetu.
+
+### Po awarii usługi
+Żeby awaria wewnątrz Stereo Tool nie powtarzała się w kółko (usługa po awarii uruchamia się ponownie po 5 s), Bounce Encoder zapisuje przy starcie znacznik `C:\ProgramData\Bounce Encoder\running.marker`, który poprawne zatrzymanie usługi usuwa. Jeśli usługa przy starcie znajdzie znacznik z poprzedniego uruchomienia (awaria, zabicie procesu, wyłączenie zasilania), a wtedy działał processing, **każda stacja z processingiem startuje bez niego**: nadaje sygnał bez processingu, stan „wyłączony po awarii usługi · uruchom ponownie processing” (pełna przyczyna: „awaria przy poprzednim uruchomieniu — processing wyłączony, uruchom ponownie ręcznie”), a log ma ostrzeżenie z nazwami stacji. Processing stacji wraca po **Uruchom ponownie processing**, po zapisaniu tej stacji w panelu albo po zmianie jej ustawień processingu (preset, klucz). Przed ponownym włączeniem sprawdź log z poprzedniego uruchomienia; jeśli awaria wraca przy tym samym presecie, zgłoś go z logiem.
+
+### Instalator bez Stereo Tool
+Repozytorium Bounce Encodera i pliki budowane na GitHubie (artefakty `BounceEncoder-setup` i `BounceEncoder-binaries`) są publiczne, więc nie zawierają niczego od Thimeo: ani `libStereoTool_64.dll`, ani noty `StereoTool-NOTICE.txt`. Z takim instalatorem processing pokazuje „brak biblioteki Stereo Tool …”, a reszta programu działa normalnie (stacje bez processingu). Instalacja takiego instalatora na miejscu wcześniejszej pełnej zostawia bibliotekę i notę na miejscu. Pełny instalator buduje się lokalnie z tych samych plików i biblioteki z SDK Thimeo (rozdział 16, „Budowanie ze źródeł”); tylko ten trafia do stacji.
 
 ### Stan processingu
 Stan widać w edycji stacji (pola **Stan**, **Procesor**, **Opóźnienie**, **Interfejs WWW**) i w skrócie na liście stacji. Pełna przyczyna jest w podpowiedzi i w logu.
@@ -295,6 +307,7 @@ Stan widać w edycji stacji (pola **Stan**, **Procesor**, **Opóźnienie**, **In
 | Stan | Znaczenie | Co zrobić |
 |---|---|---|
 | działa · CPU N % | Stereo Tool przetwarza sygnał stacji. CPU to czas pracy Stereo Tool w stosunku do czasu dźwięku (100 % = jeden rdzeń) | — |
+| działa · CPU N % (ponad 80 %) | Stereo Tool zajmuje ponad 80 % czasu jednego rdzenia (kolor ostrzeżenia na liście i w edycji stacji): przy chwilowym obciążeniu komputera może zacząć nie nadążać | lżejszy preset, mniej stacji z processingiem na tym komputerze albo szybszy procesor (niżej) |
 | uruchamianie… | Stereo Tool się uruchamia (około 1 s; po starcie usługi stacje po kolei, więc ostatnia może czekać kilkanaście sekund), stacja nadaje bez processingu | — |
 | sprawdzanie licencji… | pierwsze 0,5 s dźwięku przez Stereo Tool, na antenie jeszcze bez processingu | — |
 | zapis presetu… | trwa **Zapisz jako preset…** | — |
@@ -302,14 +315,16 @@ Stan widać w edycji stacji (pola **Stan**, **Procesor**, **Opóźnienie**, **In
 | licencja: brak … | licencja nie obejmuje wymienionych funkcji presetu; stacja nadaje bez processingu (bez automatycznych prób) | wyłącz te funkcje w interfejsie WWW, zapisz preset i **Uruchom ponownie processing**, albo użyj klucza z odpowiednią licencją |
 | błąd Stereo Tool | Stereo Tool zgłosił błąd przy przetwarzaniu | **Uruchom ponownie processing**; gdy wraca, inny preset; log |
 | czeka na Stereo Tool… | Stereo Tool nie wrócił z wywołania; ponowne uruchomienie czeka na niego | poczekaj; jeśli trwa, uruchom ponownie usługę |
+| wyłączony po awarii usługi · uruchom ponownie processing | poprzednie uruchomienie usługi skończyło się awarią (albo zabiciem procesu), gdy działał processing; stacja nadaje bez processingu (niżej, „Po awarii usługi”) | sprawdź log z poprzedniego uruchomienia; **Uruchom ponownie processing** albo zapisz stację |
+| Stereo Tool nie wyłączył funkcji sieciowej: … | preset włącza funkcję sieciową Stereo Tool, której Stereo Tool nie dał wyłączyć; stacja nadaje bez processingu (niżej, „Funkcje sieciowe Stereo Tool”) | wyłącz tę funkcję w presecie (w Stereo Tool, na którym go zrobiono), wgraj go ponownie |
 | awaria: uruchom ponownie usługę | Stereo Tool uległ awarii. Jego pamięć zostaje zajęta, a do ponownego uruchomienia usługi nie powstanie żaden nowy Stereo Tool (inne stacje działają dalej) | `services.msc` → Bounce Encoder → Uruchom ponownie (w oknie serwisowym); log; zgłoś preset, przy którym to się stało |
-| brak biblioteki Stereo Tool … / nieobsługiwana wersja … | brak `libStereoTool_64.dll` w folderze programu albo inna wersja niż 11.07 | zainstaluj program ponownie |
+| brak biblioteki Stereo Tool … / nieobsługiwana wersja … | brak `libStereoTool_64.dll` w folderze programu (np. instalator z GitHuba, bez Stereo Tool) albo inna wersja niż 11.07 | zainstaluj pełny instalator (z biblioteką; niżej, „Instalator bez Stereo Tool”) |
 | inny komunikat (np. „Stereo Tool nie wczytał presetu …”) | Stereo Tool nie mógł się uruchomić z tymi ustawieniami | sprawdź preset (wgraj ponownie), log |
 
 Nagłówek sekcji Processing pokazuje wersję biblioteki („Stereo Tool 11.07”) albo przyczynę, dla której jest niedostępna.
 
 ### Procesor i pamięć
-Stereo Tool jest ciężki: każda stacja z processingiem to osobna instancja Stereo Tool, która zajmuje **około 600 MB pamięci** i **jeden rdzeń procesora**. Do tego jeden rdzeń na odbiór AES67, kodeki i wysyłanie. Utrzymuj obciążenie całego procesora (Menedżer zadań) **najwyżej na 50 %**, żeby chwilowe skoki (inne programy, aktualizacje Windows) nie spowodowały stanu „nie nadąża”.
+Stereo Tool jest ciężki: każda stacja z processingiem to osobna instancja Stereo Tool, która zajmuje **około 600 MB pamięci** i **jeden rdzeń procesora**. Do tego jeden rdzeń na odbiór AES67, kodeki i wysyłanie. Utrzymuj obciążenie całego procesora (Menedżer zadań) **najwyżej na 50 %**, żeby chwilowe skoki (inne programy, aktualizacje Windows) nie spowodowały stanu „nie nadąża”. Stacja, której Stereo Tool zajmuje ponad 80 % czasu rdzenia, jest w panelu oznaczona kolorem ostrzeżenia („CPU N % (ponad 80 %)”).
 
 Szacunek (1 rdzeń i około 600 MB na instancję Stereo Tool, 1 rdzeń na wejścia i wyjścia, procesor obciążony najwyżej w połowie):
 
@@ -323,7 +338,7 @@ Jedna instancja Stereo Tool pracuje na jednym rdzeniu, więc **szybkość pojedy
 
 ### Identyfikatory stacji i porty
 - Nowa stacja zawsze dostaje nowy identyfikator (`s1`, `s2`, …), nigdy identyfikator usuniętej stacji, więc nie przejmie jej plików Stereo Tool (`stereotool\station-<id>\`, usuwane razem ze stacją).
-- Porty interfejsów WWW: port bazowy + numer stacji (0–15), domyślnie 8100–8115. Nie mogą obejmować portu panelu. Reguła zapory instalatora dotyczy całego programu `BounceEncoder.exe`, więc nie ogranicza tych portów; interfejsy są osiągalne tylko z tego komputera, bo nasłuchują wyłącznie na `127.0.0.1`.
+- Porty interfejsów WWW: port bazowy + numer stacji (0–15), domyślnie 8100–8115. Nie mogą obejmować portu panelu. Reguła zapory instalatora dotyczy całego programu `BounceEncoder.exe`, więc nie ogranicza tych portów; interfejsy są osiągalne tylko z tego komputera, bo nasłuchują wyłącznie na `127.0.0.1`, i pytają o hasło (wyżej). Innych portów Stereo Tool nie otwiera (funkcje sieciowe są wyłączone, wyżej).
 
 ## 11. Statystyki i logi
 
@@ -366,6 +381,8 @@ Jedna instancja Stereo Tool pracuje na jednym rdzeniu, więc **szybkość pojedy
 | Stacja nadaje bez processingu | stan processingu w edycji stacji i jego przyczyna (tabela w rozdziale 10); log (wpisy „Processing stacji „…”: …”) |
 | Processing „nie nadąża” | obciążenie procesora w Menedżerze zadań (poniżej 50 %), liczba stacji z processingiem (rozdział 10), plan zasilania, lżejszy preset |
 | „Otwórz Stereo Tool” nieaktywne | panel otwarty z innego komputera: otwórz go na komputerze enkodera (pulpit zdalny); processing tej stacji nie działa |
+| Interfejs WWW Stereo Tool pyta o hasło | to hasło Stereo Tool tej stacji: **Pokaż hasło** w edycji stacji (rozdział 10) |
+| Po starcie usługi processing „wyłączony po awarii usługi” | poprzednie uruchomienie skończyło się awarią albo zabiciem procesu, gdy działał processing (rozdział 10, „Po awarii usługi”): log z poprzedniego uruchomienia, potem **Uruchom ponownie processing** |
 | Po starcie część stacji jest wyłączona | plik `config.json` był zmieniany ręcznie i miał błędy: usługa wyłączyła błędne stacje (opis w logu), popraw je w panelu. Plik, którego nie dało się wczytać, ma kopię `config.json.bad` |
 
 Uruchomienie usługi w oknie konsoli (do diagnostyki, po zatrzymaniu usługi Windows, w wierszu poleceń jako administrator):
@@ -373,14 +390,14 @@ Uruchomienie usługi w oknie konsoli (do diagnostyki, po zatrzymaniu usługi Win
 
 Windows czeka na zatrzymanie usługi do 10 s. Jeśli przy zatrzymaniu pojawia się błąd przekroczenia czasu, zapisz, ile trwało, i dołącz log (TESTY.md, rozdział 3).
 
-Przy zatrzymaniu usługi ze stacjami z processingiem log ma wpis „Processing: instancje Stereo Tool (N) nie są usuwane przy zatrzymaniu usługi; pamięć zwalnia zakończenie procesu”. To zamierzone: usuwanie instancji Stereo Tool trwa około sekundy każda, a zakończenie procesu i tak zwalnia ich pamięć, więc usługa zatrzymuje się szybko. Wpis „Stereo Tool nie zakończył pracy w ciągu … s” znaczy, że Stereo Tool zawiesił się w wywołaniu (dołącz log do zgłoszenia).
+Przy zatrzymaniu usługi ze stacjami z processingiem log ma wpis „Processing: instancje Stereo Tool (N) nie są usuwane przy zatrzymaniu usługi; pamięć zwalnia zakończenie procesu”. To zamierzone: usuwanie instancji Stereo Tool trwa około sekundy każda, a zakończenie procesu i tak zwalnia ich pamięć, więc usługa zatrzymuje się szybko. Wpis „Stereo Tool nie zakończył pracy w ciągu … s” znaczy, że Stereo Tool zawiesił się w wywołaniu (dołącz log do zgłoszenia) albo że stacja przy zatrzymaniu wciąż czekała na uruchomienie swojego Stereo Tool: uruchomienia idą jedno po drugim, około 1 s każde, więc zatrzymanie usługi zaraz po jej starcie z wieloma stacjami z processingiem też może go dać. Wtedy usługa kończy proces od razu, bez sprzątania pamięci (wpis „wątki Stereo Tool, które nie zakończyły pracy: N — proces kończy się natychmiast …”; pamięć zwalnia system), a zatrzymanie usługi jest zgłaszane normalnie.
 
 ## 14. Znane ograniczenia
 
 - **Panel tylko w zaufanej sieci.** Biblioteka HTTP panelu czyta bardzo długie pierwsze wiersze żądań w całości, zanim sprawdzi logowanie. Komputer z dostępem do portu panelu może w ten sposób zająć dużo pamięci usługi. Ustaw adres panelu na kartę sieci administracyjnej albo `127.0.0.1` (rozdział 4) i nie wystawiaj portu 8070 do internetu (z zewnątrz tylko przez odwrotne proxy z HTTPS i własnym uwierzytelnieniem). Poprawka przyjdzie z aktualizacją biblioteki, wspólną dla BounceAES Master i Bounce Encoder.
 - Panel obsługuje jedno żądanie na połączenie (zabezpieczenie przed przemycaniem żądań); dla panelu nie ma to odczuwalnego kosztu.
 - Brak TLS do Icecasta, brak metadanych ICY (tytułów) i RDS: to robią inne systemy.
-- Stereo Tool: tylko processing audio stacji (bez wyjścia FM/MPX, RDS, UECP i okna Stereo Tool), tylko wersja 11.07 dołączona do instalatora, tylko na stacji (nie na pojedynczym strumieniu). Interfejs WWW Stereo Tool działa tylko na komputerze enkodera (rozdział 10). Po awarii Stereo Tool trzeba uruchomić ponownie usługę.
+- Stereo Tool: tylko processing audio stacji (bez wyjścia FM/MPX, RDS, UECP i okna Stereo Tool), tylko wersja 11.07 dołączona do pełnego instalatora (rozdział 10), tylko na stacji (nie na pojedynczym strumieniu). Interfejs WWW Stereo Tool działa tylko na komputerze enkodera (rozdział 10). Po awarii Stereo Tool trzeba uruchomić ponownie usługę.
 - Serwer Icecast: nazwa albo adres IPv4 (bez IPv6).
 - Adres i port panelu zmieniają się dopiero po restarcie usługi.
 - Brak kodeka AAC (pliku `libfdk-aac-2.dll`) wyłącza tylko strumienie AAC (rozdział 8).
@@ -399,15 +416,15 @@ Bounce Encoder jest na licencji GPL-3.0-or-later. Kodeki MP3 i AAC oraz Stereo T
 
 Licencja FDK AAC nie jest zgodna z GPL, dlatego licencja Bounce Encoder ma dodatkowe uprawnienie (GPLv3, sekcja 7), które pozwala łączyć go z fdk-aac i przekazywać razem (LICENCJE.md). **W Bounce instalatora z AAC używasz bez ograniczeń.** Przed przekazaniem go poza firmę sprawdź licencję patentową AAC (licencja Fraunhofera nie obejmuje patentów) albo przekaż pakiet bez `libfdk-aac-2.dll`: MP3 i FLAC działają dalej. 
 
-**Stereo Tool** to biblioteka komercyjna: dołączona do instalatora dla Bounce (licencjobiorcy). Każda stacja z processingiem potrzebuje własnej licencji Stereo Tool. Przekazanie instalatora z `libStereoTool_64.dll` poza Bounce wymaga zgody Thimeo, a odbiorca potrzebuje własnych licencji; bez tego pliku program działa jak 1.0, a processing jest niedostępny. Licencja Bounce Encoder ma dodatkowe uprawnienie (GPLv3, sekcja 7) także na połączenie ze Stereo Tool.
+**Stereo Tool** to biblioteka komercyjna: dołączona do pełnego instalatora dla Bounce (licencjobiorcy). Publiczne repozytorium i pliki budowane na GitHubie jej nie zawierają (rozdział 10, „Instalator bez Stereo Tool”). Każda stacja z processingiem potrzebuje własnej licencji Stereo Tool. Przekazanie instalatora z `libStereoTool_64.dll` poza Bounce wymaga zgody Thimeo, a odbiorca potrzebuje własnych licencji; bez tego pliku program działa jak 1.0, a processing jest niedostępny. Licencja Bounce Encoder ma dodatkowe uprawnienie (GPLv3, sekcja 7) także na połączenie ze Stereo Tool.
 
-Pełne teksty licencji i nota Stereo Tool (`StereoTool-NOTICE.txt`) są w folderze programu (`licencje\`), zasady w pliku `LICENCJE.md`.
+Pełne teksty licencji i nota Stereo Tool (`StereoTool-NOTICE.txt`, tylko z pełnym instalatorem) są w folderze programu (`licencje\`), zasady w pliku `LICENCJE.md`.
 
 ## 16. Aktualizacja, odinstalowanie, podpisywanie
 
 **Aktualizacja:** uruchom nowy instalator. Zatrzyma usługę i ikonę, wymieni pliki i uruchomi usługę ponownie. Konfiguracja zostaje.
 
-**Co nowego w 1.1.0:** processing **Stereo Tool** (Thimeo 11.07) na stacji (rozdział 10): każda stacja może mieć własny Stereo Tool z presetem `.sts` i własnym kluczem licencji (albo domyślnym z Ustawień…). Presety wgrywa się, pobiera i usuwa w oknie **Presety Stereo Tool…**; strojenie w interfejsie WWW Stereo Tool tej stacji (tylko na komputerze enkodera, `127.0.0.1`) i zapis jako nowy preset. Gdy Stereo Tool nie działa, nie nadąża albo licencja nie obejmuje ustawień, stacja nadaje sygnał bez processingu (nigdy ciszę), a panel pokazuje przyczynę. Instalator zawiera `libStereoTool_64.dll` (instalator jest większy o około 30 MB, program o około 117 MB). Nowa stacja nigdy nie dostaje identyfikatora usuniętej. Stacje bez processingu działają jak w 1.0.4.
+**Co nowego w 1.1.0:** processing **Stereo Tool** (Thimeo 11.07) na stacji (rozdział 10): każda stacja może mieć własny Stereo Tool z presetem `.sts` i własnym kluczem licencji (albo domyślnym z Ustawień…). Presety wgrywa się, pobiera i usuwa w oknie **Presety Stereo Tool…**; strojenie w interfejsie WWW Stereo Tool tej stacji (tylko na komputerze enkodera, `127.0.0.1`) i zapis jako nowy preset. Gdy Stereo Tool nie działa, nie nadąża albo licencja nie obejmuje ustawień, stacja nadaje sygnał bez processingu (nigdy ciszę), a panel pokazuje przyczynę. Interfejs WWW Stereo Tool pyta o własne, losowe hasło (przycisk **Pokaż hasło** w panelu). Funkcje sieciowe Stereo Tool z presetów (strumień, UECP, MicroMPX i inne) są zawsze wyłączone. Po awarii usługi z działającym processingiem stacje startują bez processingu, dopóki się go nie uruchomi ręcznie. Pełny instalator zawiera `libStereoTool_64.dll` (jest większy o około 30 MB, program o około 117 MB); instalator budowany na GitHubie jest bez niej (rozdział 10). Nowa stacja nigdy nie dostaje identyfikatora usuniętej. Stacje bez processingu działają jak w 1.0.4.
 
 **Co nowego w 1.0.4:** poprawki bezpieczeństwa panelu, wspólne z BounceAES Master 1.2.5. Panel odrzuca złośliwie zbudowane zapytania, zanim ktokolwiek się zaloguje: JSON zagnieżdżony głębiej niż 16 poziomów, z więcej niż 10 000 obiektów i tablic, 20 000 wartości albo 2 000 pól w jednym obiekcie dostaje od razu błąd 400 (wcześniej takie zapytanie przed zalogowaniem zajmowało procesor na kilka sekund i dużo pamięci, a po zalogowaniu mogło zatrzymać usługę). Bardzo długie hasła nie obciążają już procesora przy logowaniu. Zapisane hasło, stacje i strumienie zostają bez zmian.
 
@@ -421,4 +438,18 @@ Pełne teksty licencji i nota Stereo Tool (`StereoTool-NOTICE.txt`) są w folder
 
 **Podpisywanie plików:** jak w BounceAES Master (INSTALL.md, rozdział 11): `installer\sign.ps1 -Path <folder>` podpisuje pliki `.exe` i `.dll` (także biblioteki kodeków) i instalator własnym certyfikatem firmy. Pomija `libStereoTool_64.dll`: to plik Thimeo i zostaje dokładnie taki, jak go wydał producent (jego SHA-256 jest w `licencje\StereoTool-NOTICE.txt`). Nigdy nie używaj certyfikatu ani nazwy innego producenta.
 
-**Budowanie ze źródeł** (README.md, rozdział o kompilacji): konfiguracja 64-bitowego buildu z kodekami pobiera archiwa źródeł LAME, fdk-aac, libogg i libFLAC (sourceforge.net, github.com, xiph.org, sprawdzane po SHA-256), więc potrzebuje dostępu do sieci, chyba że kodeki są wyłączone (`-DBAM_WITH_CODECS=OFF`, wtedy bez Bounce Encodera). `-DBAM_CODEC_CACHE=<folder>` zachowuje archiwa i przy kolejnych konfiguracjach używa ich bez sieci. Buildy 64-bitowe pobierają też SDK Stereo Tool (około 360 MB, z download.thimeo.com, sprawdzane po SHA-256; `-DBAM_STEREOTOOL_SDK_ZIP=<plik>` używa zapisanej kopii, `-DBAM_STEREOTOOL_CACHE=<folder>` trzyma pobrane archiwum i przy kolejnych konfiguracjach bierze je stamtąd, `-DBAM_WITH_STEREOTOOL=OFF` buduje bez Stereo Tool). Adres Thimeo nie zawiera wersji: gdy pojawi się nowsza wersja, pobranie nie zgodzi się z sumą i konfiguracja powie, co zrobić (zachowaj kopię archiwum 11.07).
+**Budowanie ze źródeł** (README.md, rozdział o kompilacji): konfiguracja 64-bitowego buildu z kodekami pobiera archiwa źródeł LAME, fdk-aac, libogg i libFLAC (sourceforge.net, github.com, xiph.org, a zapasowo serwery lustrzane deb.debian.org i ftp.osuosl.org; wszystko sprawdzane po SHA-256), więc potrzebuje dostępu do sieci, chyba że kodeki są wyłączone (`-DBAM_WITH_CODECS=OFF`, wtedy bez Bounce Encodera). `-DBAM_CODEC_CACHE=<folder>` zachowuje archiwa i przy kolejnych konfiguracjach używa ich bez sieci. Buildy 64-bitowe pobierają też SDK Stereo Tool (około 360 MB, z download.thimeo.com, sprawdzane po SHA-256; `-DBAM_STEREOTOOL_SDK_ZIP=<plik>` używa zapisanej kopii, `-DBAM_STEREOTOOL_CACHE=<folder>` trzyma pobrane archiwum i przy kolejnych konfiguracjach bierze je stamtąd, `-DBAM_WITH_STEREOTOOL=OFF` buduje bez Stereo Tool). Adres Thimeo nie zawiera wersji: gdy pojawi się nowsza wersja, pobranie nie zgodzi się z sumą i konfiguracja powie, co zrobić (zachowaj kopię archiwum 11.07).
+
+**Pełny instalator (z Stereo Tool).** Pliki programu bierze z artefaktu `BounceEncoder-binaries` z GitHuba (zbudowanego MSVC, bez Stereo Tool) albo z własnego buildu, a bibliotekę z SDK Thimeo. Na Windows z NSIS 3 (PowerShell):
+
+```powershell
+# 1. artefakt BounceEncoder-binaries z GitHuba rozpakowany do C:\bounce\binaries
+# 2. libStereoTool_1107\lib\Windows\64\libStereoTool_64.dll z Stereo_Tool_Generic_plugin.zip
+#    (to samo archiwum co przy budowaniu; z buildu: <build>\_deps\stereotool-sdk\libStereoTool_1107\lib\Windows\64\)
+#    skopiowana do C:\bounce\libStereoTool_64.dll; suma musi się zgadzać:
+(Get-FileHash -Algorithm SHA256 C:\bounce\libStereoTool_64.dll).Hash   # 48CBDC06F44A203F7FA2895B3EC79FC63557D61DCD687563C6A17388D6308C4E
+# 3. z folderu installer\nsis repozytorium (tej samej wersji co artefakt):
+& "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /V2 /DPAYLOAD=C:\bounce\binaries /DWITH_STEREOTOOL=C:\bounce\libStereoTool_64.dll BounceEncoder-setup.nsi
+```
+
+Wynik: `installer\nsis\BounceEncoder-setup.exe` (około 33 MB). Na macOS i Linuksie to samo: `makensis -DPAYLOAD=<folder> -DWITH_STEREOTOOL=<plik dll> BounceEncoder-setup.nsi` (sumę sprawdź `shasum -a 256`). `PAYLOAD` może być też folderem 64-bitowego buildu (np. `build-win` albo `build\Release`). Bez `WITH_STEREOTOOL` powstaje instalator bez Stereo Tool, jak na GitHubie. Pełnego instalatora nie wysyłaj do repozytorium ani na publiczne serwery (LICENCJE.md).

@@ -83,12 +83,16 @@ Processing stacji w Bounce Encoder 1.1 używa biblioteki **Stereo Tool** (`libSt
   `48cbdc06f44a203f7fa2895b3ec79fc63557d61dcd687563c6a17388d6308c4e`.
 - **Jedna licencja Stereo Tool na jedną instancję**: każda stacja z włączonym processingiem
   potrzebuje własnego klucza licencji od Thimeo.
-- Biblioteka jest dołączona do instalatora Bounce Encoder **dla Bounce** (BOUNCE SP. Z O.O. jest
-  licencjobiorcą Stereo Tool). **Przekazanie instalatora albo pliku `libStereoTool_64.dll` poza
-  Bounce wymaga zgody Thimeo**, a odbiorca potrzebuje własnych licencji Stereo Tool. Bez tego pliku
-  Bounce Encoder działa jak wersja 1.0: processing jest niedostępny, stacje nadają sygnał bez
+- Biblioteka jest dołączona do **pełnego** instalatora Bounce Encoder **dla Bounce** (BOUNCE SP.
+  Z O.O. jest licencjobiorcą Stereo Tool), budowanego lokalnie (`makensis /DWITH_STEREOTOOL=…`,
+  ENCODER-INSTALL.md, rozdział 16). **Przekazanie instalatora albo pliku `libStereoTool_64.dll`
+  poza Bounce wymaga zgody Thimeo**, a odbiorca potrzebuje własnych licencji Stereo Tool. Bez tego
+  pliku Bounce Encoder działa jak wersja 1.0: processing jest niedostępny, stacje nadają sygnał bez
   processingu.
-- Instalator kopiuje notę `StereoTool-NOTICE.txt` (`cmake/stereotool/`) do `licencje\` w
+- Repozytorium jest publiczne, więc pliki budowane w nim automatycznie (CI na GitHubie: artefakty
+  `BounceEncoder-setup` i `BounceEncoder-binaries`) **nie zawierają** `libStereoTool_64.dll` ani noty
+  Thimeo; CI pobiera bibliotekę tylko do testów. Pełnego instalatora nie publikuj.
+- Pełny instalator kopiuje notę `StereoTool-NOTICE.txt` (`cmake/stereotool/`) do `licencje\` w
   folderze programu.
 
 ## Dodatkowe uprawnienie dla FDK AAC i Stereo Tool (GPLv3, sekcja 7)
