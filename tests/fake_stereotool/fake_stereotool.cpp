@@ -15,7 +15,10 @@
 //   version_crashes 0 / bind_crashes 0 (Windows: an access violation in GetSoftwareVersion /
 //   global_setBindIp), save_fails 0, sts_rejects -1 (the .sts index SetStsValue refuses),
 //   save_sleep_us 0 (inside SavePreset), version_sleep_us 0 (inside GetSoftwareVersion: a slow load),
-//   delete_sleep_us 0 (inside Delete: the real one takes about 0.5-1.2 s).
+//   delete_sleep_us 0 (inside Delete: the real one takes about 0.5-1.2 s),
+//   process_work_us 0 (inside Process, busy until that long after the call began: a load of known
+//   size, exact also where a sleep overshoots by milliseconds, e.g. a macOS CI VM; the calls' wall
+//   time adds up in the counter "process_busy_us", the longest is "process_busy_max_us").
 // A manual run can set options through the environment (BAM_FAKE_STEREOTOOL_OPTIONS, see State).
 #include <chrono>
 #include <cstdint>
@@ -80,7 +83,7 @@ struct State {
                {"process_throws", 0},  {"process_crashes", 0}, {"process_sleep_us", 0},
                {"create_sleep_us", 0}, {"version_crashes", 0}, {"bind_crashes", 0},
                {"save_fails", 0},      {"sts_rejects", -1},    {"save_sleep_us", 0},
-               {"version_sleep_us", 0}, {"delete_sleep_us", 0}};
+               {"version_sleep_us", 0}, {"delete_sleep_us", 0}, {"process_work_us", 0}};
     values.clear();
     texts.clear();
   }
@@ -238,7 +241,8 @@ FAKE_ST_EXPORT void stereoTool_Delete(gStereoTool* st) {
 FAKE_ST_EXPORT void stereoTool_Process(gStereoTool* st, float* samples, int32_t numsamples, int32_t channels,
                                        int32_t samplerate) {
   auto& s = state();
-  long long sleep_us = 0;
+  const auto began = std::chrono::steady_clock::now();
+  long long sleep_us = 0, work_us = 0;
   bool throws = false, crashes = false;
   {
     std::lock_guard<std::mutex> lock(s.mutex);
@@ -249,11 +253,23 @@ FAKE_ST_EXPORT void stereoTool_Process(gStereoTool* st, float* samples, int32_t 
     throws = s.opt("process_throws") != 0;
     crashes = s.opt("process_crashes") != 0;
     sleep_us = (long long)s.opt("process_sleep_us");
+    work_us = (long long)s.opt("process_work_us");
   }
   // thrown with no lock held: MSVC (/EHsc) need not unwind an extern "C" function's locals
   if (throws) fail_process();
   if (crashes) crash();
   if (sleep_us > 0) std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
+  if (work_us > 0) {
+    const auto until = began + std::chrono::microseconds(work_us);
+    auto now = std::chrono::steady_clock::now();
+    while (now < until) now = std::chrono::steady_clock::now();
+    // the wall time of the call (also when the thread lost the CPU meanwhile): "process_busy_us"
+    const auto busy = std::chrono::duration_cast<std::chrono::microseconds>(now - began).count();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.value("process_busy_us") += (long long)busy;
+    long long& longest = s.value("process_busy_max_us");
+    if (busy > longest) longest = (long long)busy;
+  }
   if (channels != st->channels) {
     st->channels = channels;
     st->reset_line();

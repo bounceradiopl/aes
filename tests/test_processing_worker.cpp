@@ -18,6 +18,7 @@
 #include <functional>
 #include <mutex>
 #include <new>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -261,6 +262,86 @@ struct StopTimeout {
   StopTimeout(const StopTimeout&) = delete;
   StopTimeout& operator=(const StopTimeout&) = delete;
 };
+
+// The fake's time per Process call of one block with the current options, as this runner
+// manages it: the mean of 30 calls through the binding, in ms.
+double fake_block_ms() {
+  std::string err;
+  auto st = be::StereoToolInstance::create("", "calibration", "", &err);
+  REQUIRE_MESSAGE(st, err);
+  std::vector<float> block(PW::kBlockFrames * 2, 0.0f);
+  constexpr int kCalls = 30;
+  const int64_t t0 = bp::monotonic_ns();
+  for (int i = 0; i < kCalls; ++i) REQUIRE(st->process(block.data(), int32_t(PW::kBlockFrames)));
+  return double(bp::monotonic_ns() - t0) / 1e6 / kCalls;
+}
+
+// The tests with a load (process_work_us) are about the worker's rules for a Stereo Tool with a
+// known headroom: a call of work_ms for each block, which arrives every budget_ms. On a runner short
+// of CPU the fake's thread loses the CPU while it works, and the headroom shrinks or goes. Most of
+// it gone means the case was not run: the test then stops with a message instead of a verdict.
+// "Most" is more than half: then the calls took longer than work_ms + (budget_ms - work_ms) / 2.
+double headroom_limit_ms(double work_ms, double budget_ms) { return work_ms + (budget_ms - work_ms) / 2.0; }
+
+// Samples the fake's calls and their wall time every 20 ms on a thread of its own, from its
+// construction to stop().
+class CallSampler {
+ public:
+  CallSampler() {
+    samples_.reserve(4000);
+    thread_ = std::thread([this] {
+      while (on_.load() && samples_.size() < samples_.capacity()) {
+        samples_.push_back({bp::monotonic_ns(), fake().value("process_calls"), fake().value("process_busy_us")});
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      }
+    });
+  }
+  ~CallSampler() { stop(); }
+  CallSampler(const CallSampler&) = delete;
+  CallSampler& operator=(const CallSampler&) = delete;
+  void stop() {
+    on_.store(false);
+    if (thread_.joinable()) thread_.join();
+  }
+  // The longest mean time of a call over any 0.5 s with at least 10 calls, in ms (stops first).
+  double slowest_ms() {
+    stop();
+    double slowest = 0;
+    for (size_t i = 0, j = 0; i < samples_.size(); ++i) {
+      while (j < samples_.size() && samples_[j].ns - samples_[i].ns < 500'000'000) ++j;
+      if (j == samples_.size()) break;
+      const long long calls = samples_[j].calls - samples_[i].calls;
+      if (calls >= 10)
+        slowest = std::max(slowest, double(samples_[j].busy_us - samples_[i].busy_us) / 1000.0 / double(calls));
+    }
+    return slowest;
+  }
+
+ private:
+  struct Sample {
+    int64_t ns;
+    long long calls, busy_us;
+  };
+  std::vector<Sample> samples_;
+  std::atomic<bool> on_{true};
+  std::thread thread_;
+};
+
+// Why a bypass of the fake with process_work_us is the runner's doing, "" when it is not: one call
+// took more than the worker's 200 ms (stuck), or over some 0.5 s the calls lost more than half of
+// the headroom (headroom_limit_ms). Draining a backlog keeps the fake busy all the time, but each
+// call still takes about work_ms: no excuse, so a bypass while it drains still fails.
+std::string runner_excuse(CallSampler& calls, double work_ms, double budget_ms) {
+  const double slowest = calls.slowest_ms();
+  const double longest = double(fake().value("process_busy_max_us")) / 1000.0;
+  std::ostringstream why;
+  if (longest >= 200.0)
+    why << "one call of Stereo Tool took " << longest << " ms on this runner";
+  else if (slowest > headroom_limit_ms(work_ms, budget_ms))
+    why << "calls of Stereo Tool took " << slowest << " ms on average over 0.5 s on this runner (" << work_ms
+        << " ms of work per " << budget_ms << " ms: most of the headroom lost)";
+  return why.str();
+}
 
 bd::ProcessingSettings settings(Collector& col) {
   bd::ProcessingSettings s;
@@ -595,22 +676,38 @@ TEST_CASE("processing: a station catch-up burst that Stereo Tool drains keeps pr
   UseFake use;
   fake().set("gain", 0.5);
   fake().set("latency", 512);
-  int sleep_us = 0, stall_ms = 0;
-  // CPU as measured: a sleep in the fake overshoots (macOS: 8 ms per 10 ms block measures 91-95 %)
-  SUBCASE("about 50 % CPU, 0.3 s stall") { sleep_us = 4000, stall_ms = 300; }
-  SUBCASE("about 50 % CPU, 0.5 s stall") { sleep_us = 4000, stall_ms = 500; }
-  SUBCASE("about 80 % CPU, 0.1 s stall") { sleep_us = 6500, stall_ms = 100; }
-  SUBCASE("about 80 % CPU, 0.3 s stall") { sleep_us = 6500, stall_ms = 300; }
-  SUBCASE("8 ms per block (the review's case), 0.1 s stall") { sleep_us = 8000, stall_ms = 100; }
+  int work_us = 0, stall_ms = 0;
+  // the fake works to a deadline (process_work_us), so the load is what is asked for, also where
+  // a sleep overshoots (a sleep of 8 ms measured 91-95 % on a Mac, slower than real time on a
+  // macOS CI VM)
+  SUBCASE("50 % CPU, 0.3 s stall") { work_us = 5000, stall_ms = 300; }
+  SUBCASE("50 % CPU, 0.5 s stall") { work_us = 5000, stall_ms = 500; }
+  SUBCASE("80 % CPU, 0.1 s stall") { work_us = 8000, stall_ms = 100; }
+  SUBCASE("80 % CPU, 0.3 s stall") { work_us = 8000, stall_ms = 300; }
+  SUBCASE("90 % CPU (the review's case measured 91-95 %), 0.1 s stall") { work_us = 9000, stall_ms = 100; }
   // more than the 1.5 s backlog cap at once: drained fast, so it is no reason to bypass
-  SUBCASE("about 30 % CPU, 1.6 s stall") { sleep_us = 3000, stall_ms = 1600; }
-  CAPTURE(sleep_us);
+  SUBCASE("30 % CPU, 1.6 s stall") { work_us = 3000, stall_ms = 1600; }
+  CAPTURE(work_us);
   CAPTURE(stall_ms);
-  fake().set("process_sleep_us", sleep_us);
+  fake().set("process_work_us", work_us);
+  const double work_ms = work_us / 1000.0;
+  const double block_ms = fake_block_ms();
+  CAPTURE(block_ms);
+  if (block_ms > headroom_limit_ms(work_ms, 10.0)) {
+    MESSAGE("skipped: a " << work_ms << " ms block takes " << block_ms << " ms on this runner");
+    return;
+  }
   Collector col;
   Input input;
   PW w(settings(col), "burst");
-  REQUIRE(feed_until(w, input, be::ProcessingState::Running, 10'000'000));
+  CallSampler calls;  // how fast Stereo Tool really is (runner_excuse)
+  if (!feed_until(w, input, be::ProcessingState::Running, 10'000'000)) {
+    if (const std::string why = runner_excuse(calls, work_ms, 10.0); !why.empty()) {
+      MESSAGE("skipped: " << why << " (" << w.status().reason << ")");
+      return;
+    }
+    FAIL("never running although Stereo Tool kept up: " << w.status().reason);
+  }
   feed(w, input, 48000, 10'000'000);
   const double cpu_before = w.status().cpu_pct;
   CAPTURE(cpu_before);
@@ -625,8 +722,16 @@ TEST_CASE("processing: a station catch-up burst that Stereo Tool drains keeps pr
   }
   feed(w, input, 72000, 10'000'000);  // 1.5 s of real time after it
   const auto st = w.status();
-  CHECK_MESSAGE(st.state == be::ProcessingState::Running, st.reason << " (cpu " << st.cpu_pct << " %)");
-  fake().set("process_sleep_us", 0);
+  if (st.state != be::ProcessingState::Running) {
+    if (const std::string why = runner_excuse(calls, work_ms, 10.0); !why.empty()) {
+      MESSAGE("skipped: " << why << " (" << st.reason << ")");
+      fake().set("process_work_us", 0);
+      return;
+    }
+    FAIL_CHECK("bypassed although Stereo Tool kept up: " << st.reason << " (cpu " << st.cpu_pct << " %, slowest call "
+                                                          << calls.slowest_ms() << " ms)");
+  }
+  fake().set("process_work_us", 0);
   REQUIRE(drained(w, col, input));
   const Path p = analyse(input.in, col.copy(), 0.5f);
   CHECK(p.mismatches == 0);
@@ -672,14 +777,28 @@ TEST_CASE("processing: after a crash nothing is created again and restart does n
 TEST_CASE("processing: CPU is the Stereo Tool time over the audio time, per second") {
   UseFake use;
   fake().set("latency", 0);
-  fake().set("process_sleep_us", 2000);  // 2 ms per 10 ms block: 20 %
+  fake().set("process_work_us", 2000);  // 2 ms per 10 ms block: 20 %, to a deadline (no sleep overshoot)
+  // fed at twice real time below: a block arrives every 5 ms
+  const double block_ms = fake_block_ms();
+  CAPTURE(block_ms);
+  if (block_ms > headroom_limit_ms(2.0, 5.0)) {
+    MESSAGE("skipped: a 2 ms block takes " << block_ms << " ms on this runner");
+    return;
+  }
   Collector col;
   Input input;
   PW w(settings(col), "s8");
   CHECK(w.status().cpu_pct == 0);
-  REQUIRE(feed_until(w, input, be::ProcessingState::Running, 5'000'000));
-  feed(w, input, 96000, 5'000'000);  // twice real time: Stereo Tool keeps up
+  CallSampler calls;
+  const bool running = feed_until(w, input, be::ProcessingState::Running, 5'000'000);
+  if (running) feed(w, input, 96000, 5'000'000);  // twice real time: Stereo Tool keeps up
   const auto st = w.status();
+  if (st.state != be::ProcessingState::Running) {
+    if (const std::string why = runner_excuse(calls, 2.0, 5.0); !why.empty()) {
+      MESSAGE("skipped: " << why << " (fed at twice real time; " << st.reason << ")");
+      return;
+    }
+  }
   CHECK(st.state == be::ProcessingState::Running);
   CHECK(st.cpu_pct >= 18.0);
   CHECK(st.cpu_pct < 60.0);
