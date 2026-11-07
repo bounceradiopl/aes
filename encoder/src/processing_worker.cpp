@@ -133,16 +133,17 @@ void drop_instance(Core& c) {
 
 // Builds the instance (or keeps a working one on restart, loading a new preset into it when one
 // was set), loads the preset, measures the latency.
+// A preset set with set_preset() since the last setup: it becomes the one to load. Taken right
+// before a load (after Create3, which may take long), so a preset set meanwhile is not missed.
+bool take_requested_preset(Core& c) {
+  std::lock_guard lock(c.m);
+  if (!c.preset_change) return false;
+  c.preset = std::move(c.requested_preset);
+  c.preset_change = false;
+  return true;
+}
+
 Done setup(Core& c, bool restart, uint32_t* latency) {
-  bool reload = false;
-  {
-    std::lock_guard lock(c.m);
-    if (c.preset_change) {
-      c.preset = std::move(c.requested_preset);
-      c.preset_change = false;
-      reload = true;
-    }
-  }
   if (!c.setup_error.empty()) {
     set_failure(c, c.setup_error);
     return Done::SetupFailed;
@@ -171,6 +172,7 @@ Done setup(Core& c, bool restart, uint32_t* latency) {
         log_warning("Processing stacji " + c.station_id + ": Stereo Tool nie przyjął portu interfejsu WWW " +
                     std::to_string(c.web_port) + " (interfejs WWW wyłączony)");
     }
+    take_requested_preset(c);
     if (!st->failed() && !c.preset.empty() && !st->load_preset(c.preset, &err)) {
       set_failure(c, err);
       return Done::SetupFailed;  // the instance is deleted here: no ~600 MB kept for nothing
@@ -181,7 +183,7 @@ Done setup(Core& c, bool restart, uint32_t* latency) {
     }
     c.st = std::move(st);
     c.web_port_active.store(web ? c.web_port : 0);
-  } else if (reload) {
+  } else if (take_requested_preset(c)) {
     std::string err;
     if (!c.st->load_preset(c.preset, &err)) {
       set_failure(c, err);
@@ -327,6 +329,8 @@ ProcessingWorker::ProcessingWorker(const ProcessingSettings& s, std::string stat
       in_(kQueueFrames),
       core_(std::make_shared<Core>()),
       output_tap_(s.output_tap) {
+  // before the output thread exists: its first block already has somewhere to go
+  streams_ = std::make_shared<const std::vector<std::shared_ptr<StreamWorker>>>(s.streams);
   Core& c = *core_;
   c.key = s.license_key;
   c.preset = s.preset_path;
@@ -464,6 +468,7 @@ std::string ProcessingWorker::reason_text(Reason why, uint64_t failure_id) const
     case Reason::Crash: return "Stereo Tool uległ awarii — uruchom ponownie usługę Bounce Encoder (" + failure + ")";
     case Reason::RestartWaits:
       return "Stereo Tool nie odpowiada — ponowne uruchomienie czeka, aż zakończy bieżące wywołanie";
+    case Reason::Saving: return "zapis presetu Stereo Tool (do jego końca sygnał bez processingu)";
   }
   return {};
 }
@@ -553,12 +558,6 @@ void ProcessingWorker::take_streams() {
 }
 
 bool ProcessingWorker::falling_behind(int64_t now) {
-  if (core_->side_busy.load(std::memory_order_relaxed)) {
-    // a save between two blocks: only the queue's limit counts; being stuck and the backlog
-    // window count from its end
-    job_posted_ns_ = now;
-    window_ns_ = 0;
-  }
   if (pending_ == Pending::Job && now - job_posted_ns_ > kMaxBehindNs) return true;  // stuck in a call
   const size_t backlog = in_.size_frames();
   // the queue would drop audio soon, unless Stereo Tool is draining it (a burst after a stall)
@@ -591,6 +590,7 @@ bool ProcessingWorker::falling_behind(int64_t now) {
 }
 
 void ProcessingWorker::go_dry(Reason why, ProcessingState state) {
+  resume_after_save_ = false;
   // a crossfade back over kRampFrames: the processed ring holds that much beyond what was emitted
   if (mode_ == Mode::Processed) mix_.set_target(0.0);
   mode_ = Mode::Dry;
@@ -600,9 +600,29 @@ void ProcessingWorker::go_dry(Reason why, ProcessingState state) {
   set_state(state, why);
 }
 
+bool ProcessingWorker::preset_pending() const {
+  std::lock_guard lock(core_->m);
+  return core_->preset_change;
+}
+
+// Back into processing after a save that took the output into the bypass: the instance and its
+// licence check are still good, only the blocks of the save went past it. A new session starts at
+// the next input frame (what Stereo Tool still holds from before is not used); no restart, no
+// setup, no new licence check unless none had passed yet.
+void ProcessingWorker::resume_session() {
+  resume_after_save_ = false;
+  if (mode_ != Mode::Dry || ProcessingReason((status_.load() >> kReasonShift) & 0xFF) != Reason::Saving) return;
+  session_start_ = written_;
+  proc_end_ = written_;
+  mode_ = Mode::Probation;
+  licence_ok_ = core_->licence.load() == 1;
+  if (!licence_ok_) set_state(ProcessingState::Bypass, Reason::LicenceCheck);
+}
+
 void ProcessingWorker::begin_restart() {
   restart_wanted_ = false;
   reload_wanted_ = false;  // the Stereo Tool thread takes the preset set last
+  resume_after_save_ = false;
   go_dry(Reason::Starting, ProcessingState::Bypass);
   {
     std::lock_guard lock(core_->m);
@@ -674,10 +694,27 @@ bool ProcessingWorker::take_result(bool wait) {
 }
 
 void ProcessingWorker::wait_job() {
+  int64_t save_from = 0;  // the Stereo Tool thread is saving a preset since (0: not)
   while (running_.load(std::memory_order_relaxed)) {
     const bool done = take_result(true);
     if (mode_ == Mode::Dry) return;  // the result ended processing
-    if (falling_behind(platform::monotonic_ns())) {
+    const int64_t now = platform::monotonic_ns();
+    if (core_->side_busy.load(std::memory_order_relaxed)) {
+      // a save before this block: not "too slow"; past kMaxBehindNs the unprocessed signal goes on
+      // the air until the save is over (resume_session), and being stuck and the backlog window
+      // count from its end
+      if (save_from == 0) save_from = now;
+      if (now - save_from > kMaxBehindNs) {
+        go_dry(Reason::Saving, ProcessingState::Bypass);
+        resume_after_save_ = true;
+        return;
+      }
+      job_posted_ns_ = now;
+      window_ns_ = 0;
+      if (done) return;
+      continue;
+    }
+    if (falling_behind(now)) {
       // "kolejka > 200 ms": a block still at Stereo Tool stays there; its result is dropped
       go_dry(Reason::TooSlow, ProcessingState::Bypass);
       return;
@@ -752,20 +789,25 @@ void ProcessingWorker::run() {
   while (running_.load(std::memory_order_relaxed)) {
     take_streams();
     if (restart_.exchange(false)) restart_wanted_ = true;
-    if (preset_change_.exchange(false)) restart_wanted_ = reload_wanted_ = true;
+    if (preset_change_.exchange(false)) reload_wanted_ = true;
     if (pending_ != Pending::None) take_result(false);
-    if (restart_wanted_) {
-      if (pending_ == Pending::None)
-        begin_restart();
-      else if (pending_ == Pending::Setup)
-        // a (re)start is under way already; a new preset waits for it (it may have missed it)
-        restart_wanted_ = reload_wanted_;
-      else
+    if (resume_after_save_ && pending_ == Pending::None && !core_->side_busy.load(std::memory_order_relaxed))
+      resume_session();
+    if (restart_wanted_ || reload_wanted_) {
+      if (pending_ == Pending::None) {
+        if (restart_wanted_ || preset_pending())
+          begin_restart();
+        else
+          reload_wanted_ = false;  // the setup that just ran loaded it already
+      } else if (pending_ == Pending::Setup) {
+        restart_wanted_ = false;  // a (re)start is under way already; a new preset waits for its end
+      } else
         set_state(ProcessingState(status_.load() >> kStateShift), Reason::RestartWaits);  // a block stuck in Stereo Tool
     }
 
     const size_t n = in_.pop(block_.data(), kBlockFrames, kPopWaitMs);
     if (n == 0) continue;
+    take_streams();  // a list set while it waited goes with this block already
     for (size_t k = 0; k < n; ++k) {
       const size_t i = size_t((written_ + int64_t(k)) & kRingMask) * 2;
       dry_[i] = block_[k * 2];

@@ -3,9 +3,16 @@
 #include "bam/encoder/preset_store.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <system_error>
+
+#ifdef _WIN32
+#include <io.h>  // _commit, _fileno
+#else
+#include <unistd.h>  // fsync, fileno
+#endif
 
 #include "bam/encoder/config.hpp"
 #include "bam/encoder/data_dir.hpp"
@@ -46,6 +53,30 @@ std::vector<std::pair<std::string, uint64_t>> scan(const std::string& dir) {
     out.emplace_back(name, fec ? 0 : uint64_t(size));
   }
   return out;
+}
+
+std::FILE* open_file(const std::string& path, bool write) {
+#ifdef _WIN32
+  return _wfopen(fs_path(path).c_str(), write ? L"wb" : L"r+b");
+#else
+  return std::fopen(path.c_str(), write ? "wb" : "r+b");
+#endif
+}
+
+// Flushed to the disk, so a power cut after the rename never leaves an empty preset (like
+// save_config_file). `data` null: the file as it is (written by Stereo Tool).
+bool write_synced(const std::string& path, const std::string_view* data) {
+  std::FILE* f = open_file(path, data != nullptr);
+  if (!f) return false;
+  bool ok = true;
+  if (data) ok = std::fwrite(data->data(), 1, data->size(), f) == data->size();
+  ok = ok && std::fflush(f) == 0;
+#ifdef _WIN32
+  ok = ok && _commit(_fileno(f)) == 0;
+#else
+  ok = ok && fsync(fileno(f)) == 0;
+#endif
+  return std::fclose(f) == 0 && ok;
 }
 
 PresetResult fail(PresetError e, std::string message) { return PresetResult{e, std::move(message)}; }
@@ -154,16 +185,10 @@ PresetResult PresetStore::put(std::string_view name, std::string_view data) {
     return fail(PresetError::Failed, err);
   // written next to it, then renamed: a preset is never seen half written
   const std::string tmp = temp_path_locked();
-  {
-    std::ofstream f(fs_path(tmp), std::ios::binary | std::ios::trunc);
-    f.write(data.data(), std::streamsize(data.size()));
-    f.flush();
-    if (!f) {
-      f.close();
-      std::error_code ec;
-      fs::remove(fs_path(tmp), ec);
-      return fail(PresetError::Failed, "nie udało się zapisać presetu " + in_quotes(name));
-    }
+  if (!write_synced(tmp, &data)) {
+    std::error_code ec;
+    fs::remove(fs_path(tmp), ec);
+    return fail(PresetError::Failed, "nie udało się zapisać presetu " + in_quotes(name));
   }
   std::error_code ec;
   fs::rename(fs_path(tmp), fs_path(join(presets_dir(), name)), ec);
@@ -218,6 +243,8 @@ PresetResult PresetStore::commit(std::string_view name, const std::string& temp_
     r = fail(PresetError::Failed, "Stereo Tool nie zapisał presetu " + in_quotes(name));
   else if (size > kMaxPresetBytes)
     r = fail(PresetError::TooLarge, "preset większy niż " + std::to_string(kMaxPresetBytes / (1024 * 1024)) + " MB");
+  else if (!write_synced(temp_path, nullptr))
+    r = fail(PresetError::Failed, "nie udało się zapisać presetu " + in_quotes(name));
   else
     r = check_new_locked(name);  // an upload of that name may have come meanwhile
   if (r.ok()) {

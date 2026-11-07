@@ -1169,4 +1169,78 @@ TEST_CASE("encoder config: the same Stereo Tool key on two stations is a warning
   }
 }
 
+TEST_CASE("encoder config: Stereo Tool web port slots are given once and never renumbered") {
+  auto c = two_stations();
+  CHECK(c.stations[0].processing.web_port_slot == -1);  // not given yet
+  CHECK(be::validate_config(c).empty());                // -1 is valid (normalize gives one)
+  be::normalize_config(c);
+  CHECK(c.stations[0].processing.web_port_slot == 0);
+  CHECK(c.stations[1].processing.web_port_slot == 1);
+  // in the file and the API form, read back as they are
+  CHECK(contains(be::config_to_json(c), "\"web_port_slot\": 1"));
+  CHECK(contains(be::config_to_api_json(c), "\"web_port_slot\": 1"));
+  std::string err;
+  auto back = be::config_from_json(be::config_to_json(c), &err);
+  REQUIRE_MESSAGE(back, err);
+  CHECK(back->stations[1].processing.web_port_slot == 1);
+  CHECK_FALSE(be::config_from_json(R"({"version":1,"stations":[{"processing":{"web_port_slot":"1"}}]})", &err));
+  CHECK_MESSAGE(contains(err, "stations[0].processing.web_port_slot"), err);
+
+  // the first station deleted, a new one added: "Radio Dwa" keeps slot 1, the new one gets 0
+  c.stations.erase(c.stations.begin());
+  be::StationConfig three;
+  three.name = "Radio Trzy";
+  c.stations.push_back(three);
+  be::normalize_config(c);
+  CHECK(c.stations[0].processing.web_port_slot == 1);
+  CHECK(c.stations[1].processing.web_port_slot == 0);
+  // moved to the front: nothing changes
+  std::swap(c.stations[0], c.stations[1]);
+  be::normalize_config(c);
+  CHECK(c.stations[0].processing.web_port_slot == 0);
+  CHECK(c.stations[1].processing.web_port_slot == 1);
+  CHECK(be::validate_config(c).empty());
+
+  // an update that leaves the slot out (-1) keeps the stored one (same station id)
+  auto update = c;
+  update.stations[1].processing.web_port_slot = -1;
+  be::merge_passwords(update, c);
+  be::normalize_config(update);
+  CHECK(update.stations[1].processing.web_port_slot == 1);
+
+  // duplicates and slots out of range are errors naming the station
+  auto dup = c;
+  dup.stations[1].processing.web_port_slot = 0;
+  auto issues = be::validate_config(dup);
+  const auto* i = find_issue(issues, "stations[1].processing.web_port_slot");
+  REQUIRE_MESSAGE(i, dump(issues));
+  CHECK_MESSAGE(contains(i->message, "„Radio Trzy”"), i->message);
+  CHECK_FALSE(find_issue(issues, "stations[0].processing.web_port_slot"));
+  for (int bad : {-2, 16, 100}) {
+    auto out = c;
+    out.stations[0].processing.web_port_slot = bad;
+    CHECK_MESSAGE(find_issue(be::validate_config(out), "stations[0].processing.web_port_slot"), bad);
+    be::normalize_config(out);  // a given slot, even a bad one, is not moved by normalize
+    CHECK(out.stations[0].processing.web_port_slot == bad);
+  }
+}
+
+TEST_CASE("encoder config: station ids are unique without regard to case") {
+  auto c = sample();
+  be::StationConfig other;
+  other.id = "S1";  // "s1" in another case: the same home folder on Windows
+  other.name = "Wielka";
+  c.stations.push_back(other);
+  auto issues = be::validate_config(c);
+  const auto* i = find_issue(issues, "stations[1].id");
+  REQUIRE_MESSAGE(i, dump(issues));
+  CHECK_MESSAGE(contains(i->message, "wielkość liter"), i->message);
+  // a new station never gets an id that differs from one only in case
+  c.stations[1].id.clear();
+  c.stations[0].id = "S1";
+  be::normalize_config(c);
+  CHECK(c.stations[1].id == "s2");
+  CHECK(be::validate_config(c).empty());
+}
+
 #endif  // BAM_WITH_CODECS

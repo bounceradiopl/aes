@@ -42,8 +42,9 @@ inline constexpr double kGainMinDb = -60.0;  // inputs and streams, 0.5 dB steps
 inline constexpr double kGainMaxDb = 12.0;
 inline constexpr double kMaxDelaySeconds = 60.0;  // input delay, 0.1 s steps
 inline constexpr int kDefaultEncoderHttpPort = 8070;
-// Stereo Tool web interface (127.0.0.1 only): one port per station, base + station index, so the
-// ports base … base + kMaxStations - 1 are taken; they may not hold the panel port.
+// Stereo Tool web interface (127.0.0.1 only): one port per station, base + the station's web port
+// slot (ProcessingConfig::web_port_slot, 0 … kMaxStations - 1), so the ports base … base +
+// kMaxStations - 1 are taken; they may not hold the panel port.
 inline constexpr int kDefaultStereoToolWebPortBase = 8100;
 inline constexpr int kMinStereoToolWebPortBase = 1024;
 inline constexpr int kMaxStereoToolWebPortBase = 65000;
@@ -83,6 +84,11 @@ struct ProcessingConfig {
   // Update only ("license_key_clear"): remove the stored key. Consumed by merge_passwords,
   // never written to the file or the API form.
   bool license_key_clear = false;
+  // The station's Stereo Tool web interface port is stereotool_web_port_base + this slot
+  // (0 … kMaxStations - 1, unique among the stations). -1: none yet; normalize_config gives every
+  // station without one the lowest free slot, and a slot is never renumbered afterwards, so
+  // deleting or moving other stations never moves a station's port (ruling S3).
+  int web_port_slot = -1;
 };
 
 struct StationConfig {
@@ -149,7 +155,10 @@ std::optional<EncoderConfig> config_from_json(std::string_view text, std::string
 // Processing: the preset name (valid_preset_name) and the shape of every key ("<…>", printable
 // ASCII, at most 256 characters) are always checked; processing switched on (on any station,
 // like an enabled stream) needs a preset and a key (the station's or the default one). The
-// Stereo Tool web port base is 1024–65000 and its 16 ports may not hold the panel port.
+// Stereo Tool web port base is 1024–65000 and its 16 ports may not hold the panel port. Web port
+// slots are -1 (not assigned yet) or 0 … kMaxStations - 1, and unique.
+// Station ids are unique without regard to case (each names a folder, and Windows file names
+// ignore case).
 // No message quotes a key.
 std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c);
 // Non-blocking warnings (same form as the issues, for the API and the log): the same effective
@@ -158,8 +167,9 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c);
 std::vector<EncoderConfigIssue> config_warnings(const EncoderConfig& c);
 // Rounds gains to 0.5 dB and delays to 0.1 s, raises input latencies below "source ptime + 1 ms",
 // names unnamed inputs after their SDP session (control characters removed, cut to 64 bytes on a
-// whole UTF-8 character), assigns ids to new stations and streams and trims spaces, tabs and line
-// ends around pasted Stereo Tool keys.
+// whole UTF-8 character), assigns ids to new stations and streams, gives each station without a
+// Stereo Tool web port slot the lowest free one (in station order; slots already given, valid or
+// not, are left as they are) and trims spaces, tabs and line ends around pasted Stereo Tool keys.
 // Returns Polish notices for the changes the user should hear about (raised latencies).
 std::vector<std::string> normalize_config(EncoderConfig& c);
 
@@ -174,7 +184,8 @@ EncoderConfig mask_passwords(const EncoderConfig& c);
 // password hash always comes from `previous` (it changes only through the password endpoint).
 // Stereo Tool keys: a station's empty (or blank) key takes the key of the station of `previous`
 // with the same id, the empty default key takes the stored default key, unless the matching
-// "clear" flag was sent; the flags are reset here.
+// "clear" flag was sent; the flags are reset here. A station without a web port slot (-1, e.g.
+// left out by the panel) takes the slot of the station of `previous` with the same id.
 void merge_passwords(EncoderConfig& next, const EncoderConfig& previous);
 
 // Reads the configuration file; *missing = true when it does not exist (then nullopt, no error).

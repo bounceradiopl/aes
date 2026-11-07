@@ -843,6 +843,69 @@ TEST_CASE("processing: the settings are saved on the Stereo Tool thread while pr
   CHECK_MESSAGE(contains(err, "zatrzymany"), err);
 }
 
+TEST_CASE("processing: a save longer than 200 ms bypasses as a save and comes back on its own") {
+  UseFake use;
+  TempDir dir("slowsave");
+  fake().set("gain", 0.5);
+  fake().set("latency", 512);
+  Collector col;
+  Input input;
+  PW w(settings(col), "ss");
+  REQUIRE(feed_until(w, input, be::ProcessingState::Running));
+  std::atomic<bool> stop{false};
+  std::thread feeder([&] {
+    while (!stop) feed(w, input, 480, 10'000'000);  // real time, as the station pushes
+  });
+  fake().set("save_sleep_us", 500000);
+  std::string err;
+  const bool saved = w.save_preset((fs::path(dir.path) / "slow.sts").string(), 5000, &err);
+  const bool back = wait_until([&] { return w.status().state == be::ProcessingState::Running; }, 3000);
+  bp::sleep_ns(300'000'000);
+  stop = true;
+  feeder.join();
+  fake().set("save_sleep_us", 0);
+  CHECK_MESSAGE(saved, err);
+  CHECK(back);
+  const auto lines = event_lines(w);
+  size_t saving = SIZE_MAX;
+  for (size_t i = 0; i < lines.size(); ++i)
+    if (contains(lines[i], "bypass: zapis presetu")) saving = i;
+  REQUIRE_MESSAGE(saving != SIZE_MAX, "no save bypass among the events");
+  for (const auto& l : lines) CHECK_MESSAGE(!contains(l, "nie nadąża"), l);
+  for (size_t i = saving; i < lines.size(); ++i) CHECK_MESSAGE(!contains(lines[i], "uruchamianie"), lines[i]);  // no restart
+  CHECK(lines.back() == "running: ");
+  CHECK(fake().value("latency_calls") == 1);
+  REQUIRE(drained(w, col, input));
+  const Path p = analyse(input.in, col.copy(), 0.5f);
+  CHECK_MESSAGE(p.mismatches == 0, "first mismatch at frame " << p.first_mismatch);
+  CHECK(p.switches.size() == 3);  // in, out for the save, back in
+  CHECK(silent_blocks(col.copy()) == 0);
+}
+
+TEST_CASE("processing: a preset set while the instance is being built is loaded by that same setup") {
+  UseFake use;
+  TempDir dir("during");
+  const std::string p1 = (fs::path(dir.path) / "a.sts").string(), p2 = (fs::path(dir.path) / "b.sts").string();
+  std::ofstream(p1, std::ios::binary) << "[FakeStereoTool]\ngain=0.5\nlatency=512\n";
+  std::ofstream(p2, std::ios::binary) << "[FakeStereoTool]\ngain=0.25\nlatency=512\n";
+  fake().set("create_sleep_us", 300000);
+  Collector col;
+  Input input;
+  auto s = settings(col);
+  s.preset_path = p1;
+  PW w(s, "pd");
+  bp::sleep_ns(100'000'000);  // inside Create3
+  w.set_preset(p2);
+  REQUIRE(feed_until(w, input, be::ProcessingState::Running));
+  feed(w, input, 9600);
+  CHECK(fake().value("load_calls") == 1);
+  CHECK(fake().text("load_path") == std::optional<std::string>(p2));
+  CHECK(fake().value("latency_calls") == 1);  // one setup, no second restart
+  size_t starts = 0;
+  for (const auto& l : event_lines(w)) starts += l == "bypass: uruchamianie Stereo Tool";
+  CHECK(starts == 1);
+}
+
 TEST_CASE("processing: fade_out() ramps the output down over 240 frames, then hands over nothing") {
   UseFake use;
   Collector col;

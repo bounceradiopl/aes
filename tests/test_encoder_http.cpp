@@ -770,6 +770,30 @@ TEST_CASE("encoder service: startup configuration") {
     CHECK(c.stereotool_web_port_base == 8200);
     std::remove(path.c_str());
   }
+  SUBCASE("duplicate or out-of-range web port slots: a free one, processing stays on, the others keep theirs") {
+    const std::string path = unique_path("start");
+    json j = json::parse(be::config_to_json(be::default_encoder_config()));
+    j["stations"] = json::array({station_json("Pierwsza", true, "haslo1", "/a.mp3"), station_json("Druga", true, "haslo2", "/b.mp3"),
+                                 station_json("Trzecia", true, "haslo3", "/c.mp3")});
+    j["stations"][0]["processing"] = {{"enabled", true}, {"preset", "FM.sts"}, {"license_key", "<SLOT-TEST-KEY>"}, {"web_port_slot", 5}};
+    j["stations"][1]["processing"] = {{"enabled", true}, {"preset", "FM.sts"}, {"license_key", "<SLOT-TEST-KEY2>"}, {"web_port_slot", 5}};
+    j["stations"][2]["processing"] = {{"web_port_slot", 40}};
+    std::ofstream(path) << j.dump();
+    const be::EncoderConfig c = be::load_startup_config(path);
+    CHECK(be::validate_config(c).empty());
+    REQUIRE(c.stations.size() == 3);
+    CHECK(c.stations[0].processing.web_port_slot == 5);  // the first holder keeps it
+    CHECK(c.stations[1].processing.web_port_slot == 0);  // the lowest free ones
+    CHECK(c.stations[2].processing.web_port_slot == 1);
+    CHECK(c.stations[1].processing.enabled);  // never a reason to switch processing off
+    CHECK(c.stations[1].enabled);
+    CHECK_FALSE(exists(path + ".bad"));
+    bool logged = false;
+    for (const auto& e : bam::Logger::instance().recent())
+      logged = logged || e.message.find("Stacja „Druga”: nowy port interfejsu WWW Stereo Tool 8100") != std::string::npos;
+    CHECK(logged);
+    std::remove(path.c_str());
+  }
 }
 
 TEST_CASE("encoder HTTP: bodies without a length, chunked or too large are refused before they are read") {

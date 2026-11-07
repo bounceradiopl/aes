@@ -65,7 +65,9 @@ class EncoderHttpServer {
 //    processing): its processing is switched off, a preset name or key of the wrong shape is
 //    dropped, the station runs unprocessed; a bad default key is dropped; before a key is
 //    dropped the file is kept as "<path>.bad" and the drop is logged (never the key itself);
-//    a bad web port base goes back to 8100 (8200 when the panel port is among 8100–8115).
+//    a bad web port base goes back to 8100 (8200 when the panel port is among 8100–8115); a
+//    duplicate or out-of-range web port slot is replaced by the lowest free one (logged), the
+//    other stations keep theirs.
 //  - the warnings of config_warnings (the same Stereo Tool key on two stations) are logged.
 EncoderConfig load_startup_config(const std::string& path);
 

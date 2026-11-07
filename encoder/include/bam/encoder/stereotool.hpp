@@ -31,6 +31,7 @@ struct StereoToolInfo {
   std::string error;   // Polish, for the panel, when not available
   int abandoned = 0;   // instances abandoned after a crash in the library (process-wide)
   bool checked = false;  // the library was looked for (stereotool_peek: not yet when false)
+  bool loading = false;  // stereotool_peek: being loaded right now (nothing else known yet)
 };
 
 // The library, loaded once per search-dir setting (default: the program folder). Before the
@@ -41,6 +42,7 @@ struct StereoToolInfo {
 StereoToolInfo stereotool_info();
 // The same, without looking for the library when nothing has asked for it yet (checked false):
 // the engine's status, which must not load the 117 MB library on an encoder without processing.
+// Never waits for a load under way either: then loading is true (and error says so).
 StereoToolInfo stereotool_peek();
 
 // File names searched in each dir: libStereoTool_64.dll (Windows x64), libStereoTool_64.dylib

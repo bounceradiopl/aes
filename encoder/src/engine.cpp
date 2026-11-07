@@ -69,6 +69,7 @@ constexpr int64_t kRetryResetNs = 600'000'000'000LL;
 std::mutex g_retry_m;
 std::vector<int64_t> g_retry_waits_ns;  // tests (empty: kRetryWaitsNs)
 int64_t g_retry_reset_ns = 0;           // tests (0: kRetryResetNs)
+std::function<void()> g_built_hook;     // tests, under g_retry_m
 
 int64_t retry_wait_ns(int retries) {
   std::lock_guard lock(g_retry_m);
@@ -106,7 +107,8 @@ void log_event(const std::string& who, const ProcessingEvent& e, uint32_t delay_
       log_info(who + "Stereo Tool przetwarza sygnał (opóźnienie " + ms_text(delay_frames * 1000.0 / kStationRate) + " ms)");
       break;
     case ProcessingState::Bypass:
-      if (e.reason_code == R::Starting || e.reason_code == R::LicenceCheck || e.reason_code == R::RestartWaits)
+      if (e.reason_code == R::Starting || e.reason_code == R::LicenceCheck || e.reason_code == R::RestartWaits ||
+          e.reason_code == R::Saving)
         log_info(who + e.reason);
       else
         log_warning(who + e.reason);
@@ -129,6 +131,10 @@ void set_processing_retry_ms(std::vector<int> waits_ms, int reset_ms) {
   g_retry_waits_ns.clear();
   for (int ms : waits_ms) g_retry_waits_ns.push_back(int64_t(ms) * 1'000'000);
   g_retry_reset_ns = int64_t(reset_ms) * 1'000'000;
+}
+void set_processing_built_hook(std::function<void()> hook) {
+  std::lock_guard lock(g_retry_m);
+  g_built_hook = std::move(hook);
 }
 }  // namespace detail::testing
 
@@ -204,6 +210,14 @@ struct EncoderEngine::Impl {
 
   void apply(const EncoderConfig& next);
   void update_inputs(StationRuntime& rt, const StationConfig& sc);
+  struct ProcessingWanted {  // what next.stations[index] asks for
+    bool want = false;
+    std::string key, path;
+    int port = 0;
+  };
+  ProcessingWanted processing_wanted(const EncoderConfig& next, size_t index) const;
+  static bool replaces(const ProcessingRuntime& p, const ProcessingWanted& w);
+  void fade_out_leaving_workers(const EncoderConfig& next);
   void update_processing(StationRuntime& rt, const EncoderConfig& next, size_t index,
                          std::vector<std::shared_ptr<ProcessingWorker>>& finished);
   void processing_housekeeping(StationRuntime& rt, int64_t now);
@@ -278,26 +292,50 @@ void EncoderEngine::Impl::update_inputs(StationRuntime& rt, const StationConfig&
 // its output out first; the station then fades its own output in (StationPlan::fade_in), so the
 // jump back by the worker's delay is two 5 ms ramps, like a delay change. Its stop is left to the
 // caller (`finished`), after the new plan is out.
+// The station's streams that run (an inactive one is never fed).
+static std::vector<std::shared_ptr<StreamWorker>> active_streams(const StationRuntime& rt) {
+  std::vector<std::shared_ptr<StreamWorker>> streams;
+  for (const StreamConfig& s : rt.cfg.streams) {
+    auto it = rt.streams.find(s.id);
+    if (it != rt.streams.end() && it->second->active()) streams.push_back(it->second);
+  }
+  return streams;
+}
+
+EncoderEngine::Impl::ProcessingWanted EncoderEngine::Impl::processing_wanted(const EncoderConfig& next, size_t index) const {
+  const StationConfig& sc = next.stations[index];
+  ProcessingWanted w;
+  w.want = sc.processing.enabled;
+  if (w.want) {
+    w.key = effective_stereotool_key(next, sc);
+    // the station's own slot (ruling S3: never renumbered, so other stations' edits never move
+    // it); validate_config keeps base … base + kMaxStations - 1 clear of the panel port. A
+    // configuration that was not normalized has none yet: then the station's position.
+    const int slot = sc.processing.web_port_slot >= 0 ? sc.processing.web_port_slot : int(index);
+    w.port = slot < kMaxStations ? next.stereotool_web_port_base + slot : 0;
+    // a preset not there (yet): Stereo Tool cannot load it, the station runs unprocessed and says so
+    w.path = store.path_of(sc.processing.preset);
+  }
+  return w;
+}
+
+// The worker goes: processing switched off, or another key or web port (a new instance).
+bool EncoderEngine::Impl::replaces(const ProcessingRuntime& p, const ProcessingWanted& w) {
+  return p.worker && (!w.want || w.key != p.key || w.port != p.web_port);
+}
+
 void EncoderEngine::Impl::update_processing(StationRuntime& rt, const EncoderConfig& next, size_t index,
                                             std::vector<std::shared_ptr<ProcessingWorker>>& finished) {
   const StationConfig& sc = next.stations[index];
   ProcessingRuntime& p = rt.proc;
   const std::string who = processing_who(sc.name);
-  const bool want = sc.processing.enabled;
-  std::string key, path;
-  int port = 0;
-  if (want) {
-    key = effective_stereotool_key(next, sc);
-    // the station's position in the configuration: stable while the stations before it stay
-    // (validate_config keeps base … base + kMaxStations - 1 clear of the panel port)
-    port = index < size_t(kMaxStations) ? next.stereotool_web_port_base + int(index) : 0;
-    // a preset not there (yet): Stereo Tool cannot load it, the station runs unprocessed and says so
-    path = store.path_of(sc.processing.preset);
-  }
-  if (p.worker && (!want || key != p.key || port != p.web_port)) {
-    p.worker->fade_out();
-    const int64_t until = platform::monotonic_ns() + kFadeOutWaitNs;
-    while (!p.worker->faded_out() && platform::monotonic_ns() < until) platform::sleep_ns(1'000'000);
+  const ProcessingWanted w = processing_wanted(next, index);
+  const bool want = w.want;
+  const std::string& key = w.key;
+  const std::string& path = w.path;
+  const int port = w.port;
+  if (replaces(p, w)) {
+    p.worker->fade_out();  // apply() asked for it already and waited for every station at once
     if (!p.worker->faded_out()) {
       // its output thread must be done before the station's new path hands anything to the streams
       log_warning(who + "wyjście processingu nie wyciszyło się w " + wait_text(kFadeOutWaitNs) + ", zatrzymane");
@@ -314,11 +352,18 @@ void EncoderEngine::Impl::update_processing(StationRuntime& rt, const EncoderCon
     s.license_key = key;
     s.preset_path = path;
     s.web_port = port;
+    s.streams = active_streams(rt);  // from its first block on, however long the rest takes
     if (path.empty()) s.setup_error = "brak folderu presetów Stereo Tool";  // never Stereo Tool's defaults on air
     std::string err;
     s.home_dir = store.station_home(sc.id, &err);
     if (s.home_dir.empty() && !store.root().empty()) log_warning(who + err + " (Stereo Tool użyje swojego folderu)");
     p.worker = std::make_shared<ProcessingWorker>(s, sc.id);
+    std::function<void()> hook;
+    {
+      std::lock_guard lock(g_retry_m);
+      hook = g_built_hook;
+    }
+    if (hook) hook();
     p.key = key;
     p.web_port = port;
     p.preset = sc.processing.preset;
@@ -333,6 +378,22 @@ void EncoderEngine::Impl::update_processing(StationRuntime& rt, const EncoderCon
   }
 }
 
+// Every worker that goes in `next` starts its 5 ms fade out now, and they are waited for together
+// (at most kFadeOutWaitNs in all, not per station).
+void EncoderEngine::Impl::fade_out_leaving_workers(const EncoderConfig& next) {
+  std::vector<ProcessingWorker*> leaving;
+  for (size_t index = 0; index < next.stations.size(); ++index) {
+    const StationConfig& sc = next.stations[index];
+    auto it = stations.find(sc.id);
+    if (!sc.enabled || it == stations.end() || !replaces(it->second->proc, processing_wanted(next, index))) continue;
+    it->second->proc.worker->fade_out();
+    leaving.push_back(it->second->proc.worker.get());
+  }
+  const int64_t until = platform::monotonic_ns() + kFadeOutWaitNs;
+  for (ProcessingWorker* w : leaving)
+    while (!w->faded_out() && platform::monotonic_ns() < until) platform::sleep_ns(1'000'000);
+}
+
 void EncoderEngine::Impl::publish(StationRuntime& rt) {
   auto plan = std::make_shared<StationPlan>();
   uint32_t latency = 0;
@@ -343,11 +404,7 @@ void EncoderEngine::Impl::publish(StationRuntime& rt) {
     latency = std::max(latency, e->rx->latency_frames);
   }
   plan->latency_frames = latency ? latency : kDefaultLatencyFrames;
-  std::vector<std::shared_ptr<StreamWorker>> streams;
-  for (const StreamConfig& s : rt.cfg.streams) {
-    auto it = rt.streams.find(s.id);
-    if (it != rt.streams.end() && it->second->active()) streams.push_back(it->second);
-  }
+  std::vector<std::shared_ptr<StreamWorker>> streams = active_streams(rt);
   if (rt.proc.worker) {
     // the worker feeds the streams (taken at its next block, before the station's first push)
     rt.proc.worker->set_streams(std::move(streams));
@@ -423,6 +480,7 @@ void EncoderEngine::Impl::apply(const EncoderConfig& next) {
     stop_workers(std::move(retired));
   }
 
+  fade_out_leaving_workers(next);
   std::map<std::string, std::unique_ptr<StationRuntime>> kept;
   std::vector<std::shared_ptr<ProcessingWorker>> finished;  // processing workers that go
   for (size_t index = 0; index < next.stations.size(); ++index) {
@@ -552,7 +610,8 @@ void EncoderEngine::Impl::processing_housekeeping(StationRuntime& rt, int64_t no
       if (p.retrying) log_warning(who + "ponowna próba nieudana: Stereo Tool znów nie nadąża");
       p.retrying = false;
       schedule();
-    } else if (e.reason_code != R::Starting && e.reason_code != R::LicenceCheck && e.reason_code != R::RestartWaits) {
+    } else if (e.reason_code != R::Starting && e.reason_code != R::LicenceCheck && e.reason_code != R::RestartWaits &&
+               e.reason_code != R::Saving) {  // these pass on their own
       if (p.retrying) log_warning(who + "ponowna próba nieudana: " + e.reason);
       p.retrying = false;
       p.retry_at_ns = 0;  // not retried automatically
@@ -756,8 +815,21 @@ EncoderStatus EncoderEngine::status() const {
 std::vector<PresetInfo> EncoderEngine::list_presets() const { return impl_->store.list(); }
 
 PresetResult EncoderEngine::put_preset(std::string_view name, std::string_view data) {
-  PresetResult r = impl_->store.put(name, data);
-  if (r.ok()) log_info("Stereo Tool: wgrano preset „" + std::string(name) + "”");
+  auto& m = *impl_;
+  PresetResult r = m.store.put(name, data);
+  if (!r.ok()) return r;
+  log_info("Stereo Tool: wgrano preset „" + std::string(name) + "”");
+  // a station that could not start for want of it starts now (one that runs keeps its settings)
+  std::lock_guard lock(m.m);
+  for (auto& [id, rt] : m.stations) {
+    ProcessingRuntime& p = rt->proc;
+    if (!p.worker || !same_preset_name(p.preset, name)) continue;
+    const ProcessingStatus st = p.worker->status();
+    if (st.state != ProcessingState::Error || st.reason_code != ProcessingReason::Setup) continue;
+    p.preset_path = m.store.path_of(name);
+    log_info(processing_who(rt->cfg.name) + "preset „" + std::string(name) + "” jest już dostępny: ponowne uruchomienie");
+    p.worker->set_preset(p.preset_path);
+  }
   return r;
 }
 

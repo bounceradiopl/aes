@@ -112,6 +112,7 @@ enum class ProcessingReason {
   Process,       // Stereo Tool failed while processing
   Crash,         // a crash in the library: nothing until the service restarts
   RestartWaits,  // a restart waits for a Stereo Tool call to return
+  Saving,        // a preset save took longer than 200 ms: unprocessed until it is over, then back
 };
 inline const char* processing_reason_name(ProcessingReason r) {
   switch (r) {
@@ -123,6 +124,7 @@ inline const char* processing_reason_name(ProcessingReason r) {
     case ProcessingReason::Process: return "process";
     case ProcessingReason::Crash: return "crash";
     case ProcessingReason::RestartWaits: return "restart_waits";
+    case ProcessingReason::Saving: return "saving";
     case ProcessingReason::None: break;
   }
   return "";
@@ -202,8 +204,8 @@ class EncoderEngine {
   // Processing (spec §3): a running station with processing switched on gets a processing worker
   // with the effective key (the station's or the default one), the preset from the presets
   // folder, its home folder and the web interface port stereotool_web_port_base + the station's
-  // position in the configuration (0-based, disabled stations counted: a station keeps its port
-  // as long as the stations before it stay). Switching processing on is seamless (the worker
+  // web port slot (ProcessingConfig::web_port_slot, never renumbered: deleting or moving other
+  // stations never moves it). Switching processing on is seamless (the worker
   // starts unprocessed with no delay; when Stereo Tool is ready the output pauses once for its
   // latency and crossfades in). A new preset is loaded into the running instance (crossfade to
   // the unprocessed signal and back, aligned). A new key, port or home folder builds a new

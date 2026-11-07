@@ -1291,7 +1291,107 @@ size_t longest_quiet(const Decoded& d, int limit) {
   return longest;
 }
 
+// Delays apply_config right after a processing worker is built (as a slow log line would).
+struct SlowBuild {
+  explicit SlowBuild(int64_t ns) {
+    be::detail::testing::set_processing_built_hook([ns] { bp::sleep_ns(ns); });
+  }
+  ~SlowBuild() { be::detail::testing::set_processing_built_hook({}); }
+  SlowBuild(const SlowBuild&) = delete;
+  SlowBuild& operator=(const SlowBuild&) = delete;
+};
+
+// Walks decoded frames from n0 (media sample t0) to the end: each frame must be `dry`, `proc`
+// (= dry x gain in float) or a frame of a 240-frame crossfade between them computed as the
+// worker does, with no frame skipped or repeated. Returns the mismatches; `switches` counts the
+// crossfades.
+size_t walk_path(const Decoded& d, size_t n0, uint64_t t0, float gain, int32_t (*sig)(uint64_t, int), size_t* switches) {
+  const size_t frames = d.samples.size() / 2;
+  auto x = [&](uint64_t t, int ch) { return to_float(sig(t, ch)); };
+  auto dry = [&](uint64_t t, int ch) { return pcm16(x(t, ch)); };
+  auto proc = [&](uint64_t t, int ch) { return pcm16(x(t, ch) * gain); };
+  auto fade = [&](uint64_t t, int ch, uint32_t k, bool to_proc) {
+    const double from = to_proc ? 0.0 : 1.0, target = to_proc ? 1.0 : 0.0;
+    const uint32_t left = be::kRampFrames - k;
+    const double a = left == 0 ? target : target + (from - target) * (double(left) / be::kRampFrames);
+    return pcm16(static_cast<float>(a * double(x(t, ch) * gain) + (1.0 - a) * double(x(t, ch))));
+  };
+  auto is = [&](size_t n, auto&& fn) { return d.samples[n * 2] == fn(t0 + (n - n0), 0) && d.samples[n * 2 + 1] == fn(t0 + (n - n0), 1); };
+  bool processed = false;
+  size_t bad = 0;
+  *switches = 0;
+  for (size_t n = n0; n < frames;) {
+    if (processed ? is(n, proc) : is(n, dry)) {
+      ++n;
+      continue;
+    }
+    const bool to = !processed;
+    if (is(n, [&](uint64_t t, int ch) { return fade(t, ch, 1, to); })) {
+      ++*switches;
+      for (uint32_t k = 1; k <= be::kRampFrames && n < frames; ++k, ++n)
+        bad += !is(n, [&](uint64_t t, int ch) { return fade(t, ch, k, to); });
+      processed = to;
+      continue;
+    }
+    ++bad;
+    ++n;
+  }
+  return bad;
+}
+
 }  // namespace
+
+TEST_CASE("encoder engine: a new processing worker passes on its first block (switch on, new instance)") {
+  UseFake use;
+  StDir dir("first");
+  FakeIcecast server;
+  const uint16_t port = 15243;
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  be::StationConfig s1 = station("s1", "Radio Pierwszy Blok");
+  be::InputConfig in;
+  in.sdp = make_sdp("A", "239.69.243.1", port);
+  in.latency_us = 20000;
+  s1.inputs = {in};
+  s1.streams = {stream("str1", be::Codec::Flac, 0, 48000, server.port(), "/f.ogg")};
+  s1.processing = processing("Half.sts");
+  s1.processing.enabled = false;
+  cfg.stations = {s1};
+  cfg = ready(cfg);
+  be::EncoderEngine engine(st_options(dir));
+  REQUIRE(engine.put_preset("Half.sts", fake_preset(0.5, 512)).ok());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  AesSender sender(engine, "239.69.243.1", port, sig_a);
+  REQUIRE(wait_for([&] { return sender.first_ts != 0; }, 5000));
+  const uint64_t inputs_from = sender.first_ts;
+  auto on_air_for = [&](uint64_t frames) {
+    const uint64_t from = media_now(engine);
+    REQUIRE(wait_for([&] { return media_now(engine) > from + frames; }, 20000));
+  };
+  on_air_for(48000 + 24000);
+  auto conn = server.latest("/f.ogg");
+  REQUIRE(conn);
+  const size_t before = decode_conn(server, *conn).samples.size() / 2;
+  REQUIRE(before > 24000);
+
+  SlowBuild slow(5'000'000);  // like one slow log line: the worker's output thread is waiting for audio before it gets its streams
+  cfg.stations[0].processing.enabled = true;
+  engine.apply_config(ready(cfg));
+  REQUIRE(processing_running(engine, "s1"));
+  on_air_for(48000);
+  // every frame from before the switch to the end: the input, then (crossfaded) the input at -6 dB
+  const Decoded dec = decode_conn(server, *conn);
+  const size_t n0 = before - 9600;
+  const SampleFn dry = [](uint64_t t, int ch) { return pcm16(to_float(sig_a(t, ch))); };
+  const auto t0 = find_start(dec, n0, 4800, dry, inputs_from, media_now(engine));
+  REQUIRE_MESSAGE(t0, "no window of the unprocessed input before the switch");
+  size_t switches = 0;
+  const size_t bad = walk_path(dec, n0, *t0, 0.5f, sig_a, &switches);
+  CHECK_MESSAGE(bad == 0, "frames not on the path (a lost or repeated block): " << bad);
+  CHECK(switches == 1);
+  CHECK(server.latest("/f.ogg")->id == conn->id);
+}
 
 TEST_CASE("encoder engine: a station through Stereo Tool, bit for bit; a preset change and switching it off and on never silence it") {
   UseFake use;
@@ -1446,6 +1546,7 @@ TEST_CASE("encoder engine: switching processing off fades out and in, switching 
   };
   REQUIRE(processing_running(engine, "s1"));
   on_air_for(48000);
+  SlowBuild slow(5'000'000);  // like one slow log line: a new worker's output thread waits for audio before it gets its streams
   cfg.stations[0].processing.enabled = false;  // fade out (worker) + fade in (station)
   engine.apply_config(ready(cfg));
   on_air_for(48000);
@@ -1453,11 +1554,14 @@ TEST_CASE("encoder engine: switching processing off fades out and in, switching 
   engine.apply_config(ready(cfg));
   REQUIRE(processing_running(engine, "s1"));
   on_air_for(48000);
-  cfg.stations[0].processing.license_key = kKey2;  // a new instance: fade out, fade in
-  engine.apply_config(ready(cfg));
-  REQUIRE(processing_running(engine, "s1"));
-  on_air_for(48000);
-  CHECK(fake().value("created") == 3);
+  for (const char* key : {kKey2, kKey1, kKey2}) {  // a new instance each time: fade out, fade in
+    cfg.stations[0].processing.license_key = key;
+    engine.apply_config(ready(cfg));
+    REQUIRE(processing_running(engine, "s1"));
+    on_air_for(24000);
+  }
+  on_air_for(24000);
+  CHECK(fake().value("created") == 5);
   CHECK(fake().text("create_key") == std::optional<std::string>(kKey2));
   CHECK(fake().value("live") == 1);
 
@@ -1482,7 +1586,7 @@ TEST_CASE("encoder engine: switching processing off fades out and in, switching 
   MESSAGE("largest step " << max_step << " LSB, zero frames " << zeros << ", processed frames " << processed);
   CHECK(max_step <= 16384 / 240 + 2);  // ramps only, never a cut
   CHECK(longest_zero <= 2);            // the end of a fade out, then the fade in
-  CHECK(zeros <= 4);                   // two switches away from a worker
+  CHECK(zeros <= 8);                   // four switches away from a worker
   CHECK(processed > 48000);
   CHECK(server.latest("/r.ogg")->id == conn->id);
 }
@@ -1534,12 +1638,21 @@ TEST_CASE("encoder engine: processing settings reach Stereo Tool; a new key or p
     CHECK(fake().value("created") == 2);
     CHECK(processing_of(engine, "s2").web_port == 8401);
   }
-  SUBCASE("the station moves to the front: its port follows its position") {
+  SUBCASE("other stations moved or deleted: the port stays, so does the instance (ruling S3)") {
     std::swap(cfg.stations[0], cfg.stations[1]);
     engine.apply_config(ready(cfg));
-    REQUIRE(processing_running(engine, "s2"));
-    CHECK(fake().value("created") == 2);
-    CHECK(processing_of(engine, "s2").web_port == 8300);
+    bp::sleep_ns(300'000'000);
+    CHECK(processing_of(engine, "s2").web_port == 8301);
+    cfg.stations.erase(cfg.stations.begin() + 1);  // the station that was before it
+    be::StationConfig added = station("", "Radio Nowa");
+    cfg.stations.push_back(added);
+    cfg = ready(cfg);
+    CHECK(cfg.stations[1].processing.web_port_slot == 0);  // the new one gets the free slot
+    engine.apply_config(cfg);
+    bp::sleep_ns(300'000'000);
+    CHECK(processing_of(engine, "s2").state == be::ProcessingState::Running);
+    CHECK(processing_of(engine, "s2").web_port == 8301);
+    CHECK(fake().value("created") == 1);
   }
   SUBCASE("only a stream or input change keeps the instance") {
     be::InputConfig in;
@@ -1552,7 +1665,8 @@ TEST_CASE("encoder engine: processing settings reach Stereo Tool; a new key or p
   }
   CHECK(fake().value("live") == 1);
   // the station stopped: its instance goes
-  cfg.stations[cfg.stations[0].id == "s2" ? 0 : 1].enabled = false;
+  for (auto& st : cfg.stations)
+    if (st.id == "s2") st.enabled = false;
   engine.apply_config(ready(cfg));
   CHECK(wait_for([] { return fake().value("live") == 0; }, 5000));
   CHECK(processing_of(engine, "s2").state == be::ProcessingState::Off);
@@ -1775,6 +1889,119 @@ TEST_CASE("encoder engine: a Stereo Tool too slow is retried automatically, a li
   CHECK(log_lines_with(who + "automatyczna ponowna próba") == retries_logged);
   CHECK(logged(who + "licencja Stereo Tool nie obejmuje funkcji"));
   CHECK(log_lines_with(kKey1) == 0);
+}
+
+TEST_CASE("encoder engine: a preset uploaded after the station asked for it starts its processing") {
+  UseFake use;
+  StDir dir("late");
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  be::StationConfig st = station("s1", "Radio Spóźniona");
+  st.processing = processing("Late.sts");
+  cfg.stations = {st};
+  cfg = ready(cfg);
+  be::EncoderEngine engine(st_options(dir));
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  REQUIRE(wait_for([&] { return processing_of(engine, "s1").state == be::ProcessingState::Error; }, 5000));
+  CHECK(processing_of(engine, "s1").reason_code == be::ProcessingReason::Setup);
+  REQUIRE(engine.put_preset("late.STS", fake_preset(0.5, 64)).ok());  // any case
+  CHECK(processing_running(engine, "s1", 5000));
+  CHECK(fake().text("load_path") == std::optional<std::string>((fs::path(dir.presets()) / "late.STS").string()));
+}
+
+TEST_CASE("encoder engine: the status does not wait for the Stereo Tool library to load") {
+  UseFake use;
+  StDir dir("loading");
+  REQUIRE(fake().value("version_calls") == 0);
+  fake().set("version_sleep_us", 1'000'000);  // the library takes a second to load
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  be::StationConfig st = station("s1", "Radio Ładowanie");
+  st.processing = processing("P.sts");
+  cfg.stations = {st};
+  cfg = ready(cfg);
+  be::EncoderEngine engine(st_options(dir));
+  REQUIRE(engine.put_preset("P.sts", fake_preset(0.5, 64)).ok());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);  // the worker's Stereo Tool thread loads it
+  REQUIRE(wait_for([] { return fake().value("version_calls") == 1; }, 2000));
+  const int64_t t0 = bp::monotonic_ns();
+  const be::EncoderStatus s = engine.status();
+  const int64_t took = bp::monotonic_ns() - t0;
+  CHECK_MESSAGE(took < 200'000'000, "status took " << took / 1'000'000 << " ms");
+  CHECK(s.stereotool.loading);
+  CHECK_FALSE(s.stereotool.available);
+  CHECK(processing_running(engine, "s1", 5000));
+  CHECK_FALSE(engine.status().stereotool.loading);
+  CHECK(engine.status().stereotool.available);
+}
+
+TEST_CASE("encoder engine: the retry waits repeat their last value and start over after a good stretch") {
+  UseFake use;
+  StDir dir("retry2");
+  struct Restore {
+    ~Restore() {
+      be::detail::testing::set_processing_retry_ms({}, 0);
+      be::detail::testing::set_processing_stop_timeout_ms(0);
+    }
+  } restore;
+  be::detail::testing::set_processing_retry_ms({300, 500}, 1500);  // stands for 30 s, 2 min ... and 10 min
+  be::detail::testing::set_processing_stop_timeout_ms(1000);
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  be::StationConfig st = station("s1", "Radio Licznik");
+  st.processing = processing("P.sts");
+  cfg.stations = {st};
+  cfg = ready(cfg);
+  be::EncoderEngine engine(st_options(dir));
+  REQUIRE(engine.put_preset("P.sts", fake_preset(0.5, 64)).ok());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  REQUIRE(processing_running(engine, "s1"));
+  const std::string who = "Processing stacji „Radio Licznik”: ";
+  auto lines = [&](const std::string& what) { return log_lines_with(who + what); };
+
+  fake().set("process_sleep_us", 300000);  // stuck: every retry fails
+  REQUIRE(wait_for([&] { return lines("automatyczna ponowna próba nr 3") == 1; }, 10000));
+  CHECK(lines("automatyczna ponowna próba za 300 ms") == 1);
+  CHECK(wait_for([&] { return lines("automatyczna ponowna próba za 500 ms") == 2; }, 3000));  // the last wait repeats
+  fake().set("process_sleep_us", 0);
+  REQUIRE(processing_running(engine, "s1", 5000));
+  CHECK(processing_of(engine, "s1").retries >= 3);
+  // a good stretch longer than the reset: the count starts over
+  CHECK(wait_for([&] { return processing_of(engine, "s1").retries == 0; }, 4000));
+  CHECK(processing_of(engine, "s1").state == be::ProcessingState::Running);
+  fake().set("process_sleep_us", 300000);
+  CHECK(wait_for([&] { return lines("automatyczna ponowna próba za 300 ms") == 2; }, 5000));  // the first wait again
+  fake().set("process_sleep_us", 0);
+}
+
+TEST_CASE("encoder engine: a slow save bypasses as a save, never as too slow, and needs no retry") {
+  UseFake use;
+  StDir dir("slowsave");
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  be::StationConfig st = station("s1", "Radio Wolny Zapis");
+  st.processing = processing("P.sts");
+  cfg.stations = {st};
+  cfg = ready(cfg);
+  be::EncoderEngine engine(st_options(dir));
+  REQUIRE(engine.put_preset("P.sts", fake_preset(0.5, 64)).ok());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  REQUIRE(processing_running(engine, "s1"));
+  fake().set("save_sleep_us", 600000);
+  const be::PresetResult r = engine.save_processing_preset("s1", "Wolny.sts");
+  fake().set("save_sleep_us", 0);
+  CHECK_MESSAGE(r.ok(), r.message);
+  CHECK(processing_running(engine, "s1", 3000));
+  bp::sleep_ns(300'000'000);
+  const std::string who = "Processing stacji „Radio Wolny Zapis”: ";
+  CHECK(logged(who + "zapis presetu"));
+  CHECK(log_lines_with(who + "Stereo Tool nie nadąża") == 0);
+  CHECK(log_lines_with(who + "automatyczna ponowna próba") == 0);
+  CHECK(fake().value("created") == 1);
 }
 
 #endif  // BAM_FAKE_STEREOTOOL_PATH

@@ -826,6 +826,7 @@ EncoderConfig startup_config(const std::string& path) {
     const auto issues = validate_config(cfg);
     if (issues.empty()) return cfg;
     std::set<size_t> bad;
+    bool reslot = false;
     for (const auto& i : issues) {
       if (pass == 0) log_warning("Konfiguracja: " + i.message);
       const auto place = issue_place(i.field);
@@ -833,6 +834,13 @@ EncoderConfig startup_config(const std::string& path) {
         if (i.field == "stereotool_default_key" && !cfg.stereotool_default_key.empty())
           drop_key(cfg.stereotool_default_key, "Domyślny klucz Stereo Tool");
         reset_global(cfg, i.field);
+        continue;
+      }
+      if (i.field.ends_with(".processing.web_port_slot") && place->station < cfg.stations.size()) {
+        // a duplicate or out-of-range slot (edited by hand): the station gets a free one below
+        if (pass == 1) log_warning("Konfiguracja: " + i.message);
+        cfg.stations[place->station].processing.web_port_slot = -1;
+        reslot = true;
         continue;
       }
       if (place->list == "processing") {  // also in pass 1: a default key dropped in pass 0 shows here
@@ -847,6 +855,14 @@ EncoderConfig startup_config(const std::string& path) {
         if (place->list == "inputs" && place->item < st.inputs.size()) st.inputs[place->item].enabled = false;
         if (place->list == "streams" && place->item < st.streams.size()) st.streams[place->item].enabled = false;
       }
+    }
+    if (reslot) {
+      normalize_config(cfg);  // the lowest free slots; every other station keeps its own
+      for (size_t k = 0; k < cfg.stations.size(); ++k)
+        for (const auto& i : issues)
+          if (i.field == "stations[" + std::to_string(k) + "].processing.web_port_slot")
+            log_warning("Stacja " + station_name(cfg.stations[k], k) + ": nowy port interfejsu WWW Stereo Tool " +
+                        std::to_string(cfg.stereotool_web_port_base + cfg.stations[k].processing.web_port_slot));
     }
     if (pass == 0) {
       // a station with an error does not start; it stays in the panel to be fixed

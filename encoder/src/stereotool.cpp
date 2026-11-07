@@ -6,10 +6,12 @@
 #include "bam/encoder/stereotool.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <mutex>
+#include <thread>
 
 #ifdef _MSC_VER
 #include <malloc.h>  // _resetstkoflw
@@ -233,6 +235,7 @@ struct Cache {
   ApiPtr api;
   StereoToolInfo info;
   std::vector<ApiPtr>* kept = new std::vector<ApiPtr>;
+  std::atomic<bool> loading{false};  // load() runs (under mutex): stereotool_peek does not wait for it
 
   // absolute dirs only: a relative one would depend on the working directory
   std::vector<std::string> search_dirs() const {
@@ -248,8 +251,10 @@ struct Cache {
   }
   void ensure_loaded() {
     if (tried) return;
+    loading.store(true);
     api = load(search_dirs(), *kept, info);
     tried = true;
+    loading.store(false);
   }
   StereoToolInfo current() const {
     StereoToolInfo i = info;
@@ -282,7 +287,19 @@ StereoToolInfo stereotool_info() {
 
 StereoToolInfo stereotool_peek() {
   auto& c = cache();
-  std::lock_guard<std::mutex> lock(c.mutex);
+  std::unique_lock<std::mutex> lock(c.mutex, std::defer_lock);
+  // the mutex is held for a moment by everything else, but for the whole load (a 117 MB library)
+  // by ensure_loaded(): then the answer is "loading", without waiting
+  while (!lock.try_lock()) {
+    if (c.loading.load()) {
+      StereoToolInfo i;
+      i.loading = true;
+      i.error = "ładowanie biblioteki Stereo Tool…";
+      i.abandoned = g_abandoned.load();
+      return i;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
   return c.current();
 }
 

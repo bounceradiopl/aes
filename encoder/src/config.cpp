@@ -141,6 +141,13 @@ std::string key_shape_error(std::string_view key) {
   return {};
 }
 
+// ASCII lower case (ids are ASCII): ids that differ only in case are the same folder on Windows.
+std::string ascii_lower(std::string s) {
+  for (char& ch : s)
+    if (ch >= 'A' && ch <= 'Z') ch = char(ch - 'A' + 'a');
+  return s;
+}
+
 bool is_alnum(char ch) { return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'); }
 
 bool in_gain_range(double db) { return db >= kGainMinDb && db <= kGainMaxDb; }
@@ -263,7 +270,8 @@ json to_json(const EncoderConfig& c, bool api) {
     }
     json processing = {{"enabled", st.processing.enabled},
                        {"license_key", api ? std::string() : st.processing.license_key},
-                       {"preset", st.processing.preset}};
+                       {"preset", st.processing.preset},
+                       {"web_port_slot", st.processing.web_port_slot}};
     if (api) processing["license_key_set"] = !st.processing.license_key.empty();
     stations.push_back({{"id", st.id},
                         {"name", st.name},
@@ -373,6 +381,7 @@ std::optional<EncoderConfig> config_from_json(std::string_view text, std::string
         read_field(pj, "license_key", st.processing.license_key, pp);
         read_field(pj, "preset", st.processing.preset, pp);
         read_field(pj, "license_key_clear", st.processing.license_key_clear, pp);
+        read_field(pj, "web_port_slot", st.processing.web_port_slot, pp);
       });
       c.stations.push_back(std::move(st));
     });
@@ -414,7 +423,8 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
   if (c.stations.size() > static_cast<size_t>(kMaxStations))
     add("stations", "Najwyżej " + std::to_string(kMaxStations) + " stacji (jest " + std::to_string(c.stations.size()) + ")");
 
-  std::map<std::string, size_t> station_ids;                       // id -> station index
+  std::map<std::string, size_t> station_ids;                       // id in lower case -> station index
+  std::map<int, size_t> web_slots;                                 // web port slot -> station index
   std::map<std::string, std::pair<size_t, size_t>> targets;        // server + mount -> (station, stream)
   for (size_t i = 0; i < c.stations.size(); ++i) {
     const auto& st = c.stations[i];
@@ -425,8 +435,10 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
       add(sp + ".id", label + "brak identyfikatora");
     } else if (!valid_id(st.id)) {
       add(sp + ".id", label + "nieprawidłowy identyfikator „" + st.id + "” (dozwolone litery, cyfry, „-” i „_”, najwyżej 32 znaki)");
-    } else if (auto [it, inserted] = station_ids.emplace(st.id, i); !inserted) {
-      add(sp + ".id", label + "identyfikator „" + st.id + "” jest już używany przez " + station_ref(c.stations[it->second], it->second));
+    } else if (auto [it, inserted] = station_ids.emplace(ascii_lower(st.id), i); !inserted) {
+      const bool other_case = c.stations[it->second].id != st.id;
+      add(sp + ".id", label + "identyfikator „" + st.id + "” jest już używany przez " + station_ref(c.stations[it->second], it->second) +
+                          (other_case ? " (wielkość liter nie ma znaczenia)" : ""));
     }
     if (st.name.size() > kMaxNameBytes) add(sp + ".name", label + "nazwa może mieć najwyżej 64 bajty");
     if (has_control(st.name)) add(sp + ".name", label + "nazwa nie może zawierać znaków sterujących");
@@ -549,6 +561,13 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
     }
     if (const std::string why = key_shape_error(pr.license_key); !why.empty())
       add(pf + "license_key", label + "klucz licencji Stereo Tool " + why);
+    if (pr.web_port_slot < -1 || pr.web_port_slot >= kMaxStations) {
+      add(pf + "web_port_slot", label + "numer portu interfejsu WWW Stereo Tool musi być w zakresie 0–" + std::to_string(kMaxStations - 1));
+    } else if (pr.web_port_slot >= 0) {
+      if (auto [it, inserted] = web_slots.emplace(pr.web_port_slot, i); !inserted)
+        add(pf + "web_port_slot", label + "port interfejsu WWW Stereo Tool (numer " + std::to_string(pr.web_port_slot) +
+                                      ") jest już używany przez " + station_ref(c.stations[it->second], it->second));
+    }
     if (pr.enabled) {
       if (pr.preset.empty()) add(pf + "preset", label + "processing wymaga wybrania presetu Stereo Tool");
       if (effective_stereotool_key(c, st).empty())
@@ -580,10 +599,22 @@ std::vector<std::string> normalize_config(EncoderConfig& c) {
   std::vector<std::string> notices;
   c.stereotool_default_key = trim_blanks(c.stereotool_default_key);
   c.stereotool_default_key_clear = false;
-  std::set<std::string> station_ids;
+  std::set<std::string> station_ids;  // in lower case: a new id never differs from one only in case
   for (const auto& st : c.stations)
-    if (!st.id.empty()) station_ids.insert(st.id);
+    if (!st.id.empty()) station_ids.insert(ascii_lower(st.id));
   int next_station = 1;
+  // web port slots: a station without one gets the lowest free slot; given ones are never moved
+  std::set<int> slots;
+  for (const auto& st : c.stations)
+    if (st.processing.web_port_slot >= 0) slots.insert(st.processing.web_port_slot);
+  for (auto& st : c.stations) {
+    if (st.processing.web_port_slot != -1) continue;
+    int slot = 0;
+    while (slots.count(slot)) ++slot;
+    if (slot >= kMaxStations) break;  // more stations than slots: validate_config reports the count
+    st.processing.web_port_slot = slot;
+    slots.insert(slot);
+  }
 
   for (size_t i = 0; i < c.stations.size(); ++i) {
     auto& st = c.stations[i];
@@ -652,6 +683,7 @@ void merge_passwords(EncoderConfig& next, const EncoderConfig& previous) {
       }
     if (!old_station) continue;
     if (keep_key && !clear_key) st.processing.license_key = old_station->processing.license_key;
+    if (st.processing.web_port_slot == -1) st.processing.web_port_slot = old_station->processing.web_port_slot;
     for (auto& s : st.streams) {
       if (!s.password.empty() || s.id.empty()) continue;
       for (const auto& o : old_station->streams)

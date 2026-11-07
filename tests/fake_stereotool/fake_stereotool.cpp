@@ -13,7 +13,8 @@
 //   holds the key), process_throws 0 (a C++ exception), process_crashes 0 (Windows: an access
 //   violation, a structured exception), process_sleep_us 0, create_sleep_us 0 (inside Create3),
 //   version_crashes 0 / bind_crashes 0 (Windows: an access violation in GetSoftwareVersion /
-//   global_setBindIp), save_fails 0, sts_rejects -1 (the .sts index SetStsValue refuses).
+//   global_setBindIp), save_fails 0, sts_rejects -1 (the .sts index SetStsValue refuses),
+//   save_sleep_us 0 (inside SavePreset), version_sleep_us 0 (inside GetSoftwareVersion: a slow load).
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -70,7 +71,8 @@ struct State {
                {"license_valid", 1},   {"create_fails", 0},   {"create_throws", 0},
                {"process_throws", 0},  {"process_crashes", 0}, {"process_sleep_us", 0},
                {"create_sleep_us", 0}, {"version_crashes", 0}, {"bind_crashes", 0},
-               {"save_fails", 0},      {"sts_rejects", -1}};
+               {"save_fails", 0},      {"sts_rejects", -1},    {"save_sleep_us", 0},
+               {"version_sleep_us", 0}};
     values.clear();
     texts.clear();
   }
@@ -128,12 +130,15 @@ FAKE_ST_EXPORT int stereoTool_GetSoftwareVersion() {
   auto& s = state();
   int version = 0;
   bool crashes = false;
+  long long sleep_us = 0;
   {
     std::lock_guard<std::mutex> lock(s.mutex);
     ++s.values["version_calls"];
     version = int(s.opt("version"));
     crashes = s.opt("version_crashes") != 0;
+    sleep_us = (long long)s.opt("version_sleep_us");
   }
+  if (sleep_us > 0) std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
   if (crashes) crash();
   return version;
 }
@@ -255,6 +260,12 @@ FAKE_ST_EXPORT bool stereoTool_LoadPreset(gStereoTool* st, const char* filename,
 
 FAKE_ST_EXPORT bool stereoTool_SavePreset(gStereoTool* st, const char* filename, int loadsave_type) {
   auto& s = state();
+  long long sleep_us = 0;
+  {
+    std::lock_guard<std::mutex> lock(s.mutex);
+    sleep_us = (long long)s.opt("save_sleep_us");
+  }
+  if (sleep_us > 0) std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
   std::lock_guard<std::mutex> lock(s.mutex);
   ++s.values["save_calls"];
   s.values["save_type"] = loadsave_type;

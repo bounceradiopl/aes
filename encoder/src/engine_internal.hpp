@@ -220,6 +220,9 @@ struct ProcessingSettings {
   std::string home_dir;     // the instance's home folder; empty: the library's default
   int web_port = 0;         // the instance's web interface (127.0.0.1 only); 0: off
   std::string setup_error;  // Polish: why processing cannot be set up at all (nothing is created)
+  // The streams the output goes to from the first block on (set_streams() replaces them later):
+  // a worker never hands a block to no stream list.
+  std::vector<std::shared_ptr<StreamWorker>> streams;
   // Tests: sees every block handed to the streams, on the output thread (must not allocate).
   std::function<void(const float* stereo, size_t frames)> output_tap;
   // Tests: called on the Stereo Tool thread after each block it processed.
@@ -233,6 +236,9 @@ void set_processing_stop_timeout_ms(int ms);
 // every later one, and how long processing must run to start the count again (empty / 0: the
 // defaults 30 s, 2, 5, 10 min and 10 min).
 void set_processing_retry_ms(std::vector<int> waits_ms, int reset_ms);
+// Runs in apply_config right after a processing worker was built, before the station gets its
+// plan (e.g. as long as a slow log line); empty: none.
+void set_processing_built_hook(std::function<void()> hook);
 }  // namespace testing
 
 // The last kSlots values one thread wrote, numbered 1, 2, ... (their seq), read by any thread
@@ -332,7 +338,9 @@ class ProcessingWorker {
   void set_preset(std::string sts_path);
   // Any thread (not the audio threads): saves the instance's current settings to `sts_path` on the
   // Stereo Tool thread, between two blocks, and waits up to timeout_ms for it. Meanwhile the
-  // output waits too (no bypass unless the queue nears its limit). false with a Polish *error.
+  // output waits too; a save longer than kMaxBehindNs bypasses (reason Saving, never "too slow")
+  // until it is over, then processing goes on by itself (a new session on the same instance, no
+  // restart). false with a Polish *error.
   bool save_preset(const std::string& sts_path, int timeout_ms, std::string* error);
   // Any thread: fades the output out over kRampFrames of the next frames emitted, then hands
   // nothing more to the streams (faded_out()). For a switch away from this worker: the station's
@@ -357,6 +365,8 @@ class ProcessingWorker {
   void run();
   void take_streams();
   void begin_restart();
+  void resume_session();
+  bool preset_pending() const;
   bool take_result(bool wait);    // a finished Stereo Tool command, handled; false when none
   void wait_job();
   void go_dry(Reason why, ProcessingState state);
@@ -392,7 +402,8 @@ class ProcessingWorker {
   bool licence_ok_ = false;    // the current session's licence check passed
   Pending pending_ = Pending::None;
   bool restart_wanted_ = false;
-  bool reload_wanted_ = false;  // the restart wanted loads a new preset (set_preset)
+  bool reload_wanted_ = false;  // a new preset (set_preset) waits for a restart to load it
+  bool resume_after_save_ = false;  // in the bypass for a save: back into processing once it is over
   GainRamp fade_{1.0};          // fade_out(): the output level
   bool fading_ = false;
   bool faded_ = false;
