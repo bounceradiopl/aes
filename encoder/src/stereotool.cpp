@@ -5,11 +5,14 @@
 // library guarded.
 #include "bam/encoder/stereotool.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <exception>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <thread>
 
@@ -18,6 +21,7 @@
 #include <windows.h>
 #endif
 
+#include "bam/auth.hpp"  // random_hex: the web interface password and the JSON token
 #include "bam/platform/dynlib.hpp"
 #include "bam/platform/process.hpp"
 #include "codec_impl.hpp"
@@ -39,6 +43,7 @@ struct StereoToolApi {
   st::LoadPresetFn load_preset = nullptr;
   st::SavePresetFn save_preset = nullptr;
   st::SetStsValueFn set_sts_value = nullptr;
+  st::GetStsValueFn get_sts_value = nullptr;
   st::CheckLicenseValidFn check_license_valid = nullptr;
   st::GetUnlicensedUsedFeaturesFn get_unlicensed_used_features = nullptr;
 };
@@ -52,8 +57,9 @@ constexpr const char* kBindIp = "127.0.0.1";
 // Instances abandoned after a structured exception (process-wide, see StereoToolInstance).
 std::atomic<int> g_abandoned{0};
 
-// Create3, Delete, LoadPreset and SavePreset of all instances, one at a time. Always taken
-// outside guarded(): a structured exception unwinds no locals of the frames it leaves.
+// Create3, Delete, LoadPreset, SavePreset, SetStsValue and GetStsValue of all instances, one at a
+// time. Always taken outside guarded(): a structured exception unwinds no locals of the frames it
+// leaves.
 std::mutex g_api_mutex;
 
 enum class Outcome { Ok, Exception, Crash };
@@ -106,12 +112,22 @@ Outcome guarded(const char* function, F& f, std::string* reason) {
   return Outcome::Exception;
 }
 
-// A message that may come from the library must not carry the licence key.
-std::string without_key(std::string text, const std::string& key) {
-  if (key.empty()) return text;
-  for (size_t at = text.find(key); at != std::string::npos; at = text.find(key, at + 3)) text.replace(at, key.size(), "***");
-  return text;
+void replace_all(std::string& text, const std::string& what) {
+  if (what.empty()) return;
+  for (size_t at = text.find(what); at != std::string::npos; at = text.find(what, at + 3)) text.replace(at, what.size(), "***");
 }
+
+// The key without its brackets ("<abc…>" -> "abc…"), when long enough to be told from other text
+// (kStereoToolKeyInnerMin); empty otherwise.
+std::string inner_key(const std::string& key) {
+  if (key.size() < 2 || key.front() != '<' || key.back() != '>') return {};
+  std::string inner = key.substr(1, key.size() - 2);
+  return inner.size() >= kStereoToolKeyInnerMin ? inner : std::string();
+}
+
+// Password and token of the web interface: 20 and 32 hex digits from the OS CSPRNG.
+constexpr size_t kWebPasswordBytes = 10;
+constexpr size_t kJsonTokenBytes = 16;
 
 template <typename Fn>
 bool resolve(const platform::DynamicLibrary& lib, const char* name, Fn& fn) {
@@ -185,6 +201,7 @@ ApiPtr load(const std::vector<std::string>& dirs, std::vector<ApiPtr>& kept, Ste
   need("stereoTool_LoadPreset", api->load_preset);
   need("stereoTool_SavePreset", api->save_preset);
   need("stereoTool_SetStsValue", api->set_sts_value);
+  need("stereoTool_GetStsValue", api->get_sts_value);
   need("stereoTool_CheckLicenseValid", api->check_license_valid);
   need("stereoTool_GetUnlicensedUsedFeatures", api->get_unlicensed_used_features);
   if (missing) {
@@ -278,6 +295,12 @@ ApiPtr stereotool_api(StereoToolInfo* info) {
 }
 
 }  // namespace
+
+std::string without_stereotool_key(std::string text, const std::string& key) {
+  replace_all(text, key);
+  replace_all(text, inner_key(key));
+  return text;
+}
 
 StereoToolInfo stereotool_info() {
   StereoToolInfo info;
@@ -379,6 +402,8 @@ std::unique_ptr<StereoToolInstance> StereoToolInstance::create(const std::string
   };
   const std::string what = "nie udało się utworzyć instancji Stereo Tool" + (name.empty() ? "" : " " + name);
   Outcome outcome;
+  std::unique_ptr<StereoToolInstance> instance;
+  bool settings_ok = false;
   {
     std::lock_guard<std::mutex> lock(g_api_mutex);
     // checked again here: while this thread waited for the mutex, a call of another instance
@@ -388,19 +413,31 @@ std::unique_ptr<StereoToolInstance> StereoToolInstance::create(const std::string
       return nullptr;
     }
     outcome = guarded("stereoTool_Create3", create3, &reason);
+    if (outcome == Outcome::Ok && st) {
+      instance.reset(new StereoToolInstance(api, st));
+      instance->key_ = key;
+      instance->web_password_ = random_hex(kWebPasswordBytes);
+      instance->json_token_ = random_hex(kJsonTokenBytes);
+      // before anything else uses it: no network feature on, the password protection on
+      settings_ok = instance->apply_settings();
+    }
   }
   if (outcome != Outcome::Ok) {
     // no instance pointer came back: nothing to delete; after a crash the library's state is
     // unknown, as if an instance had been abandoned
     if (outcome == Outcome::Crash) ++g_abandoned;
-    if (error) *error = what + ": " + without_key(reason, key);
+    if (error) *error = what + ": " + without_stereotool_key(reason, key);
     return nullptr;
   }
   if (!st) {
     if (error) *error = what + " (zła wersja biblioteki albo za mało pamięci)";
     return nullptr;
   }
-  return std::unique_ptr<StereoToolInstance>(new StereoToolInstance(std::move(api), st));
+  if (!settings_ok) {
+    if (error) *error = what + ": " + without_stereotool_key(instance->failure_, key);
+    return nullptr;  // deleted here (outside the lock), or left alone when it crashed
+  }
+  return instance;
 }
 
 StereoToolInstance::~StereoToolInstance() {
@@ -437,19 +474,16 @@ bool StereoToolInstance::load_preset(const std::string& sts_path, std::string* e
   {
     std::lock_guard<std::mutex> lock(g_api_mutex);
     called = call("stereoTool_LoadPreset", [&] { ok = api_->load_preset(st_, sts_path.c_str(), detail::st::kSaveAllSettings); });
+    // a preset can switch network features on and carry web interface settings of its own: the
+    // instance keeps ours, set before the lock is let go (nothing else runs it meanwhile)
+    if (called && ok) apply_settings();
   }
-  if (!called) {
+  if (!called || failed_) {
     if (error) *error = failure_;
     return false;
   }
   if (!ok) {
     if (error) *error = "Stereo Tool nie wczytał presetu " + sts_path;
-    return false;
-  }
-  // a preset can carry web interface settings of its own; the instance keeps ours
-  if (web_set_) apply_web_interface();
-  if (failed_) {
-    if (error) *error = failure_;
     return false;
   }
   return true;
@@ -458,9 +492,12 @@ bool StereoToolInstance::load_preset(const std::string& sts_path, std::string* e
 bool StereoToolInstance::save_preset(const std::string& sts_path, std::string* error) {
   bool ok = false;
   bool called;
+  std::string scrub_error;
+  bool scrubbed = true;
   {
     std::lock_guard<std::mutex> lock(g_api_mutex);
     called = call("stereoTool_SavePreset", [&] { ok = api_->save_preset(st_, sts_path.c_str(), detail::st::kSaveAllSettings); });
+    if (called && ok) scrubbed = scrub_preset(sts_path, &scrub_error);
   }
   if (!called) {
     if (error) *error = failure_;
@@ -470,16 +507,79 @@ bool StereoToolInstance::save_preset(const std::string& sts_path, std::string* e
     if (error) *error = "Stereo Tool nie zapisał presetu " + sts_path;
     return false;
   }
+  if (!scrubbed) {
+    if (error) *error = scrub_error;
+    return false;
+  }
   return true;
 }
 
-bool StereoToolInstance::set_web_interface(bool enabled, int port) {
+// The secrets out of a preset the library wrote: every line holding the web interface password,
+// the JSON token or the licence key (also without its brackets) keeps its name and loses its
+// value ("name=" ; a line without "=" goes). Rewritten in place, then read back: a file still
+// holding one is removed.
+bool StereoToolInstance::scrub_preset(const std::string& path, std::string* error) const {
+  std::vector<std::string> secrets = {web_password_, json_token_, key_, inner_key(key_)};
+  std::erase_if(secrets, [](const std::string& x) { return x.empty(); });
+  auto holds_secret = [&](const std::string& text) {
+    return std::any_of(secrets.begin(), secrets.end(), [&](const std::string& x) { return text.find(x) != std::string::npos; });
+  };
+  auto read = [&](std::string* text) {
+    std::ifstream in(fs_path(path), std::ios::binary);
+    if (!in) return false;
+    text->assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    return !in.bad();
+  };
+  const std::string failed = "nie udało się usunąć hasła interfejsu WWW Stereo Tool z zapisanego presetu — preset nie został zapisany";
+  std::string text;
+  if (!read(&text)) {
+    *error = failed;
+    return false;
+  }
+  if (!holds_secret(text)) return true;
+  std::string clean;
+  clean.reserve(text.size());
+  for (size_t begin = 0; begin < text.size();) {
+    size_t end = text.find('\n', begin);
+    end = end == std::string::npos ? text.size() : end + 1;
+    std::string line = text.substr(begin, end - begin);
+    begin = end;
+    if (holds_secret(line)) {
+      const size_t eq = line.find('=');
+      if (eq == std::string::npos) continue;
+      const bool crlf = line.size() >= 2 && line.compare(line.size() - 2, 2, "\r\n") == 0;
+      const bool lf = !crlf && !line.empty() && line.back() == '\n';
+      line = line.substr(0, eq + 1) + (crlf ? "\r\n" : lf ? "\n" : "");
+      if (holds_secret(line)) continue;  // in the name itself
+    }
+    clean += line;
+  }
+  {
+    std::ofstream out(fs_path(path), std::ios::binary | std::ios::trunc);
+    out << clean;
+  }
+  if (!read(&text) || holds_secret(text) || text != clean) {
+    std::error_code ec;
+    std::filesystem::remove(fs_path(path), ec);
+    *error = failed;
+    return false;
+  }
+  return true;
+}
+
+bool StereoToolInstance::set_web_interface(bool enabled, int port, const std::string& password) {
   if (enabled && (port < 1 || port > 65535)) return false;
   if (failed_) return false;
-  web_set_ = true;
+  std::lock_guard<std::mutex> lock(g_api_mutex);
   web_enabled_ = enabled;
   if (enabled) web_port_ = port;
-  return apply_web_interface();
+  if (!password.empty()) web_password_ = password;
+  return apply_settings();
+}
+
+std::optional<std::string> StereoToolInstance::sts_value(int index) {
+  std::lock_guard<std::mutex> lock(g_api_mutex);
+  return get_sts(index);
 }
 
 bool StereoToolInstance::set_sts(int index, const std::string& value) {
@@ -487,17 +587,67 @@ bool StereoToolInstance::set_sts(int index, const std::string& value) {
   return call("stereoTool_SetStsValue", [&] { ok = api_->set_sts_value(st_, index, 0, value.c_str()); }) && ok;
 }
 
+std::optional<std::string> StereoToolInstance::get_sts(int index) {
+  std::optional<std::string> value;
+  call("stereoTool_GetStsValue", [&] {
+    const char* text = nullptr;
+    if (api_->get_sts_value(st_, index, 0, &text) && text) value = std::string(text);  // copied at once
+  });
+  return value;
+}
+
+// One network switch off: true when it is off now, or the library has no such switch.
+bool StereoToolInstance::switch_off(int index) {
+  set_sts(index, "0");  // refused when the library has no such switch: then it reads none either
+  if (failed_) return false;
+  const auto value = get_sts(index);
+  return !failed_ && (!value || *value == "0");
+}
+
+// Under g_api_mutex: every network switch off, the password protection, then the web interface.
+// false: the web interface could not be set as asked (it is off), or the instance failed (a
+// network feature stays on, or a call failed: failed_).
+bool StereoToolInstance::apply_settings() {
+  if (failed_) return false;
+  for (const auto& sw : detail::st::kNetworkSwitches)
+    for (int i = 0; i < sw.count; ++i) {
+      if (switch_off(sw.first + i)) continue;
+      if (!failed_) {
+        failed_ = true;
+        failure_ = std::string("Stereo Tool nie wyłączył funkcji sieciowej: ") + sw.what + " (parametr " +
+                   std::to_string(sw.first + i) + ") — processing wyłączony, sprawdź preset";
+      }
+      return false;
+    }
+  namespace st = detail::st;
+  // the account's password first, then the protection: never switched on with an empty password
+  bool pw = set_sts(st::kParamPassword0, web_password_) && set_sts(st::kParamJsonToken, json_token_) &&
+            set_sts(st::kParamPasswordProtection0, "1") && set_sts(st::kParamPasswordProtectionAny, "1");
+  if (failed_) return false;
+  pw = pw && get_sts(st::kParamPassword0) == web_password_ && get_sts(st::kParamPasswordProtectionAny) == std::optional<std::string>("1");
+  if (failed_) return false;
+  protected_ = pw;
+  return apply_web_interface();
+}
+
 bool StereoToolInstance::apply_web_interface() {
-  bool port_ok = true;
+  bool ok = true;
+  if (web_enabled_ && !protected_) {
+    web_enabled_ = false;  // never without its password
+    ok = false;
+  }
   if (web_enabled_) {
     // the port first: the server is switched on only once it is set (else it would start on
     // whatever port the library had)
-    port_ok = set_sts(detail::st::kParamWebserverPort, std::to_string(web_port_));
+    const bool port_ok = set_sts(detail::st::kParamWebserverPort, std::to_string(web_port_));
     if (failed_) return false;
-    if (!port_ok) web_enabled_ = false;
+    if (!port_ok) {
+      web_enabled_ = false;
+      ok = false;
+    }
   }
   const bool enable_ok = set_sts(detail::st::kParamWebserverEnable, web_enabled_ ? "1" : "0");
-  return port_ok && enable_ok;
+  return ok && enable_ok;
 }
 
 bool StereoToolInstance::process(float* stereo, int32_t frames) {

@@ -25,6 +25,7 @@
 #pragma once
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -235,6 +236,12 @@ class EncoderEngine {
   // is built anew; after a crash only a service restart helps). false with a Polish *error when
   // the station runs no processing.
   bool restart_processing(const std::string& station_id, std::string* error);
+  // The password Stereo Tool's web interface of the station asks for (user "Admin"; random per
+  // processing worker, kept through restarts and preset changes, new with a new instance after a
+  // key or port change), with the interface's port. For a logged-in panel user on request only:
+  // never logged, never in the status. nullopt (Polish *error) when the station runs no
+  // processing with a web interface.
+  std::optional<std::string> processing_web_password(const std::string& station_id, int* web_port, std::string* error) const;
 
   EncoderConfig config() const;
   EncoderStatus status() const;

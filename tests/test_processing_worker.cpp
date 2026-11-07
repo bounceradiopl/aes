@@ -958,7 +958,7 @@ TEST_CASE("processing: the settings are saved on the Stereo Tool thread while pr
   CHECK(w.save_preset(path, 5000, &err));
   std::ifstream f(path, std::ios::binary);
   std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-  CHECK(text == "[FakeStereoTool]\ngain=0.5\nlatency=512\n");
+  CHECK(text.rfind("[FakeStereoTool]\ngain=0.5\nlatency=512\n", 0) == 0);  // then its .sts values
   fake().set("save_fails", 1);
   CHECK_FALSE(w.save_preset(path + "2", 5000, &err));
   CHECK(err == "Stereo Tool nie zapisał presetu");

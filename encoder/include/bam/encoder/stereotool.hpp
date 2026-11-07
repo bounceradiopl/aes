@@ -7,6 +7,7 @@
 #pragma once
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -62,6 +63,12 @@ std::vector<std::string> stereotool_library_candidates();
 // loading is kept as it is.
 StereoToolInfo stereotool_reload();
 
+// `text` with the licence key replaced by "***", and so its inner text (the key without "<" and
+// ">", when that has kStereoToolKeyInnerMin characters or more): a message of the library, or a
+// preset it saved, may quote either.
+std::string without_stereotool_key(std::string text, const std::string& key);
+inline constexpr size_t kStereoToolKeyInnerMin = 8;
+
 namespace testing {
 // Test hook: sets the process-wide count of abandoned instances.
 void set_stereotool_abandoned(int count);
@@ -70,8 +77,17 @@ void set_stereotool_abandoned(int count);
 // One Stereo Tool instance (one per processed station; one licence key per instance).
 // Not thread-safe: one thread (the station's processing worker) uses an instance at a time;
 // failed()/failure() are that thread's state too, so other threads (HTTP) ask the worker.
-// Create3, Delete, LoadPreset and SavePreset of all instances are serialised by one process-wide
-// mutex (never Process).
+// Create3, Delete, LoadPreset, SavePreset and every SetStsValue/GetStsValue of all instances are
+// serialised by one process-wide mutex (never Process).
+//
+// Network: the web interface and UECP listen on 127.0.0.1 only (the global bind address), and the
+// web interface asks for Stereo Tool's own password (account "Admin"; a random one per instance
+// unless set_web_interface() names one). Every other network feature of Stereo Tool (stream
+// output, UECP, MicroMPX, Kantar, RDS relay, Livewire and AES67 discovery, and the settings it
+// would load by itself: Poll STS, the preset scheduler; stereotool_api.hpp kNetworkSwitches) is
+// switched off when the instance is created and again after every preset load, under the same
+// lock as the load: a .sts from Stereo Tool elsewhere may switch any of them on. One the library
+// keeps on fails the instance (Polish failure naming it).
 //
 // Every call into the library is guarded, and the first failure marks the instance failed: it
 // is not called again, except for one thing:
@@ -96,15 +112,27 @@ class StereoToolInstance {
   StereoToolInstance(const StereoToolInstance&) = delete;
   StereoToolInstance& operator=(const StereoToolInstance&) = delete;
 
-  // A .sts preset, all settings except Stereo Tool's configuration (ID_SAVE_ALLSETTINGS). The web
-  // interface settings of set_web_interface() are applied again after loading.
+  // A .sts preset, all settings except Stereo Tool's configuration (ID_SAVE_ALLSETTINGS). Then,
+  // under the same lock: the network features off, the password protection and the web interface
+  // settings of set_web_interface() applied again. false (Polish *error) when the library did not
+  // load it or a network feature stays on (the instance is then failed).
   bool load_preset(const std::string& sts_path, std::string* error);
+  // The settings to `sts_path` (ID_SAVE_ALLSETTINGS). The file never carries the web interface
+  // password, the JSON token or the licence key: a line the library wrote one of them into loses
+  // its value before the lock is let go (a file that cannot be cleaned is removed, false).
   bool save_preset(const std::string& sts_path, std::string* error);
 
   // The instance's web interface (port, then enable, through stereoTool_SetStsValue), reachable
-  // on 127.0.0.1 only (the global bind address). Port 1..65535 when enabled. When the library
-  // refuses the port, the web interface is switched off (false).
-  bool set_web_interface(bool enabled, int port);
+  // on 127.0.0.1 only (the global bind address), protected by `password` (empty: the instance's
+  // random one). Port 1..65535 when enabled. When the library refuses the port or the password
+  // protection, the web interface is switched off (false).
+  bool set_web_interface(bool enabled, int port, const std::string& password = {});
+  // The web interface password (never logged; the panel shows it to a logged-in user on demand).
+  const std::string& web_password() const { return web_password_; }
+
+  // stereoTool_GetStsValue: the value of .sts parameter `index` as Stereo Tool keeps it; nullopt
+  // when the library has no such parameter (or the instance failed).
+  std::optional<std::string> sts_value(int index);
 
   // In place, `frames` frames of interleaved stereo at 48 kHz. false when the instance has
   // failed (now or before); the samples are then not to be used.
@@ -130,8 +158,12 @@ class StereoToolInstance {
   StereoToolInstance(std::shared_ptr<const detail::StereoToolApi> api, gStereoTool* st);
   template <typename F>
   bool call(const char* function, F&& f);
+  bool apply_settings();  // under the API mutex
   bool apply_web_interface();
   bool set_sts(int index, const std::string& value);
+  std::optional<std::string> get_sts(int index);
+  bool switch_off(int index);
+  bool scrub_preset(const std::string& path, std::string* error) const;
 
   std::shared_ptr<const detail::StereoToolApi> api_;
   gStereoTool* st_ = nullptr;
@@ -139,8 +171,12 @@ class StereoToolInstance {
   bool abandoned_ = false;
   bool left_ = false;  // leave_to_process_exit()
   std::string failure_;
-  bool web_set_ = false, web_enabled_ = false;
+  bool web_enabled_ = false;  // set_web_interface(); off until it says otherwise
   int web_port_ = 0;
+  bool protected_ = false;    // the password protection is on (apply_settings)
+  std::string key_;           // the licence key it was created with (scrub_preset)
+  std::string web_password_;  // Stereo Tool's web interface password (account 0)
+  std::string json_token_;    // the JSON API's token: random, never shown
 };
 
 }  // namespace bam::encoder

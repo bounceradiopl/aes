@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstdio>
 
+#include "bam/auth.hpp"  // random_hex: the web interface password
 #include "bam/encoder/stereotool.hpp"
 #include "bam/log.hpp"
 #include "bam/platform/time.hpp"
@@ -60,12 +61,10 @@ enum class Cmd { None, Setup, Restart, Process };
 enum class Done { None, Ready, SetupFailed, Processed, ProcessFailed };
 enum class Verdict { None, Valid, Invalid };
 
-// Text that may come from the library must not carry the licence key.
-std::string without_key(std::string text, const std::string& key) {
-  if (key.empty()) return text;
-  for (size_t at = text.find(key); at != std::string::npos; at = text.find(key, at + 3)) text.replace(at, key.size(), "***");
-  return text;
-}
+// Text that may come from the library must not carry the licence key (nor its inner text).
+std::string without_key(std::string text, const std::string& key) { return without_stereotool_key(std::move(text), key); }
+
+constexpr size_t kWebPasswordBytes = 10;  // 20 hex digits
 
 // A save_preset() call waiting for the Stereo Tool thread (shared: the caller may give up first).
 struct SaveRequest {
@@ -91,6 +90,7 @@ struct ProcessingWorker::Core {
   // fixed
   std::string key, preset, home, name, station_id, setup_error;
   int web_port = 0;
+  std::string web_password;  // Stereo Tool's web interface password, the same for every instance of the worker
   std::function<void()> block_tap;
   // set when the Stereo Tool thread has let go of the instance for good (instance_gone())
   const std::shared_ptr<std::atomic<bool>> gone = std::make_shared<std::atomic<bool>>(false);
@@ -220,10 +220,10 @@ Done setup(Core& c, bool restart, uint32_t* latency) {
     }
     bool web = false;
     if (c.web_port > 0) {
-      web = st->set_web_interface(true, c.web_port);
+      web = st->set_web_interface(true, c.web_port, c.web_password);
       if (!web && !st->failed())
-        log_warning(log_who(c) + "Stereo Tool nie przyjął portu interfejsu WWW " +
-                    std::to_string(c.web_port) + " (interfejs WWW wyłączony)");
+        log_warning(log_who(c) + "Stereo Tool nie przyjął portu interfejsu WWW " + std::to_string(c.web_port) +
+                    " albo jego hasła (interfejs WWW wyłączony)");
     }
     take_requested_preset(c);
     if (!st->failed() && !c.preset.empty() && !st->load_preset(c.preset, &err)) {
@@ -393,6 +393,7 @@ ProcessingWorker::ProcessingWorker(const ProcessingSettings& s, std::string stat
   c.preset = s.preset_path;
   c.home = s.home_dir;
   c.web_port = s.web_port;
+  c.web_password = random_hex(kWebPasswordBytes);
   c.setup_error = s.setup_error;
   c.wait_for_gone = s.wait_for_gone;
   c.station_id = station_id_;
@@ -415,6 +416,8 @@ ProcessingWorker::ProcessingWorker(const ProcessingSettings& s, std::string stat
 ProcessingWorker::~ProcessingWorker() { stop(); }
 
 int ProcessingWorker::configured_web_port() const { return core_->web_port; }
+
+const std::string& ProcessingWorker::web_password() const { return core_->web_password; }
 
 std::shared_ptr<const std::atomic<bool>> ProcessingWorker::instance_gone() const { return core_->gone; }
 

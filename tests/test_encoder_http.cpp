@@ -35,6 +35,7 @@
 #include "http_attack.hpp"
 #include "test_util.hpp"
 #ifdef BAM_FAKE_STEREOTOOL_PATH
+#include "../encoder/src/stereotool_api.hpp"  // the parameter indices (the fake's values)
 #include "fake_stereotool/fake_control.hpp"
 #endif
 
@@ -1497,6 +1498,7 @@ TEST_CASE("encoder HTTP: every Stereo Tool route needs a session") {
   CHECK(anon.Post("/api/stereotool/presets", upload_body("FM.sts", "x").dump(), "application/json")->status == 401);
   CHECK(anon.Post("/api/stations/s1/processing/save-preset", R"({"name":"A.sts"})", "application/json")->status == 401);
   CHECK(anon.Post("/api/stations/s1/processing/restart", "", "application/json")->status == 401);
+  CHECK(anon.Get("/api/stations/s1/processing/web-password")->status == 401);
   // JSON only, on every route
   CHECK(f.client->Post("/api/stereotool/presets", f.auth, upload_body("FM.sts", "x").dump(), "text/plain")->status == 415);
   CHECK(f.client->Post("/api/stations/s1/processing/save-preset", f.auth, R"({"name":"A.sts"})", "text/plain")->status == 415);
@@ -1757,9 +1759,16 @@ TEST_CASE("encoder HTTP: processing through the API: settings, status, save as p
   REQUIRE_MESSAGE(r->status == 200, r->body);
   out = json::parse(r->body);
   CHECK(out["ok"] == true);
-  CHECK(out["preset"] == json{{"name", "Strojony.sts"}, {"bytes", fake_sts(0.5, 128).size()}});
+  CHECK(out["preset"]["name"] == "Strojony.sts");
   CHECK(out["presets"].size() == 2);
-  CHECK(f.get(url_path("Strojony.sts"))["data_base64"] == be::testing::base64(fake_sts(0.5, 128)));
+  {
+    // what the instance runs with, then its .sts values (the fake writes them all)
+    std::string saved;
+    REQUIRE(f.engine.get_preset("Strojony.sts", &saved).ok());
+    CHECK(saved.rfind(fake_sts(0.5, 128), 0) == 0);
+    CHECK(out["preset"]["bytes"] == saved.size());
+    CHECK(f.get(url_path("Strojony.sts"))["data_base64"] == be::testing::base64(saved));
+  }
   auto refused = [&](httplib::Result res, int status, const std::string& code) {
     REQUIRE(res);
     bodies.push_back(res->body);
@@ -1842,6 +1851,69 @@ TEST_CASE("encoder HTTP: processing through the API: settings, status, save as p
   }
   for (const auto& e : bam::Logger::instance().recent()) bodies.push_back(e.message);
   for (const std::string& b : bodies) CHECK_MESSAGE(!has_key(b), b.substr(0, 400));
+}
+
+// Stereo Tool's own web interface password (owner decision, final review): only a logged-in panel
+// user gets it, on request; never in the status, the live feed, the configuration, the logs or a
+// saved preset.
+TEST_CASE("encoder HTTP: the Stereo Tool web interface password is given only on request, with a session") {
+  fake_st::UseFake use;
+  StFolder dir("webpw");
+  Fixture f(dir.path);
+  f.setup_and_login();
+  REQUIRE(f.post("/api/stereotool/presets", upload_body("Start.sts", fake_sts(0.5, 128)))->status == 200);
+  json cfg = f.get("/api/config");
+  cfg["stations"] = json::array({processing_station("Radio Haslo", true, "Start.sts", kStationKey),
+                                 {{"name", "Radio Bez"}, {"enabled", true}}});
+  auto r = f.put("/api/config", cfg);
+  REQUIRE_MESSAGE(r->status == 200, r->body);
+  const json out = json::parse(r->body);
+  const std::string s1 = out["config"]["stations"][0]["id"], s2 = out["config"]["stations"][1]["id"];
+  REQUIRE(wait_for([&] { return f.get("/api/status")["stations"][0]["processing"]["state"] == "running"; }, 10000));
+
+  r = f.client->Get("/api/stations/" + s1 + "/processing/web-password", f.auth);
+  REQUIRE(r);
+  REQUIRE_MESSAGE(r->status == 200, r->body);
+  const std::string pw = json::parse(r->body)["password"];
+  CHECK(pw.size() >= 16);
+  CHECK(fake_st::fake().sts(("station-" + s1).c_str(), be::detail::st::kParamPassword0) == std::optional<std::string>(pw));
+  CHECK(json::parse(r->body)["web_port"] == f.get("/api/status")["stations"][0]["processing"]["web_port"]);
+  CHECK(r->get_header_value("Cache-Control") == "no-store");
+  httplib::Client anon(kLoopback, f.server->port());
+  CHECK(anon.Get("/api/stations/" + s1 + "/processing/web-password")->status == 401);
+  r = f.client->Get("/api/stations/" + s2 + "/processing/web-password", f.auth);
+  CHECK(r->status == 409);
+  CHECK(json::parse(r->body)["code"] == "not_running");
+  CHECK(f.client->Get("/api/stations/s99/processing/web-password", f.auth)->status == 404);
+
+  // a restart keeps the worker's password
+  REQUIRE(f.client->Post("/api/stations/" + s1 + "/processing/restart", f.auth, "", "application/json")->status == 200);
+  REQUIRE(wait_for([&] { return f.get("/api/status")["stations"][0]["processing"]["state"] == "running"; }, 10000));
+  CHECK(json::parse(f.client->Get("/api/stations/" + s1 + "/processing/web-password", f.auth)->body)["password"] == pw);
+
+  // nowhere else: a saved preset, the status, the live feed, the configuration, the Stereo Tool page, the logs
+  REQUIRE(f.post("/api/stations/" + s1 + "/processing/save-preset", {{"name", "Zapisany.sts"}})->status == 200);
+  std::vector<std::string> bodies;
+  std::string saved;
+  REQUIRE(f.engine.get_preset("Zapisany.sts", &saved).ok());
+  bodies.push_back(saved);
+  bodies.push_back(f.get(url_path("Zapisany.sts")).dump());
+  bodies.push_back(f.get("/api/status").dump());
+  bodies.push_back(f.get("/api/config").dump());
+  bodies.push_back(f.get("/api/stereotool").dump());
+  bodies.push_back(f.get("/api/logs").dump());
+  {
+    httplib::Client live(kLoopback, f.server->port());
+    std::string first;
+    live.Get("/api/live", f.auth, [&](const char* data, size_t n) {
+      first.append(data, n);
+      return first.find("\n\n") == std::string::npos;  // one event
+    });
+    bodies.push_back(first);
+  }
+  for (const auto& e : bam::Logger::instance().recent()) bodies.push_back(e.message);
+  for (const std::string& b : bodies) CHECK_MESSAGE(b.find(pw) == std::string::npos, b.substr(0, 300));
+  CHECK(saved.find("sts.") != std::string::npos);  // the fake wrote its values (the password among them)
 }
 
 TEST_CASE("encoder HTTP: a station replaced by one with an id in another case gets its own instance; a deleted station's folder goes") {

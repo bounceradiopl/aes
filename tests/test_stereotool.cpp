@@ -6,6 +6,12 @@
 
 #ifdef BAM_FAKE_STEREOTOOL_PATH
 
+#include <httplib.h>  // first: on Windows it brings winsock2.h before windows.h (iphlpapi.h needs both)
+
+#ifdef _WIN32
+#include <iphlpapi.h>  // GetExtendedTcpTable / GetExtendedUdpTable
+#endif
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -13,6 +19,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <optional>
+#include <span>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -22,6 +30,8 @@
 #include "bam/encoder/stereotool.hpp"
 #include "bam/platform/dynlib.hpp"
 #include "bam/platform/process.hpp"
+#include "bam/platform/tcp.hpp"
+#include "bam/platform/time.hpp"
 #include "fake_stereotool/fake_control.hpp"
 #include "test_util.hpp"
 
@@ -317,13 +327,13 @@ TEST_CASE("stereotool: a C++ exception in process is caught, the instance is fai
 
 TEST_CASE("stereotool: an exception from Create3 is reported without the licence key") {
   UseFake use;
-  fake().set("create_throws", 1);  // the fake's exception text contains the key
+  fake().set("create_throws", 1);  // the fake's exception text contains the key, and its inner text
   std::string err;
-  CHECK(be::StereoToolInstance::create("SECRET-KEY-456", "station-ct", "", &err) == nullptr);
+  CHECK(be::StereoToolInstance::create("<SECRET-KEY-456>", "station-ct", "", &err) == nullptr);
   CHECK_MESSAGE(err.find("nie udało się utworzyć instancji Stereo Tool") != std::string::npos, err);
   CHECK_MESSAGE(err.find("wyjątek") != std::string::npos, err);
   CHECK_MESSAGE(err.find("fake Create3 failure") != std::string::npos, err);
-  CHECK_MESSAGE(err.find("SECRET-KEY-456") == std::string::npos, err);
+  CHECK_MESSAGE(err.find("SECRET-KEY-456") == std::string::npos, err);  // neither "<SECRET-KEY-456>" nor without the brackets
   CHECK(fake().value("create_calls") == 1);
   CHECK(fake().value("created") == 0);
 }
@@ -518,6 +528,131 @@ TEST_CASE("stereotool: the web interface port is set per instance and kept acros
 
 namespace {
 
+constexpr int kPassword0 = st::kParamPassword0;
+constexpr int kProtectionAny = st::kParamPasswordProtectionAny;
+constexpr int kJsonToken = st::kParamJsonToken;
+
+// Every network switch of stereotool_api.hpp, one by one.
+std::vector<std::pair<int, std::string>> network_switches() {
+  std::vector<std::pair<int, std::string>> out;
+  for (const auto& sw : st::kNetworkSwitches)
+    for (int i = 0; i < sw.count; ++i) out.emplace_back(sw.first + i, sw.what);
+  return out;
+}
+
+// A fake preset that switches every network feature on, the web interface on port 9999 too, and
+// sets Stereo Tool's password protection off (what a .sts from elsewhere might hold).
+std::string network_preset(const std::string& dir) {
+  const std::string path = (fs::path(dir) / "network.sts").string();
+  std::string text = "[FakeStereoTool]\ngain=0.5\nlatency=8\n";
+  for (const auto& [index, what] : network_switches()) text += "sts." + std::to_string(index) + "=1\n";
+  text += "sts." + std::to_string(kWebserverEnable) + "=1\nsts." + std::to_string(kWebserverPort) + "=9999\n";
+  text += "sts." + std::to_string(kProtectionAny) + "=0\nsts." + std::to_string(kPassword0) + "=\n";
+  write_file(path, text);
+  return path;
+}
+
+}  // namespace
+
+TEST_CASE("stereotool: every network feature but the web interface is switched off, at create and after every preset load") {
+  UseFake use;
+  TempDir dir("network");
+  auto st = make("station-net");
+  for (const auto& [index, what] : network_switches())
+    CHECK_MESSAGE(fake().sts("station-net", index) == std::optional<std::string>("0"), index << " " << what);
+  CHECK(fake().sts("station-net", kWebserverEnable) == std::optional<std::string>("0"));  // no web port given: off
+
+  // a preset that switches them all on (and the web interface, on a port of its own)
+  const std::string preset = network_preset(dir.path);
+  std::string err;
+  REQUIRE_MESSAGE(st->load_preset(preset, &err), err);
+  for (const auto& [index, what] : network_switches())
+    CHECK_MESSAGE(fake().sts("station-net", index) == std::optional<std::string>("0"), index << " " << what);
+  CHECK(fake().sts("station-net", kWebserverEnable) == std::optional<std::string>("0"));
+  REQUIRE(st->set_web_interface(true, 8111));
+  REQUIRE_MESSAGE(st->load_preset(preset, &err), err);
+  for (const auto& [index, what] : network_switches())
+    CHECK_MESSAGE(fake().sts("station-net", index) == std::optional<std::string>("0"), index << " " << what);
+  CHECK(fake().sts("station-net", kWebserverPort) == std::optional<std::string>("8111"));
+  CHECK(fake().sts("station-net", kWebserverEnable) == std::optional<std::string>("1"));
+  CHECK_FALSE(st->failed());
+
+  // a switch the library does not have (the plugin of a platform without the feature) cannot be on
+  fake().set("sts_unknown", 5066);
+  REQUIRE_MESSAGE(st->load_preset(preset, &err), err);
+  const auto absent = fake().sts("station-net", 5066);
+  CHECK((!absent || *absent == "0"));
+  CHECK_FALSE(st->failed());
+  fake().set("sts_unknown", -1);
+
+  // one the library keeps on fails the instance: no processing with a stream to who knows where
+  fake().set("sts_rejects", 3838);  // PARAM_UECP_Enable
+  err.clear();
+  CHECK_FALSE(st->load_preset(preset, &err));
+  CHECK_MESSAGE(err.find("UECP") != std::string::npos, err);
+  CHECK_MESSAGE(err.find("nie wyłączył") != std::string::npos, err);
+  CHECK(st->failed());
+  st.reset();
+  CHECK(fake().value("deleted") == 1);  // deleted (in order), not abandoned
+  CHECK(be::stereotool_info().abandoned == 0);
+  // at create the same: no instance
+  fake().set("sts_rejects", 6344);  // PARAM_UECP_Enable_1 ...
+  std::string create_err;
+  auto again = be::StereoToolInstance::create("", "station-net-2", "", &create_err);
+  CHECK(again);  // ... is not on in a new instance (the library's defaults): nothing to refuse
+  fake().set("sts_rejects", -1);
+}
+
+TEST_CASE("stereotool: the web interface asks for a random password per instance, never kept in a saved preset") {
+  UseFake use;
+  TempDir dir("password");
+  const std::string key = "<FAKEKEY0123456789abcdef>";
+  auto st = make("station-pw", key);
+  REQUIRE(st->set_web_interface(true, 8107));
+  const auto pw = fake().sts("station-pw", kPassword0);
+  REQUIRE(pw.has_value());
+  CHECK(pw->size() >= 16);
+  CHECK(fake().sts("station-pw", kProtectionAny) == std::optional<std::string>("1"));
+  CHECK(fake().sts("station-pw", st::kParamPasswordProtection0) == std::optional<std::string>("1"));
+  const auto token = fake().sts("station-pw", kJsonToken);
+  REQUIRE(token.has_value());
+  CHECK(token->size() >= 16);
+  CHECK(*token != *pw);
+  auto other = make("station-pw-2");
+  REQUIRE(other->set_web_interface(true, 8108));
+  CHECK(fake().sts("station-pw-2", kPassword0) != pw);
+
+  // a preset with the protection off: on again, with the same password
+  std::string err;
+  REQUIRE_MESSAGE(st->load_preset(network_preset(dir.path), &err), err);
+  CHECK(fake().sts("station-pw", kPassword0) == pw);
+  CHECK(fake().sts("station-pw", kProtectionAny) == std::optional<std::string>("1"));
+  CHECK(fake().sts("station-pw", kJsonToken) == token);
+  CHECK(fake().sts("station-pw", kWebserverEnable) == std::optional<std::string>("1"));
+
+  // saved: the fake writes every value and the key into the file; the binding takes them out
+  const std::string saved = (fs::path(dir.path) / ".bounce-7.tmp").string();
+  REQUIRE_MESSAGE(st->save_preset(saved, &err), err);
+  const std::string text = read_file(saved);
+  CHECK(text.rfind("[FakeStereoTool]", 0) == 0);
+  CHECK(text.find("sts." + std::to_string(kWebserverPort) + "=8107") != std::string::npos);  // the rest stays
+  CHECK(text.find(*pw) == std::string::npos);
+  CHECK(text.find(*token) == std::string::npos);
+  CHECK(text.find("FAKEKEY0123456789abcdef") == std::string::npos);
+  CHECK(text.find("sts." + std::to_string(kPassword0) + "=") != std::string::npos);  // the line, without its value
+  // and it loads again (the protection set again after the load)
+  REQUIRE_MESSAGE(st->load_preset(saved, &err), err);
+  CHECK(fake().sts("station-pw", kPassword0) == pw);
+
+  // never a web interface without its password
+  fake().set("sts_rejects", kPassword0);
+  CHECK_FALSE(other->set_web_interface(true, 8109));
+  CHECK(fake().sts("station-pw-2", kWebserverEnable) == std::optional<std::string>("0"));
+  fake().set("sts_rejects", -1);
+}
+
+namespace {
+
 // Times of a call into the real library, in ms.
 struct CallTimes {
   std::vector<double> ms;
@@ -638,6 +773,243 @@ TEST_CASE("stereotool: the real library (BAM_TEST_REAL_STEREOTOOL) saves and loa
     return true;
   });
   MESSAGE("real Stereo Tool timing: Delete " << delete_ms.text());
+}
+
+namespace {
+
+// The sockets of this process that are not on the loopback interface, as text (empty: none), and
+// every socket of the process in `listing`. Windows: the TCP and UDP tables (IPv4 and IPv6); POSIX:
+// lsof (nullopt when it cannot be run).
+std::optional<std::vector<std::string>> foreign_sockets(std::string* listing) {
+  std::vector<std::string> bad;
+#ifdef _WIN32
+  const DWORD pid = GetCurrentProcessId();
+  auto v4 = [](DWORD addr) {
+    char text[INET_ADDRSTRLEN] = {};
+    in_addr a{};
+    a.s_addr = addr;
+    inet_ntop(AF_INET, &a, text, sizeof text);
+    return std::string(text);
+  };
+  auto v6 = [](const UCHAR* addr) {
+    char text[INET6_ADDRSTRLEN] = {};
+    inet_ntop(AF_INET6, addr, text, sizeof text);
+    return std::string(text);
+  };
+  auto port = [](DWORD p) { return std::to_string(ntohs(static_cast<u_short>(p))); };
+  auto table = [](auto get) {
+    ULONG size = 0;
+    get(nullptr, &size);
+    std::vector<unsigned char> buf(size_t(size) + 16384);
+    size = ULONG(buf.size());
+    if (get(buf.data(), &size) != NO_ERROR) buf.clear();
+    return buf;
+  };
+  auto tcp4 = table([](void* b, ULONG* n) { return GetExtendedTcpTable(b, n, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0); });
+  auto tcp6 = table([](void* b, ULONG* n) { return GetExtendedTcpTable(b, n, FALSE, AF_INET6, TCP_TABLE_OWNER_PID_ALL, 0); });
+  auto udp4 = table([](void* b, ULONG* n) { return GetExtendedUdpTable(b, n, FALSE, AF_INET, UDP_TABLE_OWNER_PID, 0); });
+  auto udp6 = table([](void* b, ULONG* n) { return GetExtendedUdpTable(b, n, FALSE, AF_INET6, UDP_TABLE_OWNER_PID, 0); });
+  if (tcp4.empty() || tcp6.empty() || udp4.empty() || udp6.empty()) return std::nullopt;
+  for (const auto& r : std::span(reinterpret_cast<MIB_TCPTABLE_OWNER_PID*>(tcp4.data())->table,
+                                 reinterpret_cast<MIB_TCPTABLE_OWNER_PID*>(tcp4.data())->dwNumEntries)) {
+    if (r.dwOwningPid != pid) continue;
+    const bool listen = r.dwState == MIB_TCP_STATE_LISTEN;
+    const std::string text = "TCP " + v4(r.dwLocalAddr) + ":" + port(r.dwLocalPort) +
+                             (listen ? std::string(" LISTEN") : " -> " + v4(r.dwRemoteAddr) + ":" + port(r.dwRemotePort));
+    *listing += text + "\n";
+    if (v4(r.dwLocalAddr) != "127.0.0.1" || (!listen && v4(r.dwRemoteAddr) != "127.0.0.1")) bad.push_back(text);
+  }
+  for (const auto& r : std::span(reinterpret_cast<MIB_TCP6TABLE_OWNER_PID*>(tcp6.data())->table,
+                                 reinterpret_cast<MIB_TCP6TABLE_OWNER_PID*>(tcp6.data())->dwNumEntries)) {
+    if (r.dwOwningPid != pid) continue;
+    const std::string text = "TCP6 [" + v6(r.ucLocalAddr) + "]:" + port(r.dwLocalPort) + " -> [" + v6(r.ucRemoteAddr) + "]";
+    *listing += text + "\n";
+    if (v6(r.ucLocalAddr) != "::1") bad.push_back(text);
+  }
+  for (const auto& r : std::span(reinterpret_cast<MIB_UDPTABLE_OWNER_PID*>(udp4.data())->table,
+                                 reinterpret_cast<MIB_UDPTABLE_OWNER_PID*>(udp4.data())->dwNumEntries)) {
+    if (r.dwOwningPid != pid) continue;
+    const std::string text = "UDP " + v4(r.dwLocalAddr) + ":" + port(r.dwLocalPort);
+    *listing += text + "\n";
+    if (v4(r.dwLocalAddr) != "127.0.0.1") bad.push_back(text);
+  }
+  for (const auto& r : std::span(reinterpret_cast<MIB_UDP6TABLE_OWNER_PID*>(udp6.data())->table,
+                                 reinterpret_cast<MIB_UDP6TABLE_OWNER_PID*>(udp6.data())->dwNumEntries)) {
+    if (r.dwOwningPid != pid) continue;
+    const std::string text = "UDP6 [" + v6(r.ucLocalAddr) + "]:" + port(r.dwLocalPort);
+    *listing += text + "\n";
+    if (v6(r.ucLocalAddr) != "::1") bad.push_back(text);
+  }
+#else
+  const std::string command = "lsof -nP -a -p " + std::to_string(bp::current_pid()) + " -i 2>/dev/null";
+  FILE* pipe = popen(command.c_str(), "r");
+  if (!pipe) return std::nullopt;
+  std::string out;
+  char buf[512];
+  while (std::fgets(buf, sizeof buf, pipe)) out += buf;
+  if (pclose(pipe) != 0 && out.empty()) return std::nullopt;  // no lsof, or no socket at all
+  auto loopback = [](const std::string& end) {
+    return end.rfind("127.0.0.1:", 0) == 0 || end.rfind("localhost:", 0) == 0 || end.rfind("[::1]:", 0) == 0;
+  };
+  std::istringstream lines(out);
+  for (std::string line; std::getline(lines, line);) {
+    if (line.rfind("COMMAND", 0) == 0 || line.empty()) continue;
+    *listing += line + "\n";
+    // NAME: "127.0.0.1:8100 (LISTEN)", "127.0.0.1:5000->127.0.0.1:8100 (ESTABLISHED)", "*:5353"
+    std::istringstream fields(line);
+    std::vector<std::string> f;
+    for (std::string x; fields >> x;) f.push_back(x);
+    std::string name;
+    for (const auto& x : f)
+      if (x.find(':') != std::string::npos && x.find("0x") != 0) name = x;
+    const size_t arrow = name.find("->");
+    const std::string local = name.substr(0, arrow);
+    if (!loopback(local) || (arrow != std::string::npos && !loopback(name.substr(arrow + 2)))) bad.push_back(line);
+  }
+#endif
+  return bad;
+}
+
+// The status line Stereo Tool's web server answers "GET /" with ("HTTP/1.0 200 OK"; it sends the
+// page gzip-encoded, which httplib's client refuses without zlib): empty when nothing answers.
+std::string http_status_line(uint16_t port) {
+  std::string err;
+  auto s = bp::TcpStream::connect("127.0.0.1", port, 500, &err);
+  if (!s) return {};
+  const std::string request = "GET / HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n";
+  if (s->send_some({reinterpret_cast<const uint8_t*>(request.data()), request.size()}, 500) != int(request.size())) return {};
+  std::string text;
+  uint8_t buf[512];
+  const int64_t end = bp::monotonic_ns() + 2'000'000'000;
+  while (text.find("\r\n") == std::string::npos && bp::monotonic_ns() < end) {
+    const int n = s->recv_some(buf, 50);
+    if (n < 0) break;
+    text.append(reinterpret_cast<const char*>(buf), size_t(n));
+  }
+  return text.substr(0, text.find("\r\n"));
+}
+
+// A free TCP port on 127.0.0.1 (for the web interface).
+uint16_t free_loopback_port() {
+  std::string err;
+  auto l = bp::TcpListener::listen("127.0.0.1", 0, &err);
+  REQUIRE_MESSAGE(l, err);
+  return l->port();
+}
+
+// The library's own functions, for an instance outside the binding (a preset made "elsewhere").
+struct RawStereoTool {
+  bp::DynamicLibrary lib;
+  st::Create3Fn create3 = nullptr;
+  st::DeleteFn destroy = nullptr;
+  st::SetStsValueFn set = nullptr;
+  st::GetStsValueFn get = nullptr;
+  st::SavePresetFn save = nullptr;
+  explicit RawStereoTool(const std::string& dir) {
+    std::string err;
+    auto l = bp::DynamicLibrary::open({(fs::path(dir) / be::stereotool_library_names().front()).string()}, &err);
+    REQUIRE_MESSAGE(l, err);
+    lib = std::move(*l);
+    create3 = reinterpret_cast<st::Create3Fn>(lib.symbol("stereoTool_Create3"));
+    destroy = reinterpret_cast<st::DeleteFn>(lib.symbol("stereoTool_Delete"));
+    set = reinterpret_cast<st::SetStsValueFn>(lib.symbol("stereoTool_SetStsValue"));
+    get = reinterpret_cast<st::GetStsValueFn>(lib.symbol("stereoTool_GetStsValue"));
+    save = reinterpret_cast<st::SavePresetFn>(lib.symbol("stereoTool_SavePreset"));
+    REQUIRE((create3 && destroy && set && get && save));
+  }
+};
+
+}  // namespace
+
+// Windows CI runs this with the DLL next to the encoder (BAM_TEST_REAL_STEREOTOOL), in a run of its
+// own, never with a licence key. A preset made by an instance outside the binding switches network
+// features on (UECP, stream output where the library has it, MicroMPX, Poll STS, the scheduler)
+// and the web interface without a password; loaded by the binding they are off, the web interface
+// asks for the instance's password, and a preset the binding saves does not carry it. With the web
+// interface serving, every socket of the process is on 127.0.0.1 (listeners and connections).
+TEST_CASE("stereotool: the real library (BAM_TEST_REAL_STEREOTOOL) switches off a preset's network features; its web interface listens on 127.0.0.1 only, behind its password") {
+  const char* dir = std::getenv("BAM_TEST_REAL_STEREOTOOL");
+  if (!dir || !*dir) {
+    MESSAGE("BAM_TEST_REAL_STEREOTOOL not set, real Stereo Tool network test skipped");
+    return;
+  }
+  struct Restore {
+    ~Restore() { be::set_stereotool_library_dirs({}); }
+  } restore;
+  be::set_stereotool_library_dirs({dir});
+  const auto info = be::stereotool_info();  // binds web and UECP to 127.0.0.1 before any instance
+  REQUIRE_MESSAGE(info.available, info.error);
+  TempDir home("real-net");
+
+  // "elsewhere": every network switch on, the web interface on without a password
+  const std::string preset = (fs::path(home.path) / "network.sts").string();
+  std::vector<int> carried;  // the switches this library has (accepted "1")
+  {
+    RawStereoTool raw(dir);
+    gStereoTool* other = raw.create3(false, nullptr, "bam-elsewhere", home.path.c_str(), false);
+    REQUIRE(other);
+    for (const auto& [index, what] : network_switches())
+      if (raw.set(other, index, 0, "1")) {
+        const char* v = nullptr;
+        if (raw.get(other, index, 0, &v) && v && std::string(v) == "1") carried.push_back(index);
+      }
+    raw.set(other, kWebserverEnable, 0, "1");
+    raw.set(other, kWebserverPort, 0, std::to_string(free_loopback_port()).c_str());
+    raw.set(other, kProtectionAny, 0, "0");
+    REQUIRE(raw.save(other, preset.c_str(), kSaveAllSettings));
+    raw.destroy(other);
+  }
+  REQUIRE_FALSE(carried.empty());
+  CHECK(std::find(carried.begin(), carried.end(), 3838) != carried.end());  // PARAM_UECP_Enable: in every build
+  const std::string text = read_file(preset);
+  CHECK(text.find("Enable UECP=1") != std::string::npos);  // the preset does carry them
+  CHECK(text.find("Poll STS Enabled=1") != std::string::npos);
+  CHECK(text.find("Scheduler Enabled=1") != std::string::npos);
+
+  auto st = make("bam-network", "", home.path);  // no licence key, ever
+  const uint16_t port = free_loopback_port();
+  REQUIRE(st->set_web_interface(true, port));
+  std::string err;
+  REQUIRE_MESSAGE(st->load_preset(preset, &err), err);
+  for (const auto& [index, what] : network_switches()) {
+    const auto v = st->sts_value(index);
+    CHECK_MESSAGE((!v || *v == "0"), index << " " << what << " = " << v.value_or("(none)"));
+  }
+  CHECK(st->sts_value(kWebserverPort) == std::optional<std::string>(std::to_string(port)));
+  CHECK(st->sts_value(kWebserverEnable) == std::optional<std::string>("1"));
+  CHECK(st->sts_value(kProtectionAny) == std::optional<std::string>("1"));
+  CHECK(st->sts_value(kPassword0) == std::optional<std::string>(st->web_password()));
+  CHECK(st->web_password().size() >= 16);
+
+  // a preset saved through the binding: without the password
+  const std::string saved = (fs::path(home.path) / ".bounce-2.tmp").string();
+  REQUIRE_MESSAGE(st->save_preset(saved, &err), err);
+  const std::string saved_text = read_file(saved);
+  CHECK(saved_text.size() > 1000);
+  CHECK(saved_text.find(st->web_password()) == std::string::npos);
+  CHECK(saved_text.find("Enable UECP=0") != std::string::npos);
+
+  // the web interface serves (Stereo Tool opens it while processing), on 127.0.0.1 only
+  std::vector<float> buf(480 * 2, 0.0f);
+  bool served = false;
+  for (int round = 0; round < 50 && !served; ++round) {
+    for (int block = 0; block < 20; ++block) {
+      std::fill(buf.begin(), buf.end(), 0.0f);
+      REQUIRE_MESSAGE(st->process(buf.data(), 480), st->failure());
+    }
+    served = http_status_line(port).find(" 200") != std::string::npos;
+  }
+  CHECK_MESSAGE(served, "the web interface did not answer on 127.0.0.1:" << port);
+  std::string listing;
+  const auto bad = foreign_sockets(&listing);
+  if (!bad) {
+    WARN_MESSAGE(false, "the sockets of the process could not be listed");
+  } else {
+    CHECK_MESSAGE(bad->empty(), "sockets outside 127.0.0.1:\n" << listing);
+    CHECK_MESSAGE(listing.find(":" + std::to_string(port)) != std::string::npos, listing);  // the listener was seen
+  }
+  MESSAGE("real Stereo Tool network: " << carried.size() << " network switches carried by a preset, all off after the load; sockets:\n"
+                                       << listing);
 }
 
 #endif  // BAM_FAKE_STEREOTOOL_PATH

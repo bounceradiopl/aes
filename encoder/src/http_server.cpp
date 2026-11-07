@@ -1009,6 +1009,19 @@ struct EncoderHttpServer::Impl {
       send_json(res, {{"ok", true}});
     });
 
+    // Stereo Tool's own web interface password of the station (owner decision: the web interface
+    // asks for it), for the logged-in user on request: {"user": "Admin", "password", "web_port"}.
+    // Never logged; no-store like every answer.
+    get(R"(/api/stations/([A-Za-z0-9_-]+)/processing/web-password)", kSession, [this](const httplib::Request& req, httplib::Response& res) {
+      const std::string id = req.matches[1];
+      if (!has_station(id)) return send_refusal(res, 404, "no_station", "brak stacji „" + id + "”");
+      std::string err;
+      int port = 0;
+      const auto password = engine.processing_web_password(id, &port, &err);
+      if (!password) return send_refusal(res, 409, "not_running", err);
+      send_json(res, {{"user", "Admin"}, {"password", *password}, {"web_port", port}});
+    });
+
     get("/api/logs", kSession, [](const httplib::Request&, httplib::Response& res) {
       json out = json::array();
       for (const auto& e : Logger::instance().recent()) {

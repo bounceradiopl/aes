@@ -3,7 +3,9 @@
 // library's file name (libStereoTool_64.dll / .dylib, ...) in a folder of its own. It exports
 // the stereoTool_* functions the binding uses, with the same signatures, and behaves simply and
 // exactly: the output is the input delayed by `latency` frames and multiplied by `gain` (float),
-// per channel. Presets are small text files holding gain and latency.
+// per channel. Presets are small text files holding gain, latency and every .sts value the
+// instance has (SetStsValue), plus its licence key: what a careless library could write into a
+// preset (the binding must take the secrets out again).
 //
 // The tests steer it through the fake_stereotool_* functions (options, counters, recorded
 // arguments); they open this library by its path, so they share its state with the binding.
@@ -13,7 +15,8 @@
 //   holds the key), process_throws 0 (a C++ exception), process_crashes 0 (Windows: an access
 //   violation, a structured exception), process_sleep_us 0, create_sleep_us 0 (inside Create3),
 //   version_crashes 0 / bind_crashes 0 (Windows: an access violation in GetSoftwareVersion /
-//   global_setBindIp), save_fails 0, sts_rejects -1 (the .sts index SetStsValue refuses),
+//   global_setBindIp), save_fails 0, sts_rejects -1 (the .sts index SetStsValue refuses; GetStsValue
+//   still reads it), sts_unknown -1 (an index the library does not have: Set and Get refuse it),
 //   save_sleep_us 0 (inside SavePreset), version_sleep_us 0 (inside GetSoftwareVersion: a slow load),
 //   delete_sleep_us 0 (inside Delete: the real one takes about 0.5-1.2 s),
 //   process_work_us 0 (inside Process, busy until that long after the call began: a load of known
@@ -47,6 +50,8 @@
 class gStereoTool {
  public:
   std::string name;
+  std::string key;  // as created (written into its presets: see SavePreset)
+  std::string got;  // GetStsValue's result, valid until the next call (as in the real library)
   float gain = 1.0f;
   int latency = 0;
   int channels = 2;
@@ -82,7 +87,7 @@ struct State {
                {"license_valid", 1},   {"create_fails", 0},   {"create_throws", 0},
                {"process_throws", 0},  {"process_crashes", 0}, {"process_sleep_us", 0},
                {"create_sleep_us", 0}, {"version_crashes", 0}, {"bind_crashes", 0},
-               {"save_fails", 0},      {"sts_rejects", -1},    {"save_sleep_us", 0},
+               {"save_fails", 0},      {"sts_rejects", -1},    {"sts_unknown", -1},   {"save_sleep_us", 0},
                {"version_sleep_us", 0}, {"delete_sleep_us", 0}, {"process_work_us", 0}};
     values.clear();
     texts.clear();
@@ -138,8 +143,10 @@ State& state() {
 }
 
 [[noreturn]] void fail_process() { throw std::runtime_error("fake Stereo Tool process failure"); }
+// quotes the key, and its inner text without "<" and ">" as well
 [[noreturn]] void fail_create(const std::string& key) {
-  throw std::runtime_error("fake Create3 failure, key " + key);
+  const bool bracketed = key.size() >= 2 && key.front() == '<' && key.back() == '>';
+  throw std::runtime_error("fake Create3 failure, key " + key + " (" + (bracketed ? key.substr(1, key.size() - 2) : key) + ")");
 }
 
 // Raised with no lock held (see stereoTool_Process).
@@ -208,6 +215,7 @@ FAKE_ST_EXPORT gStereoTool* stereoTool_Create3(const bool has_gui, const char* k
   if (s.opt("create_fails") != 0) return nullptr;
   auto* st = new gStereoTool;
   st->name = st_name ? st_name : "";
+  st->key = key ? key : "";
   st->gain = float(s.opt("gain"));
   st->latency = int(s.opt("latency"));
   st->reset_line();
@@ -296,8 +304,10 @@ FAKE_ST_EXPORT int stereoTool_GetLatency2(gStereoTool* st, int32_t samplerate, b
   return st->latency;
 }
 
-// Preset file: "[FakeStereoTool]", "gain=<float>", "latency=<frames>". Loading resets the web
-// interface settings (as a real preset may carry them) and the delay line.
+// Preset file: "[FakeStereoTool]", "gain=<float>", "latency=<frames>", "sts.<index>=<value>" for
+// each .sts value, "key=<licence key>". Loading resets the web interface settings, then sets every
+// .sts value of the file (as a real preset may carry them: the web interface, the network
+// features), and resets the delay line.
 FAKE_ST_EXPORT bool stereoTool_LoadPreset(gStereoTool* st, const char* filename, int loadsave_type) {
   auto& s = state();
   std::lock_guard<std::mutex> lock(s.mutex);
@@ -309,15 +319,21 @@ FAKE_ST_EXPORT bool stereoTool_LoadPreset(gStereoTool* st, const char* filename,
   if (!f || !std::getline(f, line) || line != "[FakeStereoTool]") return false;
   float gain = st->gain;
   int latency = st->latency;
+  std::map<int, std::string> sts;
   while (std::getline(f, line)) {
     if (line.rfind("gain=", 0) == 0) gain = std::strtof(line.c_str() + 5, nullptr);
     if (line.rfind("latency=", 0) == 0) latency = std::atoi(line.c_str() + 8);
+    const size_t eq = line.find('=');
+    if (line.rfind("sts.", 0) == 0 && eq != std::string::npos) sts[std::atoi(line.c_str() + 4)] = line.substr(eq + 1);
   }
   st->gain = gain;
   st->latency = latency < 0 ? 0 : latency;
   st->reset_line();
   st->sts[kWebserverEnable] = "0";
   st->sts[kWebserverPort] = "8080";
+  const int unknown = int(s.opt("sts_unknown"));
+  for (auto& [index, value] : sts)
+    if (index != unknown) st->sts[index] = std::move(value);
   return true;
 }
 
@@ -339,6 +355,8 @@ FAKE_ST_EXPORT bool stereoTool_SavePreset(gStereoTool* st, const char* filename,
   char gain[32];
   std::snprintf(gain, sizeof gain, "%.9g", double(st->gain));
   f << "[FakeStereoTool]\ngain=" << gain << "\nlatency=" << st->latency << "\n";
+  for (const auto& [index, value] : st->sts) f << "sts." << index << "=" << value << "\n";
+  if (!st->key.empty()) f << "key=" << st->key << "\n";
   return bool(f);
 }
 
@@ -346,7 +364,7 @@ FAKE_ST_EXPORT bool stereoTool_SetStsValue(gStereoTool* st, int index, int subin
   auto& s = state();
   std::lock_guard<std::mutex> lock(s.mutex);
   ++s.value("sts_set_calls");
-  if (subindex != 0 || !value || index == int(s.opt("sts_rejects"))) return false;
+  if (subindex != 0 || !value || index == int(s.opt("sts_rejects")) || index == int(s.opt("sts_unknown"))) return false;
   st->sts[index] = value;
   // a web interface port is one socket: two live instances serving on it is a conflict
   auto serving = [](const gStereoTool* i) {
@@ -356,6 +374,18 @@ FAKE_ST_EXPORT bool stereoTool_SetStsValue(gStereoTool* st, int index, int subin
   if (serving(st))
     for (const gStereoTool* other : s.live)
       if (other != st && serving(other) && other->sts.at(kWebserverPort) == st->sts.at(kWebserverPort)) ++s.value("port_conflicts");
+  return true;
+}
+
+FAKE_ST_EXPORT bool stereoTool_GetStsValue(gStereoTool* st, int index, int subindex, const char** value) {
+  auto& s = state();
+  std::lock_guard<std::mutex> lock(s.mutex);
+  ++s.value("sts_get_calls");
+  if (!value || subindex != 0 || index == int(s.opt("sts_unknown"))) return false;
+  auto it = st->sts.find(index);
+  if (it == st->sts.end()) return false;
+  st->got = it->second;
+  *value = st->got.c_str();
   return true;
 }
 

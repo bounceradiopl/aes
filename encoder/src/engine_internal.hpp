@@ -367,6 +367,9 @@ class ProcessingWorker {
   uint32_t delay_frames() const { return delay_.load(std::memory_order_relaxed); }
   // The web interface port it was built with (ProcessingSettings::web_port).
   int configured_web_port() const;
+  // Stereo Tool's web interface password of every instance this worker builds (random, fixed for
+  // the worker's lifetime; account "Admin"). A secret: never logged, never in the status.
+  const std::string& web_password() const;
   // Set once its Stereo Tool thread has let go of the instance for good (after stop(); never when
   // that thread is stuck in the library): ProcessingSettings::wait_for_gone of a later worker.
   std::shared_ptr<const std::atomic<bool>> instance_gone() const;

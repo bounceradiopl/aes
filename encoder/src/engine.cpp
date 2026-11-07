@@ -928,4 +928,22 @@ bool EncoderEngine::restart_processing(const std::string& station_id, std::strin
   return true;
 }
 
+std::optional<std::string> EncoderEngine::processing_web_password(const std::string& station_id, int* web_port,
+                                                                 std::string* error) const {
+  const auto& m = *impl_;
+  std::lock_guard lock(m.m);
+  auto it = m.stations.find(station_id);
+  if (!m.running || it == m.stations.end() || !it->second->proc.worker) {
+    if (error) *error = "ta stacja nie ma działającego processingu";
+    return std::nullopt;
+  }
+  const ProcessingRuntime& p = it->second->proc;
+  if (p.web_port <= 0) {
+    if (error) *error = "interfejs WWW Stereo Tool tej stacji jest wyłączony (brak portu)";
+    return std::nullopt;
+  }
+  if (web_port) *web_port = p.web_port;
+  return p.worker->web_password();
+}
+
 }  // namespace bam::encoder

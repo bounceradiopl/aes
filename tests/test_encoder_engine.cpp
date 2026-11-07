@@ -1802,7 +1802,7 @@ TEST_CASE("encoder engine: save the station's settings as a preset, restart proc
   REQUIRE_MESSAGE(saved.ok(), saved.message);
   std::string data;
   REQUIRE(engine.get_preset("strojony.sts", &data).ok());
-  CHECK(data == fake_preset(0.5, 128));  // what the instance runs with
+  CHECK(data.rfind(fake_preset(0.5, 128), 0) == 0);  // what the instance runs with (then its .sts values)
   CHECK(fake().value("save_calls") == 1);
   CHECK(processing_of(engine, "s1").state == be::ProcessingState::Running);  // no bypass for a save
   CHECK(engine.save_processing_preset("s1", "STROJONY.sts").error == be::PresetError::Exists);

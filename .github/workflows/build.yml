@@ -195,11 +195,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ctest -C Release --output-on-failure -E '^bam_tests$'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Stereo Tool - the real DLL without a licence key (load, preset, process, timing)
+      - name: Stereo Tool - the real DLL without a licence key (load, preset, process, timing, network)
         # in a run of its own (the library stays loaded in the process): version 11.07, Create3
         # without a key, a preset saved by the DLL under the preset store's temporary name and
         # loaded again, 20 s of audio with the licence check every 250 ms, Delete; prints the times
-        # of Create3, Process(480 frames), CheckLicenseValid, SavePreset, LoadPreset and Delete
+        # of Create3, Process(480 frames), CheckLicenseValid, SavePreset, LoadPreset and Delete.
+        # Network: a preset made with UECP, stream output, MicroMPX, Poll STS and the scheduler on
+        # and the web interface without a password is loaded through the binding: every network
+        # switch is off (GetStsValue), the web interface asks for the instance's password, a preset
+        # saved through the binding does not hold it, and with the web interface serving, the
+        # process's TCP and UDP endpoints (GetExtendedTcpTable/GetExtendedUdpTable, IPv4 and IPv6)
+        # are on 127.0.0.1 only, listeners and connections
         timeout-minutes: 10
         working-directory: build
         run: |
@@ -210,6 +216,7 @@ jobs:
           & Release\bam_tests.exe '--test-case=stereotool: the real library*' | Tee-Object -FilePath real-stereotool.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not (Select-String -Quiet -SimpleMatch 'real Stereo Tool timing: Process(480)' real-stereotool.log)) { throw 'the real Stereo Tool test did not run' }
+          if (-not (Select-String -Quiet -SimpleMatch 'real Stereo Tool network:' real-stereotool.log)) { throw 'the real Stereo Tool network test did not run' }
       - name: Configure and build 32-bit (ASIO driver for 32-bit hosts such as 32-bit mAirList)
         run: |
           cmake -S . -B build32 -A Win32 -DBAM_WITH_CODECS=OFF
