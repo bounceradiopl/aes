@@ -63,7 +63,8 @@ class EncoderHttpServer {
 //    change from the panel.
 //  - wrong Stereo Tool processing settings never stop a station (never silence because of
 //    processing): its processing is switched off, a preset name or key of the wrong shape is
-//    dropped (keys are never logged), the station runs unprocessed; a bad default key is dropped,
+//    dropped, the station runs unprocessed; a bad default key is dropped; before a key is
+//    dropped the file is kept as "<path>.bad" and the drop is logged (never the key itself);
 //    a bad web port base goes back to 8100 (8200 when the panel port is among 8100–8115).
 //  - the warnings of config_warnings (the same Stereo Tool key on two stations) are logged.
 EncoderConfig load_startup_config(const std::string& path);

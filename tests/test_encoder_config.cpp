@@ -1016,7 +1016,8 @@ TEST_CASE("encoder config: preset names") {
   for (const char* ok : {"FM Rock.sts", "a.sts", "Mowa_2.v1-test.sts", "x.STS", "012345678901234567890123456789012345678901234567890123456789.sts"})
     CHECK_MESSAGE(be::valid_preset_name(ok), ok);
   CHECK(std::string("012345678901234567890123456789012345678901234567890123456789.sts").size() == 64);
-  for (const char* bad : {"", ".sts", "0123456789012345678901234567890123456789012345678901234567890.sts", "FM Rock", "FM Rock.sts.txt", "../x.sts", "a/b.sts", "a\\b.sts", "C:x.sts", "zła.sts",
+  CHECK(be::valid_preset_name("-a.sts"));  // a letter or digit somewhere before ".sts" is enough
+  for (const char* bad : {"", ".sts", " .sts", "..sts", "-.sts", "_ .sts", " FM.sts", "0123456789012345678901234567890123456789012345678901234567890.sts", "FM Rock", "FM Rock.sts.txt", "../x.sts", "a/b.sts", "a\\b.sts", "C:x.sts", "zła.sts",
                           "a\tb.sts", "CON.sts", "nul.sts", "com1.sts", "COM0.sts", "LPT9.sts", "prn.x.sts", "a*.sts", "a?.sts", "a\".sts"})
     CHECK_MESSAGE(!be::valid_preset_name(bad), bad);
 }
@@ -1055,6 +1056,12 @@ TEST_CASE("encoder config: processing validation names the station and never the
     CHECK(contains(find_issue(issues, "stations[0].processing.preset")->message, ".sts"));
     c.stations[0].processing.preset = std::string(70, 'a') + ".sts";
     CHECK(find_issue(be::validate_config(c), "stations[0].processing.preset"));
+    c.stations[0].processing.preset = "<SEKRETP-wklejony>";  // a key pasted into the preset field is not echoed
+    issues = be::validate_config(c);
+    REQUIRE(find_issue(issues, "stations[0].processing.preset"));
+    CHECK_FALSE(any_contains(issues, "SEKRETP"));
+    c.stations[0].processing.preset = "x<SEKRETP>.sts";
+    CHECK_FALSE(any_contains(be::validate_config(c), "SEKRETP"));
     c.stations[0].processing.preset = "bad\x01name.sts";  // control characters are not echoed
     issues = be::validate_config(c);
     REQUIRE(find_issue(issues, "stations[0].processing.preset"));

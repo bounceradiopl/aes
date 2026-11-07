@@ -698,13 +698,64 @@ TEST_CASE("encoder service: startup configuration") {
     CHECK(c.stations[0].processing.preset.empty());
     CHECK(c.stations[1].processing.license_key == "<SEKRETB-dobry>");  // valid: kept
     CHECK(c.stations[2].processing.preset == "FM.sts");
-    CHECK_FALSE(exists(path + ".bad"));
-    bool told = false;
+    // a dropped key is not lost: the file is kept as .bad (admin-only folder, like config.json)
+    REQUIRE(exists(path + ".bad"));
+    CHECK(read_file(path + ".bad") == read_file(path));
+    CHECK(read_file(path + ".bad").find("SEKRETA-bez-nawiasow") != std::string::npos);
+    bool told = false, told_station_key = false, told_default_key = false;
     for (const auto& e : bam::Logger::instance().recent()) {
       CHECK_MESSAGE(e.message.find("SEKRET") == std::string::npos, e.message);
       told |= e.message.find("„Trzy”") != std::string::npos && e.message.find("processing") != std::string::npos;
+      told_station_key |= e.message.find("Klucz licencji Stereo Tool stacji „Jeden” usunięty z konfiguracji (kopia pliku: " +
+                                         path + ".bad)") != std::string::npos;
+      told_default_key |=
+          e.message.find("Domyślny klucz Stereo Tool usunięty z konfiguracji (kopia pliku: " + path + ".bad)") != std::string::npos;
     }
     CHECK(told);
+    CHECK(told_station_key);
+    CHECK(told_default_key);
+    std::remove(path.c_str());
+    std::remove((path + ".bad").c_str());
+  }
+  SUBCASE("only a bad preset name: processing off, no copy of the file") {
+    const std::string path = unique_path("start");
+    json j = json::parse(be::config_to_json(be::default_encoder_config()));
+    j["stations"] = json::array({station_json("Preset", true, "haslo1", "/a.mp3")});
+    j["stations"][0]["processing"] = {{"enabled", true}, {"license_key", "<SEKRETC-dobry>"}, {"preset", "zly/preset.sts"}};
+    std::ofstream(path) << j.dump();
+    const be::EncoderConfig c = be::load_startup_config(path);
+    CHECK(be::validate_config(c).empty());
+    REQUIRE(c.stations.size() == 1);
+    CHECK(c.stations[0].enabled);
+    CHECK_FALSE(c.stations[0].processing.enabled);
+    CHECK(c.stations[0].processing.preset.empty());
+    CHECK(c.stations[0].processing.license_key == "<SEKRETC-dobry>");
+    CHECK_FALSE(exists(path + ".bad"));
+    std::remove(path.c_str());
+  }
+  SUBCASE("two stations on one Stereo Tool key: one warning logged, naming both, without the key") {
+    const std::string path = unique_path("start");
+    json j = json::parse(be::config_to_json(be::default_encoder_config()));
+    j["stations"] = json::array({station_json("Klucz Pierwsza", true, "haslo1", "/a.mp3"),
+                                 station_json("Klucz Druga", true, "haslo2", "/b.mp3")});
+    for (auto& st : j["stations"]) st["processing"] = {{"enabled", true}, {"license_key", "<SEKRETW-wspolny>"}, {"preset", "FM.sts"}};
+    std::ofstream(path) << j.dump();
+    const be::EncoderConfig c = be::load_startup_config(path);
+    CHECK(be::validate_config(c).empty());
+    REQUIRE(c.stations.size() == 2);
+    CHECK(c.stations[0].processing.enabled);  // a warning only: both keep processing
+    CHECK(c.stations[1].processing.enabled);
+    int warnings = 0;
+    for (const auto& e : bam::Logger::instance().recent()) {
+      CHECK_MESSAGE(e.message.find("SEKRET") == std::string::npos, e.message);
+      if (e.message.find("„Klucz Druga”") != std::string::npos && e.message.find("„Klucz Pierwsza”") != std::string::npos &&
+          e.message.find("ten sam klucz licencji Stereo Tool") != std::string::npos) {
+        ++warnings;
+        CHECK(e.level == bam::LogLevel::Warning);
+      }
+    }
+    CHECK(warnings == 1);
+    CHECK_FALSE(exists(path + ".bad"));
     std::remove(path.c_str());
   }
   SUBCASE("a bad web port base next to a panel on 8100: a base that does not hold the panel port") {

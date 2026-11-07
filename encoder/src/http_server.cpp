@@ -769,7 +769,7 @@ void reset_global(EncoderConfig& c, const std::string& field) {
   }
   if (field == "http_port") c.http_port = d.http_port;
   if (field == "stations" && c.stations.size() > static_cast<size_t>(kMaxStations)) c.stations.resize(kMaxStations);
-  if (field == "stereotool_default_key") c.stereotool_default_key.clear();  // a bad key is no key (never logged)
+  // a bad default key is dropped by startup_config (after keeping a copy of the file)
   if (field == "stereotool_web_port_base") {
     // the default, or the next hundred when the panel port is among the default's ports
     c.stereotool_web_port_base = d.stereotool_web_port_base;
@@ -781,11 +781,15 @@ void reset_global(EncoderConfig& c, const std::string& field) {
 // Never silence because of processing: a station whose processing settings are wrong keeps
 // running without processing. The value the issue is about is dropped (a preset name or a key of
 // the wrong shape; for a missing preset or key the field is empty already); the rest is kept.
-void disable_processing(EncoderConfig& c, size_t station, const std::string& field) {
+// A key is dropped only through `drop_key`, which keeps a copy of the file first (the key may be
+// a real licence with a typo) and logs it, never the key itself.
+void disable_processing(EncoderConfig& c, size_t station, const std::string& field,
+                        const std::function<void(std::string&, const std::string&)>& drop_key) {
   if (station >= c.stations.size()) return;
   StationConfig& st = c.stations[station];
   if (field.ends_with(".processing.preset")) st.processing.preset.clear();
-  if (field.ends_with(".processing.license_key")) st.processing.license_key.clear();
+  if (field.ends_with(".processing.license_key") && !st.processing.license_key.empty())
+    drop_key(st.processing.license_key, "Klucz licencji Stereo Tool stacji " + station_name(st, station));
   if (!st.processing.enabled) return;
   st.processing.enabled = false;
   log_warning("Stacja " + station_name(st, station) +
@@ -811,6 +815,13 @@ EncoderConfig startup_config(const std::string& path) {
   for (const auto& n : normalize_config(cfg)) log_info(n);
 
   bool backed_up = false;
+  // A dropped Stereo Tool key is never lost: config.json is copied to .bad (the same admin-only
+  // folder) before the key is removed from the running configuration.
+  const auto drop_key = [&](std::string& key, const std::string& what) {
+    if (!backed_up) backed_up = platform::copy_file(path, path + ".bad");
+    key.clear();
+    log_warning(what + " usunięty z konfiguracji (kopia pliku: " + path + ".bad)");
+  };
   for (int pass = 0; pass < 2; ++pass) {
     const auto issues = validate_config(cfg);
     if (issues.empty()) return cfg;
@@ -819,12 +830,14 @@ EncoderConfig startup_config(const std::string& path) {
       if (pass == 0) log_warning("Konfiguracja: " + i.message);
       const auto place = issue_place(i.field);
       if (!place) {
+        if (i.field == "stereotool_default_key" && !cfg.stereotool_default_key.empty())
+          drop_key(cfg.stereotool_default_key, "Domyślny klucz Stereo Tool");
         reset_global(cfg, i.field);
         continue;
       }
       if (place->list == "processing") {  // also in pass 1: a default key dropped in pass 0 shows here
         if (pass == 1) log_warning("Konfiguracja: " + i.message);
-        disable_processing(cfg, place->station, i.field);
+        disable_processing(cfg, place->station, i.field, drop_key);
         continue;
       }
       bad.insert(place->station);

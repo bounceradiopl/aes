@@ -129,15 +129,19 @@ std::string trim_blanks(std::string_view s) {
   return std::string(s.substr(b, e - b));
 }
 
-// Why a Stereo Tool key has the wrong shape, or nullptr. Never mentions the key itself.
-const char* key_shape_error(std::string_view key) {
-  if (key.size() > kMaxStereoToolKeyChars) return "może mieć najwyżej 256 znaków";
+// Why a non-empty Stereo Tool key has the wrong shape, or "" when it is fine. Never mentions
+// the key itself.
+std::string key_shape_error(std::string_view key) {
+  if (key.empty()) return {};
+  if (key.size() > kMaxStereoToolKeyChars) return "może mieć najwyżej " + std::to_string(kMaxStereoToolKeyChars) + " znaków";
   for (unsigned char ch : key)
     if (ch < 0x20 || ch > 0x7e) return "może zawierać tylko drukowalne znaki ASCII (bez polskich liter i znaków sterujących)";
   if (key.size() < 2 || key.front() != '<' || key.back() != '>')
     return "musi zaczynać się znakiem „<” i kończyć znakiem „>” (wklej cały klucz z nawiasami)";
-  return nullptr;
+  return {};
 }
+
+bool is_alnum(char ch) { return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'); }
 
 bool in_gain_range(double db) { return db >= kGainMinDb && db <= kGainMaxDb; }
 
@@ -278,13 +282,14 @@ EncoderConfig default_encoder_config() { return EncoderConfig{}; }
 
 bool valid_preset_name(std::string_view name) {
   constexpr std::string_view ext = ".sts";
-  if (name.size() <= ext.size() || name.size() > kMaxPresetNameChars) return false;
+  if (name.size() <= ext.size() || name.size() > kMaxPresetNameChars || name.front() == ' ') return false;
   for (char ch : name) {
-    const bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == ' ' || ch == '_' ||
-                    ch == '.' || ch == '-';
+    const bool ok = is_alnum(ch) || ch == ' ' || ch == '_' || ch == '.' || ch == '-';
     if (!ok) return false;
   }
   if (lower(std::string(name.substr(name.size() - ext.size()))) != ext) return false;
+  const std::string_view before = name.substr(0, name.size() - ext.size());
+  if (std::none_of(before.begin(), before.end(), is_alnum)) return false;  // " .sts", "..sts", "-.sts"
   // Windows device names stay devices whatever the extension ("CON.sts" opens the console)
   const std::string stem = lower(trim_blanks(name.substr(0, name.find('.'))));
   for (const char* device : {"con", "prn", "aux", "nul"})
@@ -396,15 +401,16 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
   const bool http_port_ok = c.http_port >= 1 && c.http_port <= 65535;
   if (!http_port_ok) add("http_port", "Port panelu musi być w zakresie 1–65535");
   if (c.stereotool_web_port_base < kMinStereoToolWebPortBase || c.stereotool_web_port_base > kMaxStereoToolWebPortBase) {
-    add("stereotool_web_port_base", "Port bazowy interfejsu WWW Stereo Tool musi być w zakresie 1024–65000");
+    add("stereotool_web_port_base", "Port bazowy interfejsu WWW Stereo Tool musi być w zakresie " +
+                                        std::to_string(kMinStereoToolWebPortBase) + "–" + std::to_string(kMaxStereoToolWebPortBase));
   } else if (const int last = c.stereotool_web_port_base + kMaxStations - 1;
              http_port_ok && c.http_port >= c.stereotool_web_port_base && c.http_port <= last) {
     add("stereotool_web_port_base", "Porty interfejsu WWW Stereo Tool (" + std::to_string(c.stereotool_web_port_base) + "–" +
                                         std::to_string(last) + ") obejmują port panelu " + std::to_string(c.http_port) +
                                         ": zmień port bazowy albo port panelu");
   }
-  if (const char* why = key_shape_error(c.stereotool_default_key); why && !c.stereotool_default_key.empty())
-    add("stereotool_default_key", std::string("Domyślny klucz Stereo Tool ") + why);
+  if (const std::string why = key_shape_error(c.stereotool_default_key); !why.empty())
+    add("stereotool_default_key", "Domyślny klucz Stereo Tool " + why);
   if (c.stations.size() > static_cast<size_t>(kMaxStations))
     add("stations", "Najwyżej " + std::to_string(kMaxStations) + " stacji (jest " + std::to_string(c.stations.size()) + ")");
 
@@ -534,11 +540,14 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
     const ProcessingConfig& pr = st.processing;
     const std::string pf = sp + ".processing.";
     if (!pr.preset.empty() && !valid_preset_name(pr.preset)) {
-      const bool quotable = pr.preset.size() <= kMaxPresetNameChars && !has_control(pr.preset);
+      // never quoted when it could be a key pasted into the wrong field
+      const bool quotable = pr.preset.size() <= kMaxPresetNameChars && !has_control(pr.preset) &&
+                            pr.preset.find_first_of("<>") == std::string::npos;
       add(pf + "preset", label + "nieprawidłowa nazwa presetu Stereo Tool" + (quotable ? " „" + pr.preset + "”" : std::string()) +
-                             " (litery, cyfry, spacja, „-”, „_” i „.”, z rozszerzeniem .sts, najwyżej 64 znaki)");
+                             " (litery, cyfry, spacja, „-”, „_” i „.”, bez spacji na początku, z rozszerzeniem .sts, najwyżej " +
+                             std::to_string(kMaxPresetNameChars) + " znaki)");
     }
-    if (const char* why = key_shape_error(pr.license_key); why && !pr.license_key.empty())
+    if (const std::string why = key_shape_error(pr.license_key); !why.empty())
       add(pf + "license_key", label + "klucz licencji Stereo Tool " + why);
     if (pr.enabled) {
       if (pr.preset.empty()) add(pf + "preset", label + "processing wymaga wybrania presetu Stereo Tool");

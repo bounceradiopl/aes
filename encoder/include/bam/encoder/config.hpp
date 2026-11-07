@@ -114,8 +114,9 @@ struct EncoderConfigIssue {
 
 EncoderConfig default_encoder_config();  // no stations, panel on 0.0.0.0:8070
 
-// A preset file name: 1–64 characters of A–Z, a–z, 0–9, space, '_', '.' and '-', ending in ".sts"
-// (any case) with something before it, and not a Windows device name (CON, PRN, AUX, NUL,
+// A preset file name: at most 64 characters of A–Z, a–z, 0–9, space, '_', '.' and '-', not
+// starting with a space, ending in ".sts" (any case) with at least one letter or digit before
+// it, and not a Windows device name (CON, PRN, AUX, NUL,
 // COM0–9, LPT0–9, whatever follows the first '.'). Such a name is safe as a file name in the
 // presets folder on every system (no path separators, no drive, no "..", no trailing dot).
 bool valid_preset_name(std::string_view name);
