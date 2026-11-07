@@ -229,7 +229,8 @@ struct ProcessingSettings {
   // a worker never hands a block to no stream list.
   std::vector<std::shared_ptr<StreamWorker>> streams;
   // Instances to wait for before this one is created (other workers' instance_gone(), being
-  // stopped): the ones on the same web interface port, which is one socket. Waited for at most the
+  // stopped): the ones on the same web interface port, which is one socket, and the station's own
+  // old one (the same home folder, also without a web port). Waited for at most the
   // stop timeout + 1 s (an instance stuck in the library keeps its port: then it is refused,
   // logged); meanwhile the streams get the unprocessed mix, as during any setup.
   std::vector<std::shared_ptr<const std::atomic<bool>>> wait_for_gone;
@@ -374,6 +375,9 @@ class ProcessingWorker {
   // Stereo Tool's web interface password of every instance this worker builds (random, fixed for
   // the worker's lifetime; account "Admin"). A secret: never logged, never in the status.
   const std::string& web_password() const;
+  // Its Stereo Tool thread holds an instance right now (a worker in the bypass for want of a
+  // library, a preset or after a failure holds none).
+  bool has_instance() const;
   // Set once its Stereo Tool thread has let go of the instance for good (after stop(); never when
   // that thread is stuck in the library): ProcessingSettings::wait_for_gone of a later worker.
   std::shared_ptr<const std::atomic<bool>> instance_gone() const;

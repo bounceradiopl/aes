@@ -1927,6 +1927,10 @@ TEST_CASE("encoder engine: at the end of the service Stereo Tool instances are n
     st.processing = processing("P.sts", i == 1 ? kKey1 : kKey2);
     cfg.stations.push_back(st);
   }
+  // and one whose preset is not there: its worker runs without an instance (nothing to leave)
+  be::StationConfig no_preset = station("s4", "Radio Bez Presetu");
+  no_preset.processing = processing("Brak.sts", kKey2);
+  cfg.stations.push_back(no_preset);
   cfg = ready(cfg);
   be::EncoderEngineOptions opts = st_options(dir);
   opts.keep_stereotool_at_stop = true;
@@ -1935,20 +1939,22 @@ TEST_CASE("encoder engine: at the end of the service Stereo Tool instances are n
   std::string err;
   REQUIRE_MESSAGE(engine.start(cfg, &err), err);
   for (const char* id : {"s1", "s2", "s3"}) REQUIRE(processing_running(engine, id));
-  REQUIRE(fake().value("live") == 3);
+  REQUIRE(wait_for([&] { return processing_of(engine, "s4").state == be::ProcessingState::Error; }, 5000));
+  REQUIRE(wait_for([] { return fake().value("live") == 3; }, 5000));
+  const long long deleted0 = fake().value("delete_calls");  // s4's instance, deleted when its preset failed
   fake().set("delete_sleep_us", 1'000'000);  // like the real library: deleting takes a while
   // a station removed while the service runs: its instance is deleted
   be::EncoderConfig fewer = cfg;
-  fewer.stations.pop_back();
+  fewer.stations.erase(fewer.stations.begin() + 2);
   engine.apply_config(fewer);
-  CHECK(wait_for([] { return fake().value("deleted") == 1; }, 5000));
+  CHECK(wait_for([&] { return fake().value("deleted") == deleted0 + 1; }, 5000));
   CHECK(fake().value("live") == 2);
   // the end of the service: no Delete, and no waiting for one
   const int64_t t0 = bp::monotonic_ns();
   engine.stop();
   const int64_t took = bp::monotonic_ns() - t0;
   CHECK_MESSAGE(took < 900'000'000, "stop took " << took / 1'000'000 << " ms");
-  CHECK(fake().value("delete_calls") == 1);
+  CHECK(fake().value("delete_calls") == deleted0 + 1);
   CHECK(fake().value("live") == 2);
   CHECK(logged("instancje Stereo Tool (2) nie są usuwane przy zatrzymaniu usługi"));
 }
@@ -2113,6 +2119,62 @@ TEST_CASE("encoder engine: a web interface port is bound by one instance at a ti
   }
   CHECK(fake().value("port_conflicts") == 0);
   CHECK(fake().value("live") == 1);
+}
+
+TEST_CASE("encoder engine: a new instance without a web port waits for the old one to let go of the station's home folder") {
+  UseFake use;
+  StDir dir("samehome");
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  cfg.stations = {station("s1", "Radio Ten Sam Folder")};
+  cfg.stations[0].processing = processing("P.sts");
+  REQUIRE(cfg.stations[0].processing.web_port_slot == -1);  // not normalized: no web port (port 0)
+  REQUIRE(be::validate_config(cfg).empty());
+  be::EncoderEngine engine(st_options(dir));
+  REQUIRE(engine.put_preset("P.sts", fake_preset(0.5, 64)).ok());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  REQUIRE(processing_running(engine, "s1"));
+  fake().set("delete_sleep_us", 400'000);  // the old instance lets go of the folder slowly
+  cfg.stations[0].processing.license_key = kKey2;  // a new instance, in the same station-s1 folder
+  engine.apply_config(cfg);
+  REQUIRE(processing_running(engine, "s1"));
+  CHECK(fake().value("created") == 2);
+  CHECK(fake().value("home_conflicts") == 0);
+  CHECK(fake().value("live") == 1);
+}
+
+TEST_CASE("encoder engine: one preset save at a time in the whole service") {
+  UseFake use;
+  StDir dir("onesave");
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  cfg.stations = {station("s1", "Radio Zapis Jeden"), station("s2", "Radio Zapis Dwa")};
+  cfg.stations[0].processing = processing("P.sts");
+  cfg.stations[1].processing = processing("P.sts", kKey2);
+  cfg = ready(cfg);
+  be::EncoderEngine engine(st_options(dir));
+  REQUIRE(engine.put_preset("P.sts", fake_preset(0.5, 64)).ok());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  REQUIRE(processing_running(engine, "s1"));
+  REQUIRE(processing_running(engine, "s2"));
+  fake().set("save_sleep_us", 800'000);
+  be::PresetResult first;
+  std::thread a([&] { first = engine.save_processing_preset("s1", "Pierwszy.sts"); });
+  bp::sleep_ns(200'000'000);
+  const int64_t t0 = bp::monotonic_ns();
+  const be::PresetResult second = engine.save_processing_preset("s2", "Drugi.sts");  // another station
+  const int64_t took = bp::monotonic_ns() - t0;
+  a.join();
+  CHECK(first.ok());
+  CHECK(second.error == be::PresetError::Busy);
+  CHECK_MESSAGE(second.message.find("już trwa") != std::string::npos, second.message);
+  CHECK_MESSAGE(took < 300'000'000, "the refusal waited " << took / 1'000'000 << " ms");  // no HTTP thread held
+  std::string data;
+  CHECK_FALSE(engine.get_preset("Drugi.sts", &data).ok());
+  fake().set("save_sleep_us", 0);
+  CHECK(engine.save_processing_preset("s2", "Drugi.sts").ok());  // once the first is over
 }
 
 TEST_CASE("encoder engine: a configuration without a web port slot runs Stereo Tool without its web interface") {

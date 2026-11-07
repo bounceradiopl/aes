@@ -24,6 +24,9 @@
 
 namespace bam::encoder::detail {
 
+// Stereo Tool threads stop() gave up on that have not ended yet (stereotool_threads_left_behind).
+std::atomic<int> g_threads_left{0};
+
 namespace {
 
 using PW = ProcessingWorker;
@@ -104,6 +107,7 @@ struct ProcessingWorker::Core {
   Done done = Done::None;
   bool quit = false;
   bool finished = false;
+  bool left_behind = false;  // stop() gave up waiting for this thread (counted in g_threads_left)
   std::vector<float> job;  // kBlockFrames stereo, processed in place
   size_t job_frames = 0;
   uint32_t latency = 0;              // Ready
@@ -118,6 +122,7 @@ struct ProcessingWorker::Core {
   std::atomic<double> cpu_pct{0};
   std::atomic<int> licence{-1};  // the last check: -1 none yet, 0 invalid, 1 valid
   std::atomic<int> web_port_active{0};  // the instance is up with its web interface on this port
+  std::atomic<bool> has_instance{false};  // the Stereo Tool thread holds an instance
   std::atomic<bool> side_busy{false};   // a save is under way (the output thread waits without bypassing)
   std::atomic<bool> keep_instance{false};  // keep_instance_at_stop(): no stereoTool_Delete when it ends
   // the save under way was given up by its caller after this many ms (0: not given up / none)
@@ -167,6 +172,7 @@ uint64_t last_failure(const Core& c) {
 void drop_instance(Core& c) {
   c.web_port_active.store(0);
   c.st.reset();
+  c.has_instance.store(false);
 }
 
 // Builds the instance (or keeps a working one on restart, loading a new preset into it when one
@@ -181,8 +187,8 @@ bool take_requested_preset(Core& c) {
   return true;
 }
 
-// Another worker's instance on the same web interface port goes first (ProcessingSettings::
-// wait_for_gone): bounded, and given up when this worker stops.
+// Another worker's instance on the same web interface port, or in the same home folder, goes first
+// (ProcessingSettings::wait_for_gone): bounded, and given up when this worker stops.
 void wait_for_port(Core& c) {
   if (c.wait_for_gone.empty()) return;
   const int64_t until = platform::monotonic_ns() + (int64_t(stop_timeout_ms()) + 1000) * 1'000'000;
@@ -211,7 +217,7 @@ Done setup(Core& c, bool restart, uint32_t* latency) {
   if (!restart || !c.st || c.st->failed()) {
     drop_instance(c);  // a failed one goes first: its memory and web interface port
     if (restart) stereotool_reload();  // a library put in place since (nothing after a crash)
-    if (c.web_port > 0) wait_for_port(c);
+    wait_for_port(c);  // the station's old instance (its home folder) and its web port, if any
     std::string err;
     auto st = StereoToolInstance::create(c.key, c.name, c.home, &err);
     if (!st) {
@@ -235,6 +241,7 @@ Done setup(Core& c, bool restart, uint32_t* latency) {
       return Done::SetupFailed;
     }
     c.st = std::move(st);
+    c.has_instance.store(true);
     c.web_port_active.store(web ? c.web_port : 0);
   } else if (take_requested_preset(c)) {
     std::string err;
@@ -373,6 +380,7 @@ void st_main(std::shared_ptr<Core> c) {
   {
     std::lock_guard lock(c->m);
     c->finished = true;
+    if (c->left_behind) --g_threads_left;  // it did end after all
   }
   c->cv.notify_all();
 }
@@ -418,6 +426,8 @@ ProcessingWorker::~ProcessingWorker() { stop(); }
 int ProcessingWorker::configured_web_port() const { return core_->web_port; }
 
 const std::string& ProcessingWorker::web_password() const { return core_->web_password; }
+
+bool ProcessingWorker::has_instance() const { return core_->has_instance.load(); }
 
 std::shared_ptr<const std::atomic<bool>> ProcessingWorker::instance_gone() const { return core_->gone; }
 
@@ -502,6 +512,10 @@ void ProcessingWorker::stop() {
   {
     std::unique_lock lock(core_->m);
     finished = core_->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] { return core_->finished; });
+    if (!finished) {
+      core_->left_behind = true;  // under the lock the thread sets finished under
+      ++g_threads_left;
+    }
   }
   if (finished) {
     st_thread_.join();
@@ -924,3 +938,7 @@ void ProcessingWorker::run() {
 }
 
 }  // namespace bam::encoder::detail
+
+namespace bam::encoder {
+int stereotool_threads_left_behind() { return detail::g_threads_left.load(); }
+}  // namespace bam::encoder

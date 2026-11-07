@@ -51,6 +51,7 @@ class gStereoTool {
  public:
   std::string name;
   std::string key;  // as created (written into its presets: see SavePreset)
+  std::string home;  // as created
   std::string got;  // GetStsValue's result, valid until the next call (as in the real library)
   float gain = 1.0f;
   int latency = 0;
@@ -216,6 +217,10 @@ FAKE_ST_EXPORT gStereoTool* stereoTool_Create3(const bool has_gui, const char* k
   auto* st = new gStereoTool;
   st->name = st_name ? st_name : "";
   st->key = key ? key : "";
+  st->home = home_path ? home_path : "";
+  // one home folder is one instance's (its .ini, its presets): two live ones in it is a conflict
+  for (const gStereoTool* other : s.live)
+    if (!st->home.empty() && other->home == st->home) ++s.value("home_conflicts");
   st->gain = float(s.opt("gain"));
   st->latency = int(s.opt("latency"));
   st->reset_line();
@@ -434,7 +439,8 @@ FAKE_ST_EXPORT long long fake_stereotool_drop_live() {
 }
 
 // Counters ("created", "deleted", "process_calls", "bind_calls", "port_conflicts": an instance
-// switched its web interface on at a port another live instance serves on, ...) and recorded numbers
+// switched its web interface on at a port another live instance serves on, "home_conflicts": an
+// instance created in the home folder of a live one, ...) and recorded numbers
 // ("process_rate", "load_type", ...); "live" is the number of instances not deleted.
 FAKE_ST_EXPORT long long fake_stereotool_value(const char* what) {
   auto& s = state();

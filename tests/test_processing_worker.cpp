@@ -828,12 +828,15 @@ TEST_CASE("processing: stop() does not wait for ever on a Stereo Tool stuck in a
     fake().set("process_sleep_us", 2000000);
     feed(w, input, 9600, 10'000'000);
     const int64_t t0 = bp::monotonic_ns();
+    CHECK(be::stereotool_threads_left_behind() == 0);
     w.stop();
     CHECK(bp::monotonic_ns() - t0 < 1'500'000'000);
     CHECK(w.status().state == be::ProcessingState::Off);
+    CHECK(be::stereotool_threads_left_behind() == 1);  // the service would end with a hard exit now
   }  // the worker is gone; its Stereo Tool thread finishes the call on its own
   fake().set("process_sleep_us", 0);
   CHECK(wait_until([] { return fake().value("live") == 0; }, 5000));  // and then deletes the instance
+  CHECK(wait_until([] { return be::stereotool_threads_left_behind() == 0; }, 5000));  // and counts no more
 }
 
 TEST_CASE("processing: no allocation per block on the output and Stereo Tool threads") {

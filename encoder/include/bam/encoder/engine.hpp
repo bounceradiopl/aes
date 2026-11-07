@@ -195,6 +195,12 @@ struct EncoderStatus {
   StereoToolInfo stereotool;
 };
 
+// Stereo Tool threads a processing worker's stop() gave up on (still inside a call into the
+// library), process-wide; one that returns later counts no more. The service ends its process
+// with a hard exit when any is left after EncoderEngine::stop(): the static destructors (the
+// library's own among them) must not run under a thread still inside the library.
+int stereotool_threads_left_behind();
+
 class EncoderEngine {
  public:
   explicit EncoderEngine(EncoderEngineOptions opts = {});

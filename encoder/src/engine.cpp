@@ -217,6 +217,8 @@ struct EncoderEngine::Impl {
 
   void apply(const EncoderConfig& next);
   void update_inputs(StationRuntime& rt, const StationConfig& sc);
+  std::atomic<bool> saving{false};  // a preset save is under way (one at a time in the service)
+
   struct ProcessingWanted {  // what next.stations[index] asks for
     bool want = false;
     std::string key, path;
@@ -446,6 +448,7 @@ void EncoderEngine::Impl::update_processing(StationRuntime& rt, const EncoderCon
   const std::string& key = w.key;
   const std::string& path = w.path;
   const int port = w.port;
+  std::shared_ptr<const std::atomic<bool>> old_instance;  // a replaced worker's: the same home folder
   if (replaces(p, w)) {
     p.worker->fade_out();  // apply() asked for it already and waited for every station at once
     if (!p.worker->faded_out()) {
@@ -454,6 +457,7 @@ void EncoderEngine::Impl::update_processing(StationRuntime& rt, const EncoderCon
       p.worker->stop();
     }
     log_info(who + (want ? "nowa instancja Stereo Tool (zmiana klucza licencji albo portu interfejsu WWW)" : "wyłączony"));
+    old_instance = p.worker->instance_gone();
     finished.push_back(std::move(p.worker));
     p = ProcessingRuntime{};
     ++rt.fade_in;
@@ -470,6 +474,9 @@ void EncoderEngine::Impl::update_processing(StationRuntime& rt, const EncoderCon
     s.station_name = sc.name;
     s.streams = active_streams(rt);  // from its first block on, however long the rest takes
     if (port > 0) s.wait_for_gone = port_holders(port, rt, finished);
+    // the station's home folder (station-<id>) is one instance's: the old one goes first, also
+    // when there is no web port to wait for
+    if (old_instance) s.wait_for_gone.push_back(old_instance);
     if (path.empty()) s.setup_error = "brak folderu presetów Stereo Tool";  // never Stereo Tool's defaults on air
     std::string err;
     s.home_dir = store.station_home(sc.id, &err);
@@ -773,9 +780,14 @@ void EncoderEngine::Impl::shutdown() {
   }
   if (opts.keep_stereotool_at_stop && !processing.empty()) {
     // ruling S7: the process ends next; deleting instance after instance would outlast the stop
-    for (auto& w : processing) w->keep_instance_at_stop();
-    log_info("Processing: instancje Stereo Tool (" + std::to_string(processing.size()) +
-             ") nie są usuwane przy zatrzymaniu usługi; pamięć zwalnia zakończenie procesu");
+    size_t instances = 0;  // workers in the bypass for want of a library or a preset hold none
+    for (auto& w : processing) {
+      w->keep_instance_at_stop();
+      if (w->has_instance()) ++instances;
+    }
+    if (instances > 0)
+      log_info("Processing: instancje Stereo Tool (" + std::to_string(instances) +
+               ") nie są usuwane przy zatrzymaniu usługi; pamięć zwalnia zakończenie procesu");
   }
   // side by side: a Stereo Tool that hangs (e.g. in Delete after another instance crashed) holds
   // the stop for its timeout once, not once per station
@@ -1021,6 +1033,16 @@ PresetResult EncoderEngine::save_processing_preset(const std::string& station_id
     worker = it->second->proc.worker;
     who = processing_who(it->second->cfg.name);
   }
+  // one save at a time in the whole service: a save holds its HTTP thread up to the 10 s bound,
+  // so saves of many stations at once could take every thread of the panel
+  if (m.saving.exchange(true)) {
+    m.store.abandon(temp);
+    return {PresetError::Busy, "inny zapis presetu już trwa — spróbuj ponownie za chwilę"};
+  }
+  struct Saving {
+    std::atomic<bool>& flag;
+    ~Saving() { flag.store(false); }
+  } saving{m.saving};
   // the engine is not held while Stereo Tool saves (on its own thread, between two blocks)
   std::string err;
   bool busy = false;

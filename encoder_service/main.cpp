@@ -5,6 +5,7 @@
 #include <atomic>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>  // std::_Exit
 #include <ctime>
 #include <fstream>
 #include <memory>
@@ -21,6 +22,8 @@
 #include "bam/platform/time.hpp"
 
 #ifdef _WIN32
+#include <windows.h>  // TerminateProcess
+
 #include "win_service.hpp"
 #endif
 
@@ -120,7 +123,24 @@ int run(const std::string& config_path, bool protect, const std::string& dir_err
   while (!stop) bam::platform::sleep_ns(100'000'000);
   http.stop();
   engine.stop();
+  if (const int left = be::stereotool_threads_left_behind(); left > 0)
+    bam::log_warning("Bounce Encoder: wątki Stereo Tool, które nie zakończyły pracy: " + std::to_string(left) +
+                     " — proces kończy się natychmiast, bez sprzątania pamięci (zrobi to system)");
   return 0;
+}
+
+// The end of the process after run(). A Stereo Tool thread still inside the library (stop() gave
+// up on it) must not see the static destructors run under it, the library's own among them (they
+// may wait for that thread for ever, or free what it uses): then a hard exit, without them and
+// without the library's unload notifications. The logs are written already (every sink writes
+// synchronously) and, as a service, SERVICE_STOPPED is reported already.
+int finish(int rc) {
+  if (be::stereotool_threads_left_behind() == 0) return rc;
+  std::fflush(nullptr);
+#ifdef _WIN32
+  TerminateProcess(GetCurrentProcess(), static_cast<UINT>(rc));
+#endif
+  std::_Exit(rc);
 }
 
 void print_usage() {
@@ -169,7 +189,7 @@ int main(int argc, char** argv) {
   if (!console) {
     bam::install_event_log_sink(kEncoderEventSource);
     if (bam::run_as_windows_service([&](std::atomic<bool>& stop) { return run(config_path, protect, dir_error, stop); }, kEncoderServiceName))
-      return 0;
+      return finish(0);  // the service control manager has SERVICE_STOPPED by now
     print_usage();  // started by hand, not by the service control manager
     return 2;
   }
@@ -182,5 +202,5 @@ int main(int argc, char** argv) {
   });
   std::signal(SIGINT, [](int) { g_console_stop = true; });
   std::signal(SIGTERM, [](int) { g_console_stop = true; });
-  return run(config_path, protect, dir_error, g_console_stop);
+  return finish(run(config_path, protect, dir_error, g_console_stop));
 }
