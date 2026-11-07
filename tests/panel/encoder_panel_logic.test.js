@@ -357,6 +357,16 @@ test("processing states in Polish", () => {
   assert.equal(L.processingState(p({}), false).text, "stacja wyłączona");
   assert.equal(L.processingState(p({}), true).kind, "on");
   assert.equal(L.processingState(p({}), true).text, "działa · CPU 12,3 %");
+  // spec §2: above 80 % of the processor a warning, in the list and in the editor
+  const busy = L.processingState(p({ cpu_pct: 85.4 }), true);
+  assert.equal(busy.kind, "warn");
+  assert.equal(busy.text, "działa · CPU 85,4 % (ponad 80 %)");
+  assert.match(busy.title, /procesor ponad 80 %/);
+  assert.equal(L.processingState(p({ cpu_pct: 80 }), true).kind, "on");  // 80 % itself is fine
+  assert.match(L.cpuWarning(p({ cpu_pct: 85.4 })), /^Stereo Tool zajmuje 85,4 % czasu procesora \(ponad 80 %\)/);
+  assert.equal(L.cpuWarning(p({ cpu_pct: 79.9 })), "");
+  assert.equal(L.cpuWarning(p({ cpu_pct: 95, state: "bypass", reason_code: "too_slow" })), "");  // not running: the state says it
+  assert.equal(L.cpuWarning(p({ cpu_pct: 95, enabled: false })), "");
   assert.equal(L.processingState(p({ state: "bypass", reason_code: "starting", reason: "uruchamianie Stereo Tool" }), true).kind, "warn");
   const slow = L.processingState(p({ state: "bypass", reason_code: "too_slow", reason: "Stereo Tool nie nadąża (…) — sygnał bez processingu", retry_in_s: 25 }), true);
   assert.equal(slow.kind, "warn");

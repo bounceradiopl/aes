@@ -361,14 +361,32 @@
     return out;
   };
 
+  // Spec §2: Stereo Tool using more of the processor than this gets a warning (list and editor).
+  L.CPU_WARN_PCT = 80;
+  const cpuHigh = (p) => p?.state === "running" && Number(p.cpu_pct) > L.CPU_WARN_PCT;
+
+  // The warning of a running station whose Stereo Tool uses more than CPU_WARN_PCT of the
+  // processor (its time over the audio time), "" otherwise.
+  L.cpuWarning = (p) => {
+    if (!p?.enabled || !cpuHigh(p)) return "";
+    return `Stereo Tool zajmuje ${L.fmtPct(p.cpu_pct)} czasu procesora (ponad ${L.CPU_WARN_PCT} %): przy chwilowym obciążeniu komputera może nie nadążyć i stacja przejdzie na sygnał bez processingu. Wybierz lżejszy preset, zmniejsz liczbę stacji z processingiem albo użyj szybszego komputera.`;
+  };
+
   // The processing of a station (/api/live stations[].processing) as { kind, text, title }: a short
   // text for the rows, the full reason of the service in the title.
   L.processingState = (p, stationOn) => {
     if (!p || !p.enabled) return { kind: "", text: "wyłączony" };
     if (!stationOn) return { kind: "", text: "stacja wyłączona" };
     const title = p.reason || "";
-    if (p.state === "running")
-      return { kind: "on", text: `działa · CPU ${L.fmtPct(p.cpu_pct)}`, title: `działa · procesor ${L.fmtPct(p.cpu_pct)} · opóźnienie ${L.fmtMs(p.latency_ms)}` };
+    if (p.state === "running") {
+      const s = { kind: "on", text: `działa · CPU ${L.fmtPct(p.cpu_pct)}`, title: `działa · procesor ${L.fmtPct(p.cpu_pct)} · opóźnienie ${L.fmtMs(p.latency_ms)}` };
+      if (cpuHigh(p)) {
+        s.kind = "warn";
+        s.text += ` (ponad ${L.CPU_WARN_PCT} %)`;
+        s.title += ` — procesor ponad ${L.CPU_WARN_PCT} %: Stereo Tool może nie nadążyć`;
+      }
+      return s;
+    }
     if (p.state === "bypass" || p.state === "error") {
       const warn = (text) => ({ kind: "warn", text, title: title || text });
       const err = (text) => ({ kind: "err", text, title: title || text });

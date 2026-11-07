@@ -1069,11 +1069,42 @@ function processingBlock() {
   const openWeb = el("button", { type: "button", class: "mini", dataset: { icon: "sliders" } }, "Otwórz Stereo Tool");
   const savePreset = el("button", { type: "button", class: "mini", dataset: { icon: "download" }, onclick: () => openSavePreset(sid) }, "Zapisz jako preset…");
   const restart = el("button", { type: "button", class: "mini", dataset: { icon: "refresh" }, onclick: () => restartProcessing(sid) }, "Uruchom ponownie processing");
+  const cpu = el("p", { class: "hint warn-text", hidden: true });
+  // Stereo Tool's web interface asks for its own password: shown on request only, never kept
+  const showPassword = el("button", { type: "button", class: "mini", dataset: { icon: "key" } }, "Pokaż hasło");
+  const password = el("p", { class: "web-password", hidden: true });
   const note = el("small", { class: "web-note" });
   let webUrl = "";
   openWeb.addEventListener("click", () => { if (webUrl && L.isLocalHost(location.hostname)) window.open(webUrl, "_blank", "noopener,noreferrer"); });
-  body.append(el("div", { class: "s6 proc-live" }, facts, licence,
-    el("div", { class: "proc-actions" }, openWeb, savePreset, restart), note));
+  showPassword.addEventListener("click", async () => {
+    if (!password.hidden) { password.replaceChildren(); password.hidden = true; showPassword.textContent = "Pokaż hasło"; return; }
+    let r;
+    try {
+      r = await api(`/api/stations/${encodeURIComponent(sid)}/processing/web-password`);
+    } catch (e) {
+      if (!(e instanceof AuthRequired)) toast("Brak połączenia z usługą: nie pobrano hasła", "err");
+      return;
+    }
+    if (!r.ok) { toast(r.data?.error || `Nie można pobrać hasła interfejsu Stereo Tool (HTTP ${r.status})`, "err"); return; }
+    const secret = String(r.data.password || "");
+    const code = el("code", { class: "secret" }, secret);
+    const copy = el("button", { type: "button", class: "mini", dataset: { icon: "copy" } }, "Kopiuj");
+    copy.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(secret);
+        toast("Hasło skopiowane do schowka");
+      } catch {
+        getSelection().selectAllChildren(code);  // no clipboard (e.g. http:// from another computer): selected for Ctrl+C
+        toast("Hasło zaznaczone: skopiuj je skrótem Ctrl+C", "warn");
+      }
+    });
+    password.replaceChildren("Hasło interfejsu Stereo Tool: ", code, " ", copy,
+      el("small", {}, ` Interfejs WWW (127.0.0.1:${r.data.web_port}) pyta o nie przy logowaniu (konto ${r.data.user || "Admin"}). Hasło jest losowe; nowe dostaje dopiero nowa instancja (zmiana klucza albo portu).`));
+    password.hidden = false;
+    showPassword.textContent = "Ukryj hasło";
+  });
+  body.append(el("div", { class: "s6 proc-live" }, facts, licence, cpu,
+    el("div", { class: "proc-actions" }, openWeb, showPassword, savePreset, restart), password, note));
 
   const update = (lst) => {
     const lp = lst?.processing;
@@ -1083,11 +1114,12 @@ function processingBlock() {
     webUrl = on ? L.webUiUrl(lp) : "";
     const warn = L.licenceWarning(on ? lp : null);
     const local = L.isLocalHost(location.hostname);
+    const cpuWarn = L.cpuWarning(on ? lp : null);
     const rows = [
-      ["Stan", shown.kind === "on" ? "działa"
+      ["Stan", lp?.state === "running" ? "działa"
         : warn ? lp.reason || shown.text  // the features are in the warning below
           : (shown.title || shown.text) + (on && lp?.reason_code === "too_slow" && lp.retry_in_s >= 0 ? ` (ponowna próba za ${L.fmtWait(lp.retry_in_s)})` : "")],
-      ["Procesor", on && lp?.state === "running" ? L.fmtPct(lp.cpu_pct) : "—"],
+      ["Procesor", on && lp?.state === "running" ? L.fmtPct(lp.cpu_pct) + (cpuWarn ? ` — ponad ${L.CPU_WARN_PCT} %` : "") : "—"],
       ["Opóźnienie", up && lp.latency_ms > 0 ? L.fmtMs(lp.latency_ms) : "—"],
       ["Interfejs WWW", webUrl ? `127.0.0.1:${lp.web_port}` : "—"],
       ...(lp?.retries > 0 ? [["Automatyczne ponowienia", L.fmtNum(lp.retries)]] : []),
@@ -1096,6 +1128,11 @@ function processingBlock() {
     facts.replaceChildren(...rows.flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]));
     licence.textContent = warn;
     licence.hidden = !warn;
+    cpu.textContent = cpuWarn;
+    cpu.hidden = !cpuWarn;
+    showPassword.disabled = !webUrl;
+    showPassword.title = webUrl ? "Pokazuje hasło, o które pyta interfejs WWW Stereo Tool tej stacji" : "Interfejs WWW działa, gdy działa processing tej stacji";
+    if (!webUrl && !password.hidden) { password.replaceChildren(); password.hidden = true; showPassword.textContent = "Pokaż hasło"; }
     openWeb.disabled = !webUrl || !local;  // 127.0.0.1 of another computer is not the encoder
     openWeb.title = !local ? "Interfejs WWW Stereo Tool otwiera się tylko na komputerze z usługą"
       : webUrl ? `Otwiera ${webUrl} w nowej karcie` : "Interfejs WWW działa, gdy działa processing tej stacji";
@@ -1478,8 +1515,11 @@ function applyLive() {
   for (const td of $$("[data-procset]")) {
     const st = stations.get(td.dataset.procset);
     const lp = st?.enabled ? st.processing : null;
-    td.textContent = lp?.state === "running" ? `CPU ${L.fmtPct(lp.cpu_pct)} · opóźnienie ${L.fmtMs(lp.latency_ms)}` : "";
-    td.title = td.textContent;
+    const cpuWarn = L.cpuWarning(lp);
+    td.textContent = lp?.state === "running"
+      ? `CPU ${L.fmtPct(lp.cpu_pct)}${cpuWarn ? ` (ponad ${L.CPU_WARN_PCT} %)` : ""} · opóźnienie ${L.fmtMs(lp.latency_ms)}` : "";
+    td.title = cpuWarn || td.textContent;
+    td.classList.toggle("warn-text", !!cpuWarn);
   }
   for (const td of $$("[data-procaddr]")) {
     const st = stations.get(td.dataset.procaddr);

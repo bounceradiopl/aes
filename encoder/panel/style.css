@@ -96,6 +96,9 @@ table.lines td.empty { color: var(--muted); font-size: 12.5px; }
 .proc-live dl.facts { font-size: 12.5px; }
 .proc-actions { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; margin-left: -8px; }
 .web-note { color: var(--muted); font-size: 12px; }
+.web-password { margin: 0; font-size: 12.5px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.web-password code.secret { font-family: ui-monospace, Menlo, Consolas, monospace; user-select: all; padding: 1px 6px; border: 1px solid var(--line-strong); border-radius: 4px; }
+.web-password small { flex-basis: 100%; color: var(--muted); }
 
 /* ---- presets dialog ---- */
 table.presets { table-layout: fixed; }
