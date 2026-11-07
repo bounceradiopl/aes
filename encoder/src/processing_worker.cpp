@@ -38,6 +38,23 @@ constexpr size_t kGraveyardSlots = 1;  // see ProcessingWorker::graveyard_
 constexpr size_t kFailureTexts = 8;    // failure texts kept for the events (Core::failures)
 
 std::atomic<int> g_stop_timeout_ms{0};
+std::atomic<int> g_save_timeout_ms{0};  // tests
+constexpr int kDefaultSaveTimeoutMs = 10000;
+
+int stop_timeout_ms() {
+  const int configured = g_stop_timeout_ms.load();
+  return configured > 0 ? configured : kDefaultStopTimeoutMs;
+}
+
+// "10 s", "0,4 s" (Polish decimal comma)
+std::string seconds_text(int ms) {
+  char buf[32];
+  if (ms % 1000 == 0)
+    std::snprintf(buf, sizeof buf, "%d s", ms / 1000);
+  else
+    std::snprintf(buf, sizeof buf, "%d,%d s", ms / 1000, (ms % 1000) / 100);
+  return buf;
+}
 
 enum class Cmd { None, Setup, Restart, Process };
 enum class Done { None, Ready, SetupFailed, Processed, ProcessFailed };
@@ -62,13 +79,23 @@ struct SaveRequest {
 
 namespace testing {
 void set_processing_stop_timeout_ms(int ms) { g_stop_timeout_ms.store(ms); }
+void set_save_preset_timeout_ms(int ms) { g_save_timeout_ms.store(ms); }
 }  // namespace testing
+
+int save_preset_timeout_ms() {
+  const int configured = g_save_timeout_ms.load();
+  return configured > 0 ? configured : kDefaultSaveTimeoutMs;
+}
 
 struct ProcessingWorker::Core {
   // fixed
   std::string key, preset, home, name, station_id, setup_error;
   int web_port = 0;
   std::function<void()> block_tap;
+  // set when the Stereo Tool thread has let go of the instance for good (instance_gone())
+  const std::shared_ptr<std::atomic<bool>> gone = std::make_shared<std::atomic<bool>>(false);
+  // Stereo Tool thread only: instances to wait for before the first create (ProcessingSettings)
+  std::vector<std::shared_ptr<const std::atomic<bool>>> wait_for_gone;
 
   // the mailbox, under m
   std::mutex m;
@@ -92,6 +119,8 @@ struct ProcessingWorker::Core {
   std::atomic<int> licence{-1};  // the last check: -1 none yet, 0 invalid, 1 valid
   std::atomic<int> web_port_active{0};  // the instance is up with its web interface on this port
   std::atomic<bool> side_busy{false};   // a save is under way (the output thread waits without bypassing)
+  // the save under way was given up by its caller after this many ms (0: not given up / none)
+  std::atomic<int> save_overdue_ms{0};
   mutable std::mutex text_m;
   // Polish, the last kFailureTexts failures (no key), by id (1, 2, ...): failure id f is
   // failures[(f - 1) % kFailureTexts] while f > failure_count - kFailureTexts
@@ -143,6 +172,20 @@ bool take_requested_preset(Core& c) {
   return true;
 }
 
+// Another worker's instance on the same web interface port goes first (ProcessingSettings::
+// wait_for_gone): bounded, and given up when this worker stops.
+void wait_for_port(Core& c) {
+  if (c.wait_for_gone.empty()) return;
+  const int64_t until = platform::monotonic_ns() + (int64_t(stop_timeout_ms()) + 1000) * 1'000'000;
+  for (const auto& gone : c.wait_for_gone) {
+    while (!gone->load() && platform::monotonic_ns() < until) {
+      std::unique_lock lock(c.m);
+      if (c.cv.wait_for(lock, kWaitSlice, [&] { return c.quit; })) return;
+    }
+  }
+  c.wait_for_gone.clear();  // once: later instances of this worker are its own
+}
+
 Done setup(Core& c, bool restart, uint32_t* latency) {
   if (!c.setup_error.empty()) {
     set_failure(c, c.setup_error);
@@ -159,6 +202,7 @@ Done setup(Core& c, bool restart, uint32_t* latency) {
   if (!restart || !c.st || c.st->failed()) {
     drop_instance(c);  // a failed one goes first: its memory and web interface port
     if (restart) stereotool_reload();  // a library put in place since (nothing after a crash)
+    if (c.web_port > 0) wait_for_port(c);
     std::string err;
     auto st = StereoToolInstance::create(c.key, c.name, c.home, &err);
     if (!st) {
@@ -272,6 +316,7 @@ void save(Core& c, SaveRequest& r) {
     r.ok = ok;
     r.error = std::move(err);
     r.done = true;
+    c.save_overdue_ms.store(0);  // under the lock save_preset() gives up under: never left set
   }
   c.cv.notify_all();
 }
@@ -313,6 +358,7 @@ void st_main(std::shared_ptr<Core> c) {
     c->cv.notify_all();
   }
   drop_instance(*c);  // stereoTool_Delete on this thread (it may hang after a crash: stop() does not wait for ever)
+  c->gone->store(true);  // its web interface port is free for the next instance
   {
     std::lock_guard lock(c->m);
     c->finished = true;
@@ -337,6 +383,7 @@ ProcessingWorker::ProcessingWorker(const ProcessingSettings& s, std::string stat
   c.home = s.home_dir;
   c.web_port = s.web_port;
   c.setup_error = s.setup_error;
+  c.wait_for_gone = s.wait_for_gone;
   c.station_id = station_id_;
   c.name = "station-" + station_id_;
   c.block_tap = s.st_block_tap;
@@ -354,6 +401,10 @@ ProcessingWorker::ProcessingWorker(const ProcessingSettings& s, std::string stat
 }
 
 ProcessingWorker::~ProcessingWorker() { stop(); }
+
+int ProcessingWorker::configured_web_port() const { return core_->web_port; }
+
+std::shared_ptr<const std::atomic<bool>> ProcessingWorker::instance_gone() const { return core_->gone; }
 
 void ProcessingWorker::set_streams(std::vector<std::shared_ptr<StreamWorker>> streams) {
   auto list = std::make_shared<const std::vector<std::shared_ptr<StreamWorker>>>(std::move(streams));
@@ -397,9 +448,15 @@ bool ProcessingWorker::save_preset(const std::string& sts_path, int timeout_ms, 
     if (request->done) {
       if (request->ok) return true;
       why = request->error;
-    } else {
-      if (core_->save == request) core_->save.reset();  // not taken yet: it never will be
+    } else if (core_->save == request) {
+      core_->save.reset();  // not taken yet: it never will be
       why = "Stereo Tool nie odpowiada — preset nie został zapisany";
+    } else {
+      // taken and still under way: whatever it writes is not a preset (removed at the next start);
+      // the status says so until it returns (reason_text)
+      core_->save_overdue_ms.store(timeout_ms);
+      why = "Stereo Tool nie zakończył zapisu presetu w ciągu " + seconds_text(timeout_ms) +
+            " — preset nie został zapisany; do końca zapisu sygnał bez processingu";
     }
   }
   if (error) *error = why;
@@ -416,8 +473,7 @@ void ProcessingWorker::stop() {
     core_->quit = true;
   }
   core_->cv.notify_all();
-  const int configured = g_stop_timeout_ms.load();
-  const int timeout_ms = configured > 0 ? configured : kDefaultStopTimeoutMs;
+  const int timeout_ms = stop_timeout_ms();
   bool finished;
   {
     std::unique_lock lock(core_->m);
@@ -468,7 +524,12 @@ std::string ProcessingWorker::reason_text(Reason why, uint64_t failure_id) const
     case Reason::Crash: return "Stereo Tool uległ awarii — uruchom ponownie usługę Bounce Encoder (" + failure + ")";
     case Reason::RestartWaits:
       return "Stereo Tool nie odpowiada — ponowne uruchomienie czeka, aż zakończy bieżące wywołanie";
-    case Reason::Saving: return "zapis presetu Stereo Tool (do jego końca sygnał bez processingu)";
+    case Reason::Saving: {
+      if (const int overdue_ms = core_->save_overdue_ms.load(); overdue_ms > 0)
+        return "Stereo Tool nie zakończył zapisu presetu w ciągu " + seconds_text(overdue_ms) +
+               " (nie odpowiada) — do końca zapisu sygnał bez processingu";
+      return "zapis presetu Stereo Tool (do jego końca sygnał bez processingu)";
+    }
   }
   return {};
 }

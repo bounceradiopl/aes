@@ -436,6 +436,21 @@ TEST_CASE("encoder HTTP: stations are added, edited and deleted") {
   CHECK(f.engine.config().stations.size() == 1);
   CHECK(f.client->Delete("/api/stations/s1", f.auth)->status == 404);
 
+  // one update deletes a station and adds one: the new one never gets the deleted one's id (ruling S4)
+  json whole = f.get("/api/config");
+  REQUIRE(whole["stations"].size() == 1);
+  whole["stations"] = json::array({station_json("Zastepcza", false, "haslo-z", "/z.mp3")});
+  r = f.put("/api/config", whole);
+  REQUIRE_MESSAGE(r->status == 200, r->body);
+  CHECK(json::parse(r->body)["config"]["stations"][0]["id"] == "s3");
+  CHECK_FALSE(json::parse(r->body)["config"].contains("next_station_number"));  // bookkeeping of the file only
+  CHECK(f.file()["next_station_number"] == 4);
+  r = f.client->Delete("/api/stations/s3", f.auth);
+  REQUIRE_MESSAGE(r->status == 200, r->body);
+  r = f.post("/api/stations", station_json("Kolejna", false, "haslo-k", "/k.mp3"));
+  REQUIRE_MESSAGE(r->status == 200, r->body);
+  CHECK(json::parse(r->body)["id"] == "s4");
+
   // the 16-station limit
   for (int i = 0; i < 15; ++i) {
     r = f.post("/api/stations", {{"name", "Stacja " + std::to_string(i)}, {"enabled", false}});
@@ -791,6 +806,32 @@ TEST_CASE("encoder service: startup configuration") {
     bool logged = false;
     for (const auto& e : bam::Logger::instance().recent())
       logged = logged || e.message.find("Stacja „Druga”: nowy port interfejsu WWW Stereo Tool 8100") != std::string::npos;
+    CHECK(logged);
+    std::remove(path.c_str());
+  }
+  SUBCASE("ids that differ only in case (a 1.0 file): the later station gets a new id, nothing is disabled") {
+    const std::string path = unique_path("start");
+    json j = json::parse(be::config_to_json(be::default_encoder_config()));
+    j.erase("next_station_number");  // as Bounce Encoder 1.0 wrote it
+    j["stations"] = json::array({station_json("Mala", true, "haslo1", "/a.mp3"), station_json("Wielka", true, "haslo2", "/b.mp3"),
+                                 station_json("Trzecia", true, "haslo3", "/c.mp3")});
+    j["stations"][0]["id"] = "s1";
+    j["stations"][1]["id"] = "S1";
+    j["stations"][2]["id"] = "s2";
+    std::ofstream(path) << j.dump();
+    const be::EncoderConfig c = be::load_startup_config(path);
+    CHECK(be::validate_config(c).empty());
+    REQUIRE(c.stations.size() == 3);
+    CHECK(c.stations[0].id == "s1");
+    CHECK(c.stations[1].id == "s3");  // a number never given in this file
+    CHECK(c.stations[2].id == "s2");
+    for (const auto& st : c.stations) CHECK_MESSAGE(st.enabled, st.name);
+    CHECK(c.stations[1].streams[0].password == "haslo2");  // the station as it was, under its new id
+    CHECK_FALSE(exists(path + ".bad"));
+    bool logged = false;
+    for (const auto& e : bam::Logger::instance().recent())
+      logged = logged || e.message.find("Stacja „Wielka”: identyfikator „S1” różni się od „s1” tylko wielkością liter; nowy identyfikator „s3”") !=
+                             std::string::npos;
     CHECK(logged);
     std::remove(path.c_str());
   }

@@ -40,6 +40,9 @@ constexpr size_t kMaxSdpBytes = 64 * 1024;
 // normalize_config work through thousands of entries); validate_config explains smaller overshoots.
 constexpr size_t kParseLimitFactor = 4;
 constexpr const char* kStationIdPrefix = "s";
+// next_station_number is kept at most here: a counter edited by hand cannot overflow the numbering
+// (more than 16 stations are never given ids in one configuration anyway)
+constexpr int kMaxStationNumber = 1'000'000'000;
 constexpr const char* kStreamIdPrefix = "str";
 
 // ---- labels for the messages ----
@@ -243,6 +246,7 @@ json to_json(const EncoderConfig& c, bool api) {
   j["stereotool_default_key"] = api ? std::string() : c.stereotool_default_key;
   if (api) j["stereotool_default_key_set"] = !c.stereotool_default_key.empty();
   j["stereotool_web_port_base"] = c.stereotool_web_port_base;
+  if (!api) j["next_station_number"] = c.next_station_number;
   json stations = json::array();
   for (const auto& st : c.stations) {
     json inputs = json::array(), streams = json::array();
@@ -332,6 +336,7 @@ std::optional<EncoderConfig> config_from_json(std::string_view text, std::string
     read_field(j, "stereotool_default_key", c.stereotool_default_key, "");
     read_field(j, "stereotool_default_key_clear", c.stereotool_default_key_clear, "");
     read_field(j, "stereotool_web_port_base", c.stereotool_web_port_base, "");
+    read_field(j, "next_station_number", c.next_station_number, "");
     read_array(j, "stations", "", kMaxStations * kParseLimitFactor, [&](size_t i, const json& sj) {
       StationConfig st;
       const std::string sp = station_path(i) + ".";
@@ -595,6 +600,17 @@ std::vector<EncoderConfigIssue> config_warnings(const EncoderConfig& c) {
   return warnings;
 }
 
+// n of a station id "s<n>" (any case, n of at most 9 digits), else 0.
+int station_number(std::string_view id) {
+  if (id.size() < 2 || id.size() > 10 || (id[0] != 's' && id[0] != 'S')) return 0;
+  int n = 0;
+  for (char ch : id.substr(1)) {
+    if (ch < '0' || ch > '9') return 0;
+    n = n * 10 + (ch - '0');
+  }
+  return n;
+}
+
 std::vector<std::string> normalize_config(EncoderConfig& c) {
   std::vector<std::string> notices;
   c.stereotool_default_key = trim_blanks(c.stereotool_default_key);
@@ -602,7 +618,10 @@ std::vector<std::string> normalize_config(EncoderConfig& c) {
   std::set<std::string> station_ids;  // in lower case: a new id never differs from one only in case
   for (const auto& st : c.stations)
     if (!st.id.empty()) station_ids.insert(ascii_lower(st.id));
-  int next_station = 1;
+  // ruling S4: new ids continue past every number given so far (the counter) and every "s<n>" in
+  // the configuration (a 1.0 file has no counter); a gap may be a deleted station's id
+  int next_station = std::clamp(c.next_station_number, 1, kMaxStationNumber);
+  for (const auto& st : c.stations) next_station = std::max(next_station, station_number(st.id) + 1);
   // web port slots: a station without one gets the lowest free slot; given ones are never moved
   std::set<int> slots;
   for (const auto& st : c.stations)
@@ -616,9 +635,11 @@ std::vector<std::string> normalize_config(EncoderConfig& c) {
     slots.insert(slot);
   }
 
+  c.next_station_number = next_station;
   for (size_t i = 0; i < c.stations.size(); ++i) {
     auto& st = c.stations[i];
     if (st.id.empty()) st.id = next_id(kStationIdPrefix, station_ids, next_station);
+    c.next_station_number = next_station;
     st.processing.license_key = trim_blanks(st.processing.license_key);
     st.processing.license_key_clear = false;
 
@@ -665,6 +686,7 @@ EncoderConfig mask_passwords(const EncoderConfig& c) {
 
 void merge_passwords(EncoderConfig& next, const EncoderConfig& previous) {
   next.password_hash = previous.password_hash;
+  next.next_station_number = std::max(next.next_station_number, previous.next_station_number);  // never back (S4)
   // Stereo Tool keys: no server rule (a key is not tied to a server); a blank key is no key
   if (trim_blanks(next.stereotool_default_key).empty())
     next.stereotool_default_key = next.stereotool_default_key_clear ? std::string() : previous.stereotool_default_key;

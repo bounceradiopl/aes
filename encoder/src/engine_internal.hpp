@@ -223,6 +223,11 @@ struct ProcessingSettings {
   // The streams the output goes to from the first block on (set_streams() replaces them later):
   // a worker never hands a block to no stream list.
   std::vector<std::shared_ptr<StreamWorker>> streams;
+  // Instances to wait for before this one is created (other workers' instance_gone(), being
+  // stopped): the ones on the same web interface port, which is one socket. Waited for at most the
+  // stop timeout + 1 s (an instance stuck in the library keeps its port: then it is refused,
+  // logged); meanwhile the streams get the unprocessed mix, as during any setup.
+  std::vector<std::shared_ptr<const std::atomic<bool>>> wait_for_gone;
   // Tests: sees every block handed to the streams, on the output thread (must not allocate).
   std::function<void(const float* stereo, size_t frames)> output_tap;
   // Tests: called on the Stereo Tool thread after each block it processed.
@@ -239,6 +244,14 @@ void set_processing_retry_ms(std::vector<int> waits_ms, int reset_ms);
 // Runs in apply_config right after a processing worker was built, before the station gets its
 // plan (e.g. as long as a slow log line); empty: none.
 void set_processing_built_hook(std::function<void()> hook);
+// How long a preset save is waited for (0: the default 10 s).
+void set_save_preset_timeout_ms(int ms);
+}  // namespace testing
+
+// How long a preset save is waited for (EncoderEngine::save_processing_preset): 10 s.
+int save_preset_timeout_ms();
+
+namespace testing {
 }  // namespace testing
 
 // The last kSlots values one thread wrote, numbered 1, 2, ... (their seq), read by any thread
@@ -352,6 +365,11 @@ class ProcessingWorker {
   // seq to pass next time. Only the last kEventSlots - 1 are kept: the caller sees the gap in seq.
   uint64_t events_since(uint64_t since, std::vector<ProcessingEvent>* out) const;
   uint32_t delay_frames() const { return delay_.load(std::memory_order_relaxed); }
+  // The web interface port it was built with (ProcessingSettings::web_port).
+  int configured_web_port() const;
+  // Set once its Stereo Tool thread has let go of the instance for good (after stop(); never when
+  // that thread is stuck in the library): ProcessingSettings::wait_for_gone of a later worker.
+  std::shared_ptr<const std::atomic<bool>> instance_gone() const;
   // Stops both threads; waits for the Stereo Tool thread at most the stop timeout (a call stuck
   // in the library leaves that thread behind, logged). Idempotent.
   void stop();

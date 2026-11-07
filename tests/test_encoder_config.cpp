@@ -522,7 +522,7 @@ TEST_CASE("encoder config: normalize rounds steps, raises latency and assigns id
   CHECK(be::validate_config(c).empty());
   CHECK(be::normalize_config(c).empty());  // idempotent
 
-  // ids: the smallest free number; existing ids are kept
+  // ids: a number never given before (ruling S4: past every "s<n>" there is); existing ids are kept
   c = sample();
   c.stations[0].id = "s2";
   c.stations[0].streams[0].id = "str2";
@@ -535,14 +535,15 @@ TEST_CASE("encoder config: normalize rounds steps, raises latency and assigns id
   c.stations.push_back(b);
   be::normalize_config(c);
   CHECK(c.stations[0].id == "s2");
-  CHECK(c.stations[1].id == "s1");
-  CHECK(c.stations[2].id == "s3");
+  CHECK(c.stations[1].id == "s3");
+  CHECK(c.stations[2].id == "s4");
+  CHECK(c.next_station_number == 5);
   CHECK(c.stations[0].streams[0].id == "str2");
   CHECK(c.stations[0].streams[1].id == "str1");
   CHECK(c.stations[2].streams[0].id == "str1");
   CHECK_MESSAGE(be::validate_config(c).empty(), dump(be::validate_config(c)));
 
-  // gaps are filled first, then numbering continues past the highest id
+  // station ids never fill a gap (it may be a deleted station's id), stream ids do
   c = be::default_encoder_config();
   for (const char* id : {"s1", "", "s3", "", ""}) {
     be::StationConfig st;
@@ -554,7 +555,7 @@ TEST_CASE("encoder config: normalize rounds steps, raises latency and assigns id
   std::vector<std::string> ids, stream_ids;
   for (const auto& st : c.stations) ids.push_back(st.id);
   for (const auto& s : c.stations[1].streams) stream_ids.push_back(s.id);
-  CHECK(ids == std::vector<std::string>{"s1", "s2", "s3", "s4", "s5"});
+  CHECK(ids == std::vector<std::string>{"s1", "s4", "s3", "s5", "s6"});
   CHECK(stream_ids == std::vector<std::string>{"str1", "str2", "str3", "str4"});
 }
 
@@ -1241,6 +1242,70 @@ TEST_CASE("encoder config: station ids are unique without regard to case") {
   be::normalize_config(c);
   CHECK(c.stations[1].id == "s2");
   CHECK(be::validate_config(c).empty());
+}
+
+TEST_CASE("encoder config: a station id is never given twice, even after its station was deleted (ruling S4)") {
+  auto c = be::default_encoder_config();
+  c.stations = {be::StationConfig{}, be::StationConfig{}};
+  be::normalize_config(c);
+  REQUIRE(c.stations[0].id == "s1");
+  REQUIRE(c.stations[1].id == "s2");
+  CHECK(c.next_station_number == 3);
+  CHECK(be::normalize_config(c).empty());  // idempotent
+  CHECK(c.next_station_number == 3);
+
+  // an update from the API (the panel's form has no counter) deletes s2 and adds a station
+  const be::EncoderConfig prev = c;
+  std::string err;
+  auto api = nlohmann::json::parse(be::config_to_api_json(prev));
+  CHECK_FALSE(api.contains("next_station_number"));
+  api["stations"].erase(1);
+  api["stations"].push_back({{"name", "Nowa"}});
+  auto next = be::config_from_json(api.dump(), &err);
+  REQUIRE_MESSAGE(next, err);
+  be::merge_passwords(*next, prev);
+  be::normalize_config(*next);
+  REQUIRE(next->stations.size() == 2);
+  CHECK(next->stations[1].id == "s3");  // never "s2": it would inherit s2's Stereo Tool runtime
+  CHECK(next->next_station_number == 4);
+
+  // the counter is in the file
+  auto file = nlohmann::json::parse(be::config_to_json(*next));
+  CHECK(file["next_station_number"] == 4);
+  auto loaded = be::config_from_json(file.dump(), &err);
+  REQUIRE_MESSAGE(loaded, err);
+  CHECK(loaded->next_station_number == 4);
+
+  // all stations deleted: the next one still gets a new number
+  be::EncoderConfig empty = *loaded;
+  empty.stations.clear();
+  be::normalize_config(empty);
+  empty.stations.push_back(be::StationConfig{});
+  be::normalize_config(empty);
+  CHECK(empty.stations[0].id == "s4");
+
+  // a 1.0 file has no counter: numbering goes on past its highest "s<n>" id, in any case
+  file = nlohmann::json::parse(be::config_to_json(sample()));
+  file.erase("next_station_number");
+  file["stations"][0]["id"] = "S7";
+  file["stations"].push_back({{"id", "radio"}});
+  file["stations"].push_back({{"id", ""}});
+  loaded = be::config_from_json(file.dump(), &err);
+  REQUIRE_MESSAGE(loaded, err);
+  be::normalize_config(*loaded);
+  CHECK(loaded->stations[2].id == "s8");
+  CHECK(loaded->next_station_number == 9);
+
+  // a counter edited by hand far out of range is brought back (no overflow)
+  for (int64_t bad : {int64_t(-5), int64_t(0), int64_t(2147483647)}) {
+    file["next_station_number"] = bad;
+    loaded = be::config_from_json(file.dump(), &err);
+    REQUIRE_MESSAGE(loaded, err);
+    be::normalize_config(*loaded);
+    CHECK(loaded->next_station_number >= 9);
+    CHECK(loaded->next_station_number <= 1'000'000'001);
+    CHECK(be::validate_config(*loaded).empty());
+  }
 }
 
 #endif  // BAM_WITH_CODECS

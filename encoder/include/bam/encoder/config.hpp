@@ -15,10 +15,11 @@
 // stored instead. merge_passwords consumes these flags, they are never written to the file.
 //
 // Identifiers: every station has an id unique in the configuration ("s1", "s2", ...) and every
-// stream an id unique in its station ("str1", "str2", ...). normalize_config() gives the smallest
-// free number to each station / stream whose id is empty (a new one from the panel); ids are
-// otherwise kept as they are, so a stream keeps its id when another stream of the station is
-// deleted. Ids are 1–32 characters of A–Z, a–z, 0–9, '-' and '_' (they appear in API paths).
+// stream an id unique in its station ("str1", "str2", ...). normalize_config() gives each station
+// whose id is empty (a new one from the panel) a number never given before in the configuration
+// (ruling S4: EncoderConfig::next_station_number, kept in the file), and each new stream the
+// smallest free number; ids are otherwise kept as they are, so a stream keeps its id when another
+// stream of the station is deleted. Ids are 1–32 characters of A–Z, a–z, 0–9, '-' and '_' (they appear in API paths).
 //
 // An update from the API goes: config_from_json → merge_passwords(update, current) →
 // normalize_config → validate_config. merge_passwords must run before normalize_config, so a
@@ -110,6 +111,10 @@ struct EncoderConfig {
   int stereotool_web_port_base = kDefaultStereoToolWebPortBase;
   // Update only ("stereotool_default_key_clear"): like ProcessingConfig::license_key_clear.
   bool stereotool_default_key_clear = false;
+  // Ruling S4: the number of the next new station id ("s<n>"); ids are never given twice in the
+  // lifetime of a configuration (a new station must never take over a deleted one's running
+  // Stereo Tool instance or home folder). In the file only, not in the API form.
+  int next_station_number = 1;
   std::vector<StationConfig> stations;
 };
 
@@ -132,7 +137,7 @@ const std::string& effective_stereotool_key(const EncoderConfig& c, const Statio
 // The file form (with stream passwords and the panel password hash).
 std::string config_to_json(const EncoderConfig& c);
 // The API form: like the file, but every stream "password" is "" with "password_set" telling
-// whether one is stored, and there is no "password_hash"; likewise each station's
+// whether one is stored, and there is no "password_hash" (nor "next_station_number"); likewise each station's
 // "processing.license_key" is "" with "license_key_set", and "stereotool_default_key" is "" with
 // "stereotool_default_key_set".
 std::string config_to_api_json(const EncoderConfig& c);
@@ -167,7 +172,8 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c);
 std::vector<EncoderConfigIssue> config_warnings(const EncoderConfig& c);
 // Rounds gains to 0.5 dB and delays to 0.1 s, raises input latencies below "source ptime + 1 ms",
 // names unnamed inputs after their SDP session (control characters removed, cut to 64 bytes on a
-// whole UTF-8 character), assigns ids to new stations and streams, gives each station without a
+// whole UTF-8 character), assigns ids to new stations (from next_station_number, which it keeps
+// past every "s<n>" id in the configuration) and streams, gives each station without a
 // Stereo Tool web port slot the lowest free one (in station order; slots already given, valid or
 // not, are left as they are) and trims spaces, tabs and line ends around pasted Stereo Tool keys.
 // Returns Polish notices for the changes the user should hear about (raised latencies).
@@ -181,7 +187,8 @@ EncoderConfig mask_passwords(const EncoderConfig& c);
 // same server (host, case-insensitive, and port): a stream moved to another server must be given
 // its password again, so the old server's password is never sent to a different one. Streams are
 // matched by id, never by position, so deleting a stream keeps the others' passwords. The panel
-// password hash always comes from `previous` (it changes only through the password endpoint).
+// password hash always comes from `previous` (it changes only through the password endpoint), and
+// next_station_number never goes back below the one of `previous`.
 // Stereo Tool keys: a station's empty (or blank) key takes the key of the station of `previous`
 // with the same id, the empty default key takes the stored default key, unless the matching
 // "clear" flag was sent; the flags are reset here. A station without a web port slot (-1, e.g.

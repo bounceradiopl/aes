@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -812,7 +813,32 @@ EncoderConfig startup_config(const std::string& path) {
     }
     if (!save_config_file(path, cfg, &err)) log_error("Nie można zapisać konfiguracji: " + err);
   }
+  // Bounce Encoder 1.0 took ids that differ only in case ("s1", "S1") as two; 1.1 names a folder
+  // after each id (and Windows ignores case there), so the later station gets a new id from
+  // normalize_config instead of being disabled or left out
+  struct Renamed {
+    size_t station;
+    std::string old_id, other_id;
+  };
+  std::vector<Renamed> renamed;
+  {
+    std::map<std::string, std::string> seen;  // id in lower case -> the first station's id
+    for (size_t i = 0; i < cfg.stations.size(); ++i) {
+      std::string& id = cfg.stations[i].id;
+      std::string lower = id;
+      for (char& ch : lower)
+        if (ch >= 'A' && ch <= 'Z') ch = char(ch - 'A' + 'a');
+      if (id.empty()) continue;
+      if (auto [it, inserted] = seen.emplace(lower, id); !inserted) {
+        renamed.push_back({i, id, it->second});
+        id.clear();
+      }
+    }
+  }
   for (const auto& n : normalize_config(cfg)) log_info(n);
+  for (const Renamed& r : renamed)
+    log_warning("Stacja " + station_name(cfg.stations[r.station], r.station) + ": identyfikator „" + r.old_id + "” różni się od „" +
+                r.other_id + "” tylko wielkością liter; nowy identyfikator „" + cfg.stations[r.station].id + "”");
 
   bool backed_up = false;
   // A dropped Stereo Tool key is never lost: config.json is copied to .bad (the same admin-only

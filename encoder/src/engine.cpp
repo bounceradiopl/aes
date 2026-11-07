@@ -61,7 +61,6 @@ void stop_workers(std::vector<std::shared_ptr<Worker>> workers) {
 // ---- processing ----
 
 constexpr int64_t kFadeOutWaitNs = 500'000'000;  // an old processing worker's 5 ms fade out, at most
-constexpr int kSavePresetTimeoutMs = 10000;
 // Ruling S1: a Stereo Tool that fell behind is retried after these waits (the last one repeats),
 // and the count starts again after kRetryResetNs of processing.
 constexpr std::array<int64_t, 4> kRetryWaitsNs = {30'000'000'000LL, 120'000'000'000LL, 300'000'000'000LL, 600'000'000'000LL};
@@ -220,6 +219,8 @@ struct EncoderEngine::Impl {
   void fade_out_leaving_workers(const EncoderConfig& next);
   void update_processing(StationRuntime& rt, const EncoderConfig& next, size_t index,
                          std::vector<std::shared_ptr<ProcessingWorker>>& finished);
+  std::vector<std::shared_ptr<const std::atomic<bool>>> port_holders(int port, const StationRuntime& rt,
+                                                                     const std::vector<std::shared_ptr<ProcessingWorker>>& finished) const;
   void processing_housekeeping(StationRuntime& rt, int64_t now);
   void publish(StationRuntime& rt);
   void update_rx_set();
@@ -310,9 +311,10 @@ EncoderEngine::Impl::ProcessingWanted EncoderEngine::Impl::processing_wanted(con
     w.key = effective_stereotool_key(next, sc);
     // the station's own slot (ruling S3: never renumbered, so other stations' edits never move
     // it); validate_config keeps base … base + kMaxStations - 1 clear of the panel port. A
-    // configuration that was not normalized has none yet: then the station's position.
-    const int slot = sc.processing.web_port_slot >= 0 ? sc.processing.web_port_slot : int(index);
-    w.port = slot < kMaxStations ? next.stereotool_web_port_base + slot : 0;
+    // configuration that was not normalized has none yet: then no web interface (port 0), never
+    // a port another station may get as its slot.
+    const int slot = sc.processing.web_port_slot;
+    w.port = slot >= 0 && slot < kMaxStations ? next.stereotool_web_port_base + slot : 0;
     // a preset not there (yet): Stereo Tool cannot load it, the station runs unprocessed and says so
     w.path = store.path_of(sc.processing.preset);
   }
@@ -353,6 +355,7 @@ void EncoderEngine::Impl::update_processing(StationRuntime& rt, const EncoderCon
     s.preset_path = path;
     s.web_port = port;
     s.streams = active_streams(rt);  // from its first block on, however long the rest takes
+    if (port > 0) s.wait_for_gone = port_holders(port, rt, finished);
     if (path.empty()) s.setup_error = "brak folderu presetów Stereo Tool";  // never Stereo Tool's defaults on air
     std::string err;
     s.home_dir = store.station_home(sc.id, &err);
@@ -376,6 +379,21 @@ void EncoderEngine::Impl::update_processing(StationRuntime& rt, const EncoderCon
     p.preset_path = path;
     log_info(who + "nowy preset „" + sc.processing.preset + "”");
   }
+}
+
+// The old workers on web interface port `port` that a new worker of `rt` must let go first: the
+// ones that go in this apply (`finished`, and the workers of stations not visited yet: removed,
+// disabled, or replaced further on), stopped at its end. Ports are unique in a valid
+// configuration, so no worker that stays holds `port`.
+std::vector<std::shared_ptr<const std::atomic<bool>>> EncoderEngine::Impl::port_holders(
+    int port, const StationRuntime& rt, const std::vector<std::shared_ptr<ProcessingWorker>>& finished) const {
+  std::vector<std::shared_ptr<const std::atomic<bool>>> holders;
+  for (const auto& w : finished)
+    if (w->configured_web_port() == port) holders.push_back(w->instance_gone());
+  for (const auto& [id, other] : stations)
+    if (other.get() != &rt && other->proc.worker && other->proc.worker->configured_web_port() == port)
+      holders.push_back(other->proc.worker->instance_gone());
+  return holders;
 }
 
 // Every worker that goes in `next` starts its 5 ms fade out now, and they are waited for together
@@ -862,7 +880,7 @@ PresetResult EncoderEngine::save_processing_preset(const std::string& station_id
   }
   // the engine is not held while Stereo Tool saves (on its own thread, between two blocks)
   std::string err;
-  if (!worker->save_preset(temp, kSavePresetTimeoutMs, &err)) {
+  if (!worker->save_preset(temp, detail::save_preset_timeout_ms(), &err)) {
     m.store.abandon(temp);  // one written after a timeout goes at the next start
     log_warning(who + "nie zapisano presetu „" + std::string(name) + "”: " + err);
     return {PresetError::Failed, err};

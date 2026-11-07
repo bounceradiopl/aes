@@ -68,6 +68,8 @@ class EncoderHttpServer {
 //    a bad web port base goes back to 8100 (8200 when the panel port is among 8100–8115); a
 //    duplicate or out-of-range web port slot is replaced by the lowest free one (logged), the
 //    other stations keep theirs.
+//  - station ids that differ only in case (Bounce Encoder 1.0 allowed them): every station after
+//    the first gets a new id (normalize_config, logged), nothing is disabled;
 //  - the warnings of config_warnings (the same Stereo Tool key on two stations) are logged.
 EncoderConfig load_startup_config(const std::string& path);
 

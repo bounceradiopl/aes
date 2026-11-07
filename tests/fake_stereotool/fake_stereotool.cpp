@@ -285,6 +285,14 @@ FAKE_ST_EXPORT bool stereoTool_SetStsValue(gStereoTool* st, int index, int subin
   ++s.values["sts_set_calls"];
   if (subindex != 0 || !value || index == int(s.opt("sts_rejects"))) return false;
   st->sts[index] = value;
+  // a web interface port is one socket: two live instances serving on it is a conflict
+  auto serving = [](const gStereoTool* i) {
+    auto e = i->sts.find(kWebserverEnable);
+    return e != i->sts.end() && e->second == "1";
+  };
+  if (serving(st))
+    for (const gStereoTool* other : s.live)
+      if (other != st && serving(other) && other->sts.at(kWebserverPort) == st->sts.at(kWebserverPort)) ++s.values["port_conflicts"];
   return true;
 }
 
@@ -321,7 +329,8 @@ FAKE_ST_EXPORT void fake_stereotool_set(const char* option, double value) {
   s.options[option] = value;
 }
 
-// Counters ("created", "deleted", "process_calls", "bind_calls", ...) and recorded numbers
+// Counters ("created", "deleted", "process_calls", "bind_calls", "port_conflicts": an instance
+// switched its web interface on at a port another live instance serves on, ...) and recorded numbers
 // ("process_rate", "load_type", ...); "live" is the number of instances not deleted.
 FAKE_ST_EXPORT long long fake_stereotool_value(const char* what) {
   auto& s = state();

@@ -2004,6 +2004,125 @@ TEST_CASE("encoder engine: a slow save bypasses as a save, never as too slow, an
   CHECK(fake().value("created") == 1);
 }
 
+TEST_CASE("encoder engine: a station added as another is deleted gets a new id and a new instance (ruling S4)") {
+  UseFake use;
+  StDir dir("reuse");
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  be::StationConfig st = station("", "Radio Stara");
+  st.processing = processing("P.sts");
+  cfg.stations = {st};
+  cfg = ready(cfg);
+  REQUIRE(cfg.stations[0].id == "s1");
+  be::EncoderEngine engine(st_options(dir));
+  REQUIRE(engine.put_preset("P.sts", fake_preset(0.5, 64)).ok());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  REQUIRE(processing_running(engine, "s1"));
+
+  // one update: s1 goes, a new station comes (the counter travels with the configuration)
+  be::StationConfig added = station("", "Radio Nowa");
+  added.processing = processing("P.sts", kKey2);
+  cfg.stations = {added};
+  cfg = ready(cfg);
+  CHECK(cfg.stations[0].id == "s2");
+  engine.apply_config(cfg);
+  REQUIRE(processing_running(engine, "s2"));
+  CHECK(fake().value("created") == 2);  // its own instance, not s1's with its settings
+  CHECK(fake().text("create_name") == std::optional<std::string>("station-s2"));
+  CHECK(fake().text("create_key") == std::optional<std::string>(kKey2));
+  CHECK(wait_for([] { return fake().value("live") == 1; }, 5000));
+}
+
+TEST_CASE("encoder engine: a web interface port is bound by one instance at a time") {
+  UseFake use;
+  StDir dir("port");
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  cfg.stereotool_web_port_base = 8500;
+  be::StationConfig st = station("s1", "Radio Port");
+  st.processing = processing("P.sts");
+  cfg.stations = {st};
+  cfg = ready(cfg);
+  be::EncoderEngine engine(st_options(dir));
+  REQUIRE(engine.put_preset("P.sts", fake_preset(0.5, 64)).ok());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  REQUIRE(processing_running(engine, "s1"));
+  SlowBuild slow(150'000'000);  // the old instance would still hold the port while the new one starts
+
+  SUBCASE("a new key: the new instance takes the port once the old one is gone") {
+    cfg.stations[0].processing.license_key = kKey2;
+    engine.apply_config(ready(cfg));
+    REQUIRE(processing_running(engine, "s1"));
+    CHECK(fake().value("created") == 2);
+    CHECK(processing_of(engine, "s1").web_port == 8500);
+  }
+  SUBCASE("a slot freed and given to a new station in the same update") {
+    be::StationConfig added = station("", "Radio Nowa");
+    added.processing = processing("P.sts", kKey2);
+    cfg.stations = {added};
+    cfg = ready(cfg);
+    REQUIRE(cfg.stations[0].processing.web_port_slot == 0);
+    engine.apply_config(cfg);
+    REQUIRE(processing_running(engine, cfg.stations[0].id));
+    CHECK(processing_of(engine, cfg.stations[0].id).web_port == 8500);
+  }
+  CHECK(fake().value("port_conflicts") == 0);
+  CHECK(fake().value("live") == 1);
+}
+
+TEST_CASE("encoder engine: a configuration without a web port slot runs Stereo Tool without its web interface") {
+  UseFake use;
+  StDir dir("noslot");
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  cfg.stations = {station("s1", "Radio Bez Portu"), station("s2", "Radio Bez Slotu")};
+  cfg.stations[1].processing = processing("P.sts");
+  REQUIRE(cfg.stations[1].processing.web_port_slot == -1);  // not normalized
+  REQUIRE(be::validate_config(cfg).empty());
+  be::EncoderEngine engine(st_options(dir));
+  REQUIRE(engine.put_preset("P.sts", fake_preset(0.5, 64)).ok());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  REQUIRE(processing_running(engine, "s2"));
+  CHECK(processing_of(engine, "s2").web_port == 0);  // never a port taken from the position
+  CHECK(fake().sts("station-s2", be::detail::st::kParamWebserverEnable) == std::optional<std::string>("0"));
+}
+
+TEST_CASE("encoder engine: a save Stereo Tool does not finish in time is reported, processing comes back after it") {
+  UseFake use;
+  StDir dir("hungsave");
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  be::StationConfig st = station("s1", "Radio Zawieszony Zapis");
+  st.processing = processing("P.sts");
+  cfg.stations = {st};
+  cfg = ready(cfg);
+  be::EncoderEngine engine(st_options(dir));
+  REQUIRE(engine.put_preset("P.sts", fake_preset(0.5, 64)).ok());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  REQUIRE(processing_running(engine, "s1"));
+  be::detail::testing::set_save_preset_timeout_ms(400);
+  fake().set("save_sleep_us", 1'500'000);
+  const be::PresetResult r = engine.save_processing_preset("s1", "Zawieszony.sts");
+  be::detail::testing::set_save_preset_timeout_ms(0);
+  CHECK(r.error == be::PresetError::Failed);
+  CHECK_MESSAGE(r.message.find("nie zakończył zapisu presetu w ciągu 0,4 s") != std::string::npos, r.message);
+  const std::string who = "Processing stacji „Radio Zawieszony Zapis”: ";
+  CHECK(logged(who + "nie zapisano presetu „Zawieszony.sts”: Stereo Tool nie zakończył zapisu presetu w ciągu 0,4 s"));
+  // still saving: the status says so, the reason stays "saving"
+  const be::ProcessingStatus during = processing_of(engine, "s1");
+  CHECK(during.state == be::ProcessingState::Bypass);
+  CHECK(during.reason_code == be::ProcessingReason::Saving);
+  CHECK_MESSAGE(during.reason.find("nie zakończył zapisu") != std::string::npos, during.reason);
+  fake().set("save_sleep_us", 0);
+  CHECK(processing_running(engine, "s1", 5000));
+  CHECK(log_lines_with(who + "automatyczna ponowna próba") == 0);
+  CHECK(engine.list_presets().size() == 1);  // the late file is not a preset
+}
+
 #endif  // BAM_FAKE_STEREOTOOL_PATH
 
 #endif  // BAM_WITH_CODECS
