@@ -35,6 +35,7 @@ constexpr int kPopWaitMs = 20;                         // the output thread look
 constexpr auto kWaitSlice = std::chrono::milliseconds(5);  // and at the queue while Stereo Tool works
 constexpr int kDefaultStopTimeoutMs = 5000;
 constexpr size_t kGraveyardSlots = 1;  // see ProcessingWorker::graveyard_
+constexpr size_t kFailureTexts = 8;    // failure texts kept for the events (Core::failures)
 
 std::atomic<int> g_stop_timeout_ms{0};
 
@@ -73,12 +74,16 @@ struct ProcessingWorker::Core {
   uint32_t latency = 0;              // Ready
   Verdict verdict = Verdict::None;   // Processed: a licence check came with this block
   bool crashed = false;              // ProcessFailed: a crash (nothing more until a service restart)
+  uint64_t failure_id = 0;           // SetupFailed / ProcessFailed: the failure's text (failures)
 
   // published for status()
   std::atomic<double> cpu_pct{0};
   std::atomic<int> licence{-1};  // the last check: -1 none yet, 0 invalid, 1 valid
   mutable std::mutex text_m;
-  std::string failure;     // Polish, the last failure (no key)
+  // Polish, the last kFailureTexts failures (no key), by id (1, 2, ...): failure id f is
+  // failures[(f - 1) % kFailureTexts] while f > failure_count - kFailureTexts
+  std::array<std::string, kFailureTexts> failures;
+  uint64_t failure_count = 0;
   std::string unlicensed;  // the features the last check found unlicensed
 
   // Stereo Tool thread only
@@ -93,11 +98,18 @@ namespace {
 
 using Core = ProcessingWorker::Core;
 
-void set_failure(Core& c, std::string text) {
+// Records the failure text; returns its id (the output thread puts it into the state it sets).
+uint64_t set_failure(Core& c, std::string text) {
   text = without_key(std::move(text), c.key);
   log_warning("Processing stacji " + c.station_id + ": " + text);
   std::lock_guard lock(c.text_m);
-  c.failure = std::move(text);
+  c.failures[c.failure_count % kFailureTexts] = std::move(text);
+  return ++c.failure_count;
+}
+
+uint64_t last_failure(const Core& c) {
+  std::lock_guard lock(c.text_m);
+  return c.failure_count;
 }
 
 // Builds the instance (or keeps a working one on restart), loads the preset, measures the latency.
@@ -215,12 +227,15 @@ void st_main(std::shared_ptr<Core> c) {
     } else {
       done = setup(*c, cmd == Cmd::Restart, &latency);
     }
+    // the text set_failure recorded for this command (this thread is the only one recording)
+    const uint64_t failure_id = done == Done::SetupFailed || done == Done::ProcessFailed ? last_failure(*c) : 0;
     {
       std::lock_guard lock(c->m);
       c->done = done;
       c->latency = latency;
       c->verdict = verdict;
       c->crashed = crashed;
+      c->failure_id = failure_id;
     }
     c->cv.notify_all();
   }
@@ -317,11 +332,19 @@ void ProcessingWorker::stop() {
   set_state(ProcessingState::Off, Reason::None);
 }
 
-std::string ProcessingWorker::reason_text(Reason why) const {
+namespace {
+constexpr int kStateShift = 56, kReasonShift = 48;
+constexpr uint64_t kFailureMask = (uint64_t(1) << kReasonShift) - 1;
+}  // namespace
+
+std::string ProcessingWorker::reason_text(Reason why, uint64_t failure_id) const {
   std::string failure;
   if (why == Reason::Setup || why == Reason::Process || why == Reason::Crash) {
     std::lock_guard lock(core_->text_m);
-    failure = core_->failure;
+    const uint64_t count = core_->failure_count;
+    // the text of that failure while it is kept, else the newest one
+    const uint64_t id = failure_id > 0 && failure_id <= count && failure_id + kFailureTexts > count ? failure_id : count;
+    if (id > 0) failure = core_->failures[(id - 1) % kFailureTexts];
   }
   switch (why) {
     case Reason::None: break;
@@ -341,10 +364,10 @@ std::string ProcessingWorker::reason_text(Reason why) const {
 
 ProcessingStatus ProcessingWorker::status() const {
   ProcessingStatus s;
-  const uint32_t packed = status_.load();
-  s.state = ProcessingState(packed >> 16);
-  const auto why = Reason(packed & 0xFFFF);
-  s.reason = reason_text(why);
+  const uint64_t packed = status_.load();
+  s.state = ProcessingState(packed >> kStateShift);
+  const auto why = Reason((packed >> kReasonShift) & 0xFF);
+  s.reason = reason_text(why, packed & kFailureMask);
   s.latency_ms = delay_frames() * 1000.0 / kStationRate;
   const bool feeding = s.state == ProcessingState::Running || why == Reason::LicenceCheck;
   s.cpu_pct = feeding ? core_->cpu_pct.load() : 0.0;
@@ -359,30 +382,56 @@ ProcessingStatus ProcessingWorker::status() const {
 }
 
 uint64_t ProcessingWorker::events_since(uint64_t since, std::vector<ProcessingEvent>* out) const {
-  const uint64_t seq = event_seq_.load(std::memory_order_acquire);
-  uint64_t from = std::min(since, seq);
-  if (seq - from > kEventSlots) from = seq - kEventSlots;  // older ones are overwritten
-  for (uint64_t i = from; i < seq; ++i) {
-    const uint32_t packed = event_slots_[i % kEventSlots].load(std::memory_order_relaxed);
+  std::vector<std::pair<uint64_t, uint64_t>> raw;
+  const uint64_t next = events_.read(since, out ? &raw : nullptr);
+  for (const auto& [seq, packed] : raw) {
     ProcessingEvent e;
-    e.seq = i + 1;
-    e.state = ProcessingState(packed >> 16);
-    e.reason = reason_text(Reason(packed & 0xFFFF));
-    if (out) out->push_back(std::move(e));
+    e.seq = seq;
+    e.state = ProcessingState(packed >> kStateShift);
+    e.reason = reason_text(Reason((packed >> kReasonShift) & 0xFF), packed & kFailureMask);
+    out->push_back(std::move(e));
   }
+  return next;
+}
+
+// ---- EventRing ----
+
+void EventRing::push(uint64_t value) {
+  const uint64_t seq = seq_.load(std::memory_order_relaxed);
+  // a reader that sees this value in the slot then also sees seq_ >= seq (its acquire fence pairs
+  // with this one), so it knows the event the slot held before is gone
+  std::atomic_thread_fence(std::memory_order_release);
+  slots_[seq % kSlots].store(value, std::memory_order_relaxed);
+  seq_.store(seq + 1, std::memory_order_release);
+}
+
+uint64_t EventRing::read(uint64_t since, std::vector<std::pair<uint64_t, uint64_t>>* out,
+                         const std::function<void()>& between) const {
+  const uint64_t seq = seq_.load(std::memory_order_acquire);
+  uint64_t from = std::min(since, seq);
+  if (seq - from > kSlots) from = seq - kSlots;
+  std::array<uint64_t, kSlots> values;
+  for (uint64_t i = from; i < seq; ++i) values[i - from] = slots_[i % kSlots].load(std::memory_order_relaxed);
+  if (between) between();
+  // Event i is overwritten by event i + kSlots: intact while seq_ (the events written) is below
+  // i + kSlots, since the writer may be storing event seq_ right now (it publishes seq_ after).
+  std::atomic_thread_fence(std::memory_order_acquire);
+  const uint64_t now = seq_.load(std::memory_order_relaxed);
+  if (out)
+    for (uint64_t i = from; i < seq; ++i)
+      if (i + kSlots > now) out->emplace_back(i + 1, values[i - from]);
   return seq;
 }
 
 // ---- output thread ----
 
 void ProcessingWorker::set_state(ProcessingState state, Reason why) {
-  const uint32_t packed = uint32_t(state) << 16 | uint32_t(why);
+  const bool failure = why == Reason::Setup || why == Reason::Process || why == Reason::Crash;
+  const uint64_t packed = uint64_t(state) << kStateShift | uint64_t(why) << kReasonShift |
+                          (failure ? failure_id_ & kFailureMask : 0);
   if (status_.load(std::memory_order_relaxed) == packed) return;
   status_.store(packed);
-  // one writer at a time (the output thread; the constructor before it, stop() after it)
-  const uint64_t seq = event_seq_.load(std::memory_order_relaxed);
-  event_slots_[seq % kEventSlots].store(packed, std::memory_order_relaxed);
-  event_seq_.store(seq + 1, std::memory_order_release);
+  events_.push(packed);  // one writer at a time (the output thread; the constructor before it, stop() after it)
 }
 
 void ProcessingWorker::take_streams() {
@@ -397,7 +446,17 @@ void ProcessingWorker::take_streams() {
 bool ProcessingWorker::falling_behind(int64_t now) {
   if (pending_ == Pending::Job && now - job_posted_ns_ > kMaxBehindNs) return true;  // stuck in a call
   const size_t backlog = in_.size_frames();
-  if (backlog >= kMaxBacklogFrames) return true;  // the queue is about to drop audio
+  // the queue would drop audio soon, unless Stereo Tool is draining it (a burst after a stall)
+  if (backlog < kMaxBacklogFrames) {
+    cap_ns_ = 0;
+  } else if (cap_ns_ == 0) {
+    cap_ns_ = now;
+    cap_backlog_ = backlog;
+  } else if (now - cap_ns_ >= kCapWindowNs) {
+    if (backlog >= cap_backlog_) return true;
+    cap_ns_ = now;
+    cap_backlog_ = backlog;
+  }
   if (backlog <= kBehindFrames) {
     window_ns_ = 0;
     return false;
@@ -422,6 +481,7 @@ void ProcessingWorker::go_dry(Reason why, ProcessingState state) {
   mode_ = Mode::Dry;
   licence_ok_ = false;
   window_ns_ = 0;
+  cap_ns_ = 0;
   set_state(state, why);
 }
 
@@ -450,6 +510,7 @@ bool ProcessingWorker::take_result(bool wait) {
     latency = core_->latency;
     verdict = core_->verdict;
     crashed = core_->crashed;
+    if (core_->failure_id) failure_id_ = core_->failure_id;
   }
   pending_ = Pending::None;
   switch (done) {
@@ -557,7 +618,7 @@ void ProcessingWorker::run() {
       else if (pending_ == Pending::Setup)
         restart_wanted_ = false;  // a (re)start is under way already
       else
-        set_state(ProcessingState(status_.load() >> 16), Reason::RestartWaits);  // a block stuck in Stereo Tool
+        set_state(ProcessingState(status_.load() >> kStateShift), Reason::RestartWaits);  // a block stuck in Stereo Tool
     }
 
     const size_t n = in_.pop(block_.data(), kBlockFrames, kPopWaitMs);

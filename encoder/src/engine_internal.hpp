@@ -230,6 +230,24 @@ namespace testing {
 void set_processing_stop_timeout_ms(int ms);
 }  // namespace testing
 
+// The last kSlots values one thread wrote, numbered 1, 2, ... (their seq), read by any thread
+// without a lock and without blocking the writer (ProcessingWorker's events).
+class EventRing {
+ public:
+  static constexpr size_t kSlots = 32;
+  void push(uint64_t value);  // the one writer thread only
+  // Appends (seq, value) of every event after `since` that is still intact, oldest first, and
+  // returns the seq to pass next time. An event the writer overwrote meanwhile (more than
+  // kSlots - 1 newer ones) is left out: the caller sees the gap in seq. `between` (tests) runs
+  // after the slots were read, before they are checked.
+  uint64_t read(uint64_t since, std::vector<std::pair<uint64_t, uint64_t>>* out,
+                const std::function<void()>& between = {}) const;
+
+ private:
+  std::array<std::atomic<uint64_t>, kSlots> slots_{};
+  std::atomic<uint64_t> seq_{0};
+};
+
 // A change of a worker's state or reason (ProcessingWorker::events_since), for the engine's log.
 struct ProcessingEvent {
   uint64_t seq = 0;  // 1, 2, ... per worker
@@ -265,9 +283,10 @@ struct ProcessingEvent {
 // up ("kolejka > 200 ms"): a call out for longer than kMaxBehindNs (stuck), a backlog of more
 // than kMaxBehindNs of audio that has not shrunk over kBehindWindowNs (slower than real time; the
 // window is long enough for a Stereo Tool at 95 % CPU to show its drain above the 10 ms jitter of
-// the queue), or a backlog of kMaxBacklogFrames (the queue would overflow). A burst after a station stall that
-// Stereo Tool drains never trips it. restart() leaves the bypass. Every change of state or
-// reason is an event (events_since) the engine logs.
+// the queue), or a backlog of kMaxBacklogFrames that has not shrunk over kCapWindowNs (the queue
+// would overflow soon). A burst after a station stall that Stereo Tool drains never trips it.
+// restart() leaves the bypass. Every change of state or reason is an event (events_since) the
+// engine logs; an event keeps the failure text of its moment.
 class ProcessingWorker {
  public:
   static constexpr size_t kQueueFrames = size_t(kStationRate) * 2;  // 2 s from the station
@@ -277,10 +296,13 @@ class ProcessingWorker {
   static constexpr size_t kBehindFrames = size_t(kStationRate) / 5;          // kMaxBehindNs of audio
   static constexpr int64_t kBehindWindowNs = 500'000'000;
   static constexpr size_t kMaxBacklogFrames = size_t(kStationRate) * 3 / 2;  // 1.5 s: bypass before the queue drops
+  // A backlog over kMaxBacklogFrames that has not shrunk over this long bypasses (Stereo Tool
+  // drains 10 ms more than the queue's jitter in it below about 90 % CPU).
+  static constexpr int64_t kCapWindowNs = 100'000'000;
   static constexpr uint64_t kLicenceFirstCheckFrames = kStationRate / 2;
   // Re-checked every 250 ms of audio (cheap in the fake; Task 7 measures the real library's cost).
   static constexpr uint64_t kLicenceCheckFrames = kStationRate / 4;
-  static constexpr size_t kEventSlots = 32;  // events kept for events_since()
+  static constexpr size_t kEventSlots = EventRing::kSlots;  // events kept for events_since()
 
   // Starts both threads; the instance is built on the Stereo Tool thread (meanwhile, and on any
   // failure, the streams get the unprocessed mix).
@@ -300,7 +322,7 @@ class ProcessingWorker {
   void restart();
   ProcessingStatus status() const;
   // Any thread: the state changes after event `since` (0: all kept), oldest first; returns the
-  // seq to pass next time. Only the last kEventSlots are kept: the caller sees the gap in seq.
+  // seq to pass next time. Only the last kEventSlots - 1 are kept: the caller sees the gap in seq.
   uint64_t events_since(uint64_t since, std::vector<ProcessingEvent>* out) const;
   uint32_t delay_frames() const { return delay_.load(std::memory_order_relaxed); }
   // Stops both threads; waits for the Stereo Tool thread at most the stop timeout (a call stuck
@@ -320,7 +342,7 @@ class ProcessingWorker {
   void wait_job();
   void go_dry(Reason why, ProcessingState state);
   void set_state(ProcessingState state, Reason why);  // output thread (and constructor / stop())
-  std::string reason_text(Reason why) const;
+  std::string reason_text(Reason why, uint64_t failure_id) const;
   bool falling_behind(int64_t now);
   void emit();
   void deliver(const float* stereo, size_t frames);
@@ -354,12 +376,16 @@ class ProcessingWorker {
   int64_t job_posted_ns_ = 0;  // when the block at the Stereo Tool thread was handed over
   int64_t window_ns_ = 0;      // start of the backlog window (0: backlog under kBehindFrames)
   size_t window_backlog_ = 0;  // the backlog at window_ns_
+  int64_t cap_ns_ = 0;         // when the backlog was last looked at above kMaxBacklogFrames (0: below)
+  size_t cap_backlog_ = 0;     // the backlog then
   GainRamp mix_{0.0};          // share of the processed signal
+  uint64_t failure_id_ = 0;    // the failure text of the last failed Stereo Tool command (Core)
 
   std::atomic<uint32_t> delay_{0};
-  std::atomic<uint32_t> status_{0};  // state << 16 | reason, read together
-  std::array<std::atomic<uint32_t>, kEventSlots> event_slots_{};  // status_ values, by seq
-  std::atomic<uint64_t> event_seq_{0};
+  // state << 56 | reason << 48 | failure id: read together; the failure id names the text the
+  // state was set with (Core keeps the last few), so a later failure does not change it
+  std::atomic<uint64_t> status_{0};
+  EventRing events_;  // status_ values
   std::atomic<bool> restart_{false};
   std::atomic<bool> running_{true};
   std::atomic<bool> stopped_{false};

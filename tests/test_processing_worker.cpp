@@ -475,6 +475,67 @@ TEST_CASE("processing: an exception in process bypasses with a crossfade, restar
   CHECK(silent_blocks(out) == 0);
 }
 
+TEST_CASE("processing: each event keeps the failure text of its moment") {
+  UseFake use;
+  fake().set("latency", 256);
+  Collector col;
+  Input input;
+  PW w(settings(col), "s5c");
+  REQUIRE(feed_until(w, input, be::ProcessingState::Running));
+  fake().set("process_throws", 1);
+  feed(w, input, 9600);
+  REQUIRE(status_when(w, [](auto& s) { return s.state == be::ProcessingState::Bypass; }).state ==
+          be::ProcessingState::Bypass);
+  // another failure before the engine reads the events: the first one still has its own text
+  fake().set("create_fails", 1);
+  w.restart();
+  feed(w, input, 4800);
+  const auto st = status_when(w, [](auto& s) { return s.state == be::ProcessingState::Error; });
+  REQUIRE(st.state == be::ProcessingState::Error);
+  CHECK_MESSAGE(contains(st.reason, "nie udało się utworzyć instancji"), st.reason);
+  const auto lines = event_lines(w);
+  REQUIRE(lines.size() == 6);
+  CHECK_MESSAGE(contains(lines[3], "bypass: Stereo Tool zgłosił wyjątek w stereoTool_Process"), lines[3]);
+  CHECK(lines[4] == "bypass: uruchamianie Stereo Tool");
+  CHECK_MESSAGE(contains(lines[5], "error: nie udało się utworzyć instancji"), lines[5]);
+}
+
+TEST_CASE("processing: events overwritten while they are read are left out") {
+  bd::EventRing ring;
+  std::vector<std::pair<uint64_t, uint64_t>> got;
+  for (uint64_t v = 1; v <= 5; ++v) ring.push(v);
+  // the writer laps the reader between reading the slots and checking them: nothing of it is used
+  uint64_t next = ring.read(0, &got, [&] {
+    for (uint64_t k = 0; k < 40; ++k) ring.push(100 + k);
+  });
+  CHECK(next == 5);
+  CHECK(got.empty());
+  // the next read sees the newest slots, all but the one the writer may be overwriting right now
+  next = ring.read(next, &got);
+  CHECK(next == 45);
+  REQUIRE(got.size() == bd::EventRing::kSlots - 1);
+  for (size_t i = 0; i < got.size(); ++i) {
+    CHECK(got[i].first == 15 + i);   // seq
+    CHECK(got[i].second == 109 + i);  // the value pushed as event 15 + i
+  }
+  // partly overwritten: the slots still intact are used
+  bd::EventRing r2;
+  got.clear();
+  for (uint64_t v = 1; v <= 10; ++v) r2.push(v);
+  CHECK(r2.read(0, &got, [&] {
+    for (uint64_t k = 0; k < 25; ++k) r2.push(100 + k);
+  }) == 10);
+  REQUIRE(got.size() == 6);
+  for (size_t i = 0; i < got.size(); ++i) {
+    CHECK(got[i].first == 5 + i);
+    CHECK(got[i].second == 5 + i);
+  }
+  // nothing new: nothing
+  got.clear();
+  CHECK(r2.read(35, &got) == 35);
+  CHECK(got.empty());
+}
+
 TEST_CASE("processing: a Stereo Tool too slow or stuck bypasses after 200 ms behind, nothing lost") {
   UseFake use;
   StopTimeout quick(300);
@@ -522,6 +583,8 @@ TEST_CASE("processing: a station catch-up burst that Stereo Tool drains keeps pr
   SUBCASE("about 80 % CPU, 0.1 s stall") { sleep_us = 6500, stall_ms = 100; }
   SUBCASE("about 80 % CPU, 0.3 s stall") { sleep_us = 6500, stall_ms = 300; }
   SUBCASE("8 ms per block (the review's case), 0.1 s stall") { sleep_us = 8000, stall_ms = 100; }
+  // more than the 1.5 s backlog cap at once: drained fast, so it is no reason to bypass
+  SUBCASE("about 30 % CPU, 1.6 s stall") { sleep_us = 3000, stall_ms = 1600; }
   CAPTURE(sleep_us);
   CAPTURE(stall_ms);
   fake().set("process_sleep_us", sleep_us);
