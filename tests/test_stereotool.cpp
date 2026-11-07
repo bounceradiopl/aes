@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // The Stereo Tool binding (bam/encoder/stereotool.hpp) against the fake library of
 // tests/fake_stereotool (gain + delay, counters, failure modes). The real libStereoTool is used
-// only when BAM_TEST_REAL_STEREOTOOL names a folder holding it (no licence key, silence only).
+// only when BAM_TEST_REAL_STEREOTOOL names a folder holding it (no licence key, Stereo Tool's defaults).
 #include <doctest/doctest.h>
 
 #ifdef BAM_FAKE_STEREOTOOL_PATH
@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <optional>
@@ -17,6 +18,7 @@
 #include <vector>
 
 #include "../encoder/src/stereotool_api.hpp"  // the parameter indices the binding uses (11.07)
+#include "bam/encoder/preset_store.hpp"
 #include "bam/encoder/stereotool.hpp"
 #include "bam/platform/dynlib.hpp"
 #include "bam/platform/process.hpp"
@@ -514,7 +516,41 @@ TEST_CASE("stereotool: the web interface port is set per instance and kept acros
   CHECK(fake().text("bind_web") == std::optional<std::string>("127.0.0.1"));
 }
 
-TEST_CASE("stereotool: the real library (BAM_TEST_REAL_STEREOTOOL) processes silence without a licence key") {
+namespace {
+
+// Times of a call into the real library, in ms.
+struct CallTimes {
+  std::vector<double> ms;
+  template <typename F>
+  auto time(F&& f) {
+    const auto t0 = std::chrono::steady_clock::now();
+    auto r = f();
+    ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    return r;
+  }
+  double at(double q) const {  // quantile q (0..1) of the times
+    auto v = ms;
+    std::sort(v.begin(), v.end());
+    return v.empty() ? 0.0 : v[std::min(v.size() - 1, size_t(q * double(v.size() - 1) + 0.5))];
+  }
+  std::string text() const {
+    char buf[160];
+    std::snprintf(buf, sizeof buf, "n %llu, median %.3f ms, p99 %.3f ms, max %.3f ms", (unsigned long long)ms.size(), at(0.5),
+                  at(0.99), at(1.0));
+    return buf;
+  }
+};
+
+}  // namespace
+
+// Windows CI runs this against the DLL next to the encoder (BAM_TEST_REAL_STEREOTOOL = that folder)
+// in a run of its own: never with a licence key, Stereo Tool's default settings, no web interface
+// (no socket). It checks that a preset saved by the library under the preset store's temporary
+// name loads again, and prints the times the processing worker's rules depend on: a Process call
+// (the worker bypasses when a call is out for more than 200 ms), the licence check (every 250 ms
+// of audio, on the same thread as Process), SavePreset/LoadPreset (under the API mutex, like
+// Create3 and Delete).
+TEST_CASE("stereotool: the real library (BAM_TEST_REAL_STEREOTOOL) saves and loads a preset and processes audio without a licence key") {
   const char* dir = std::getenv("BAM_TEST_REAL_STEREOTOOL");
   if (!dir || !*dir) {
     MESSAGE("BAM_TEST_REAL_STEREOTOOL not set, real Stereo Tool test skipped");
@@ -526,22 +562,82 @@ TEST_CASE("stereotool: the real library (BAM_TEST_REAL_STEREOTOOL) processes sil
   be::set_stereotool_library_dirs({dir});
   const auto info = be::stereotool_info();
   REQUIRE_MESSAGE(info.available, info.error);
-  CHECK(info.version >= 11070);
+  CHECK(info.version == be::kStereoToolVersion);
   TempDir home("real");
-  auto st = make("bam-test", "", home.path);  // no licence key, ever
-  CHECK(st->latency_frames() >= 0);
+  CallTimes create_ms;
+  auto st = create_ms.time([&] { return make("bam-test", "", home.path); });  // no licence key, ever
+  const int latency = st->latency_frames();
+  CHECK(latency >= 0);
+
   std::vector<float> buf(480 * 2);
   bool finite = true;
-  for (int block = 0; block < 200; ++block) {
-    std::fill(buf.begin(), buf.end(), 0.0f);
-    REQUIRE_MESSAGE(st->process(buf.data(), 480), st->failure());
-    for (float x : buf)
-      if (!std::isfinite(x)) finite = false;
+  CallTimes process_ms, licence_ms, save_ms, load_ms;
+  auto process_silence = [&](int blocks) {
+    for (int block = 0; block < blocks; ++block) {
+      std::fill(buf.begin(), buf.end(), 0.0f);
+      REQUIRE_MESSAGE(process_ms.time([&] { return st->process(buf.data(), 480); }), st->failure());
+      for (float x : buf)
+        if (!std::isfinite(x)) finite = false;
+    }
+  };
+  process_silence(50);  // some audio first: the licence check needs it
+  const double first_process_ms = process_ms.ms.front();
+
+  // a preset saved by the library itself, under the name the preset store gives its temporary
+  // files (PresetStore: ".bounce-<n>.tmp" in the presets folder, renamed to the preset's name afterwards)
+  const std::string tmp = (fs::path(home.path) / ".bounce-1.tmp").string();
+  std::string err;
+  for (int i = 0; i < 3; ++i) REQUIRE_MESSAGE(save_ms.time([&] { return st->save_preset(tmp, &err); }), err);
+  std::error_code ec;
+  REQUIRE(fs::is_regular_file(tmp, ec));  // that very name: no extension added
+  const auto preset_bytes = fs::file_size(tmp, ec);
+  CHECK(preset_bytes > 0);
+  CHECK(preset_bytes <= be::kMaxPresetBytes);
+  CHECK_FALSE(fs::exists(tmp + ".sts", ec));
+  const std::string preset = (fs::path(home.path) / "real.sts").string();
+  fs::rename(tmp, preset, ec);
+  REQUIRE_FALSE(ec);
+  REQUIRE_MESSAGE(load_ms.time([&] { return st->load_preset(preset, &err); }), err);
+
+  // 1000 blocks (10 s of audio), the licence checked every 25 blocks (250 ms) as the worker does
+  for (int block = 0; block < 1000; block += 25) {
+    process_silence(25);
+    const bool valid = licence_ms.time([&] { return st->license_valid(); });
+    CHECK(valid);  // no key, default settings: nothing unlicensed
   }
   CHECK(finite);
-  MESSAGE("real Stereo Tool " << info.version << ", latency " << st->latency_frames() << " frames, licence valid "
-                              << st->license_valid());
-  st.reset();
+  // silence may take a shortcut inside Stereo Tool: 10 s of noise at about -20 dBFS as well, for
+  // a closer Process time (the settings are Stereo Tool's defaults, not a station's preset)
+  CallTimes noise_ms;
+  uint32_t rng = 12345;
+  for (int block = 0; block < 1000; ++block) {
+    for (float& x : buf) {
+      rng = rng * 1664525u + 1013904223u;
+      x = (float(rng >> 8) / float(1u << 24) - 0.5f) * 0.2f;
+    }
+    REQUIRE_MESSAGE(noise_ms.time([&] { return st->process(buf.data(), 480); }), st->failure());
+    for (float x : buf)
+      if (!std::isfinite(x)) finite = false;
+    if (block % 25 == 24) CHECK(licence_ms.time([&] { return st->license_valid(); }));
+  }
+  CHECK(finite);
+  CHECK_FALSE(st->failed());
+  MESSAGE("real Stereo Tool " << info.version << ", latency " << latency << " frames, preset " << preset_bytes << " bytes");
+  MESSAGE("real Stereo Tool timing: Create3 " << create_ms.text() << "; first Process(480) " << first_process_ms << " ms");
+  MESSAGE("real Stereo Tool timing: Process(480) of silence " << process_ms.text());
+  MESSAGE("real Stereo Tool timing: Process(480) of noise " << noise_ms.text());
+  MESSAGE("real Stereo Tool timing: CheckLicenseValid " << licence_ms.text());
+  MESSAGE("real Stereo Tool timing: SavePreset " << save_ms.text() << "; LoadPreset " << load_ms.text());
+  // the worker's 200 ms rule counts a Process call and the licence check after it: report a
+  // machine where they come near it (a warning, the CI runner is not the target computer)
+  const double worst = std::max(process_ms.at(1.0), noise_ms.at(1.0)) + licence_ms.at(1.0);
+  WARN_MESSAGE(worst < 100.0, "Process + CheckLicenseValid take up to " << worst << " ms");
+  CallTimes delete_ms;
+  delete_ms.time([&] {
+    st.reset();
+    return true;
+  });
+  MESSAGE("real Stereo Tool timing: Delete " << delete_ms.text());
 }
 
 #endif  // BAM_FAKE_STEREOTOOL_PATH

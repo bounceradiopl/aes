@@ -8,7 +8,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-Kodeki (LAME 3.100, fdk-aac 2.0.3, libogg 1.3.5, libFLAC 1.4.3) CMake pobiera przy pierwszej konfiguracji z oficjalnych archiwów źródłowych, sprawdza ich sumy SHA-256 (`cmake/codecs.cmake`) i buduje razem z projektem. Buildy 64-bitowe mają kodeki domyślnie (`BAM_WITH_CODECS=ON`); 32-bitowy build (sterownik ASIO BounceAES Master dla programów 32-bitowych) jest bez kodeków i bez Bounce Encoder.
+Kodeki (LAME 3.100, fdk-aac 2.0.3, libogg 1.3.5, libFLAC 1.4.3) CMake pobiera przy pierwszej konfiguracji z oficjalnych archiwów źródłowych, sprawdza ich sumy SHA-256 (`cmake/codecs.cmake`) i buduje razem z projektem. Buildy 64-bitowe mają kodeki domyślnie (`BAM_WITH_CODECS=ON`); 32-bitowy build (sterownik ASIO BounceAES Master dla programów 32-bitowych) jest bez kodeków i bez Bounce Encoder. Buildy 64-bitowe pobierają też SDK Stereo Tool 11.07 (około 360 MB, sprawdzane po SHA-256, `cmake/stereotool.cmake`): nagłówki Thimeo służą tylko do sprawdzenia przy budowaniu, że deklaracje Bounce Encodera zgadzają się z biblioteką, a build Windows x64 kładzie `libStereoTool_64.dll` obok programu. Kopia archiwum: `-DBAM_STEREOTOOL_SDK_ZIP=<plik>`; bez Stereo Tool: `-DBAM_WITH_STEREOTOOL=OFF`.
 
 Zakres testów Bounce Encoder (część `bam_tests`, razem z testami BounceAES Master):
 - **kodeki**: tabela kodeków i walidacja ustawień (polskie komunikaty), każde dozwolone ustawienie otwiera kodek i strumień niesie to ustawienie; MP3 (ramki CBR, poziom i korelacja sinusa po zdekodowaniu), AAC-LC, HE-AAC, HE-AACv2 (nagłówki ADTS, poziom i korelacja po zdekodowaniu dekoderem fdk-aac); FLAC w Ogg zdekodowany **bit w bit**, strona Ogg co najwyżej co 300 ms także przy ciszy cyfrowej; biblioteki kodeków ładowane tylko ze wskazanego folderu, nigdy ze ścieżki systemowej; błąd kodowania zgłaszany i naprawiany ponownym otwarciem;
@@ -17,13 +17,16 @@ Zakres testów Bounce Encoder (część `bam_tests`, razem z testami BounceAES M
 - **konfiguracja**: limity (16 stacji, 3 wejścia, 8 strumieni, gain, opóźnienie), kombinacje kodek/bitrate/częstotliwość, hasła (nigdy w API, zachowane tylko przy tym samym serwerze i porcie), czyszczenie ręcznie zepsutego pliku przy starcie;
 - **silnik end-to-end**: AES67 (atrapa nadawcy na 127.0.0.1) → opóźnienie 2 s + drugie wejście −6 dB → FLAC 48 kHz → atrapa Icecasta → dekodowanie → zgodność **bit w bit** i zmierzone opóźnienie; edycja jednego strumienia restartuje tylko ten strumień; usunięcie wejścia; nowe SDP; zmiana opóźnienia odbioru zachowuje 10 s historii opóźnienia; brak biblioteki kodeka; PTP slave na pętli zwrotnej;
 - **API HTTP i panel**: logowanie, pierwsze hasło tylko lokalnie, limity żądań, jedno żądanie na połączenie, odporność na przemycanie żądań, stacje (`POST`/`PUT`/`DELETE`), kodeki, strumień SSE, wbudowane pliki panelu (CSP, bez skryptów inline), `public\panel.json` dla ikony w zasobniku;
-- **logika panelu** (`tests/panel/encoder_panel_logic.test.js`, node): formatowanie, listy bitrate'ów, podpowiedzi AAC↔MP3, hasło po zmianie serwera.
+- **Stereo Tool i processing** z **atrapą biblioteki** (`tests/fake_stereotool`: ta sama nazwa pliku i te same funkcje co `libStereoTool`, stały gain i opóźnienie, liczniki wywołań, tryby awarii): biblioteka tylko z folderu programu, interfejs WWW i UECP tylko na `127.0.0.1`, tor stacja → Stereo Tool → strumienie **bit w bit** z wyrównanym obejściem, przenikanie 5 ms bez ciszy przy każdej awarii (brak biblioteki, błąd tworzenia, wyjątek, awaria SEH w buildzie MSVC, za wolno, licencja), automatyczne ponowienia po „nie nadąża”, zmiana presetu i processingu w trakcie pracy, zapis presetu, klucze licencji (nigdy w API ani w logu, ostrzeżenie o tym samym kluczu), presety (wgranie, nazwy, limity, usunięcie używanego), porty interfejsu WWW, identyfikatory stacji nigdy nie używane ponownie, API i stan;
+- **logika panelu** (`tests/panel/encoder_panel_logic.test.js`, node): formatowanie, listy bitrate'ów, podpowiedzi AAC↔MP3, hasło po zmianie serwera, stany processingu, presety.
 
 Zmienna środowiskowa `BAM_TEST_PROGRESS=1` wypisuje na bieżąco każdy przypadek testowy (start, koniec, czas), więc zawieszony test widać od razu; CTest ustawia ją sam i przerywa `bam_tests` po 20 minutach.
 
 **Testy nigdy nie wysyłają ruchu do prawdziwej sieci**: używają wyłącznie `127.0.0.1` (Icecast i nadawca AES67 to atrapy w procesie testu). Na Linuksie trzeba włączyć multicast na pętli zwrotnej i porty PTP bez uprawnień: `sudo ip link set lo multicast on`, `sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0`.
 
-**CI** (`.github/workflows/build.yml`): Linux buduje z kodekami i uruchamia wszystkie testy; Windows buduje MSVC x64 z kodekami, uruchamia wszystkie testy, sprawdza, czy `BounceEncoder.exe` uruchomiony na 127.0.0.1 widzi wszystkie pięć kodeków obok siebie, buduje instalatory BounceAES Master i Bounce Encoder i udostępnia artefakty `BounceEncoder-setup` i `BounceEncoder-binaries`.
+**CI** (`.github/workflows/build.yml`): Linux buduje z kodekami i uruchamia wszystkie testy (Stereo Tool z atrapą) i sprawdza, że usługa bez biblioteki Stereo Tool zgłasza jej brak; macOS uruchamia testy Stereo Tool, processingu, silnika, API i konfiguracji Bounce Encoder z atrapą; Windows buduje MSVC x64 z kodekami, uruchamia wszystkie testy (także przechwytywanie awarii SEH), potem w osobnym przebiegu **prawdziwą bibliotekę Stereo Tool bez klucza licencji** (sprawdza SHA-256 pliku, wersję 11.07, tworzenie instancji, zapis presetu pod nazwą pliku tymczasowego magazynu presetów i jego wczytanie, 20 s dźwięku ze sprawdzaniem licencji co 250 ms, usunięcie instancji) i wypisuje czasy wywołań (`real Stereo Tool timing: …`: Create3, Process 480 ramek, CheckLicenseValid, SavePreset, LoadPreset, Delete). Sprawdza też, czy `BounceEncoder.exe` uruchomiony na 127.0.0.1 widzi wszystkie pięć kodeków i Stereo Tool 11.07 obok siebie, buduje instalatory BounceAES Master i Bounce Encoder i udostępnia artefakty `BounceEncoder-setup` i `BounceEncoder-binaries` (z `libStereoTool_64.dll` i notą `licencje\StereoTool-NOTICE.txt`). Archiwum SDK Stereo Tool CI trzyma we własnym wpisie pamięci podręcznej.
+
+Prawdziwą bibliotekę można też sprawdzić lokalnie: `BAM_TEST_REAL_STEREOTOOL=<folder z biblioteką> ./bam_tests '--test-case=stereotool: the real library*'` (macOS: `libStereoTool_64.dylib` z SDK). **Nigdy z kluczem licencji.**
 
 ## 2. Przygotowanie testu ręcznego
 
@@ -31,6 +34,7 @@ Zmienna środowiskowa `BAM_TEST_PROGRESS=1` wypisuje na bieżąco każdy przypad
 - Źródło AES67 (Orban, konsola albo BounceAES Master grający ton i muzykę) i jego SDP.
 - Serwer **Icecast 2.4** (testowy, np. na drugim komputerze), w `icecast.xml` `<sources>` ≥ 10 i znane hasło źródła.
 - Odtwarzacze: **VLC** oraz przeglądarka (Chrome lub Edge, Firefox).
+- Do testów processingu (punkty 23–34): prawdziwy klucz licencji Stereo Tool firmy (najlepiej dwa, do punktu 28), co najmniej dwa presety `.sts` (np. z obecnego Stereo Tool stacji) i dostęp do komputera enkodera przez pulpit zdalny. Klucza nie wpisuj w zgłoszeniach, logach ani na zrzutach ekranu.
 
 Testy z tego rozdziału wysyłają strumienie do prawdziwego serwera Icecast: wykonuj je na serwerze testowym albo w oknie serwisowym.
 
@@ -61,13 +65,30 @@ Testy z tego rozdziału wysyłają strumienie do prawdziwego serwera Icecast: wy
 | 19 | PTP: grandmaster w sieci, potem bez niego | „PTP: zsynchronizowany”, potem „zegar własny”; strumienie nadają bez przerwy |
 | 20 | BounceAES Master i Bounce Encoder na jednym komputerze | oba panele działają (8067 i 8070), oba podążają za tym samym zegarem PTP, Bounce Encoder odbiera wyjście BounceAES Master (SDP z przycisku SDP) |
 | 21 | Aktualizacja: ponowna instalacja tego samego lub nowszego instalatora przy nadających strumieniach | instalator zatrzymuje usługę i ikonę, wymienia pliki, uruchamia usługę; konfiguracja i hasło zostają |
-| 22 | Deinstalacja: odpowiedź **Nie** na pytanie o konfigurację, ponowna instalacja; potem deinstalacja z odpowiedzią **Tak**; na koniec `uninstall.exe /S` po kolejnej instalacji | usługa, reguła zapory, źródło Dziennika, autostart, skróty i pliki usunięte; przy **Nie** i przy `/S` folder `C:\ProgramData\Bounce Encoder` zostaje, a ponowna instalacja używa starej konfiguracji; przy **Tak** folder usunięty |
+| 22 | Deinstalacja: odpowiedź **Nie** na pytanie o konfigurację, ponowna instalacja; potem deinstalacja z odpowiedzią **Tak**; na koniec `uninstall.exe /S` po kolejnej instalacji | usługa, reguła zapory, źródło Dziennika, autostart, skróty i pliki usunięte (także `libStereoTool_64.dll` i `licencje\StereoTool-NOTICE.txt`); przy **Nie** i przy `/S` folder `C:\ProgramData\Bounce Encoder` zostaje, a ponowna instalacja używa starej konfiguracji; przy **Tak** folder usunięty (o presetach Stereo Tool: punkt 32) |
+
+### Processing (Stereo Tool)
+
+| # | Scenariusz | Oczekiwany wynik |
+|---|---|---|
+| 23 | Instalacja 1.1.0: folder programu, `licencje\`, panel → **Presety Stereo Tool…**; po wgraniu presetu `icacls "C:\ProgramData\Bounce Encoder\stereotool\presets"` i `icacls` pliku presetu | `libStereoTool_64.dll` obok `BounceEncoder.exe`, `licencje\StereoTool-NOTICE.txt`; w oknie presetów „Stereo Tool 11.07”; folder i plik: tylko Administratorzy i SYSTEM, plik dziedziczy z folderu |
+| 24 | Prawdziwy klucz licencji na jednej stacji (pole **Klucz licencji stacji**), preset z listy, zapis stacji; potem odśwież panel, pobierz `GET /api/config` (narzędzia przeglądarki) i przeszukaj log usługi fragmentem klucza | stan: „uruchamianie…”, „sprawdzanie licencji…”, po 1–2 s „działa · CPU …”; strumienie nadają cały czas; klucz nigdzie nie widoczny (pole „zapisany (puste = bez zmian)”, w API tylko `license_key_set: true`, w logu brak) |
+| 25 | Odsłuch z presetem: VLC na każdym mountpoincie stacji, porównanie ze źródłem; moment włączenia processingu | dźwięk przetworzony zgodnie z presetem na wszystkich strumieniach stacji, bez trzasków; przy włączeniu płynne przejście, bez ciszy (jednorazowe przesunięcie o około 90 ms); **Opóźnienie** w panelu około 90 ms |
+| 26 | Strojenie na komputerze enkodera (pulpit zdalny, panel pod `http://127.0.0.1:8070`): **Otwórz Stereo Tool**, słyszalna zmiana w interfejsie WWW, **Zapisz jako preset…** (nowa nazwa), wybór tego presetu w stacji, zapis; restart usługi. Potem panel z innego komputera i `http://<adres-enkodera>:8100` z innego komputera | interfejs WWW otwiera się w nowej karcie (`127.0.0.1:8100` dla stacji numer 0), zmiana słyszalna od razu; nowy preset na liście; po restarcie usługi zmiana nadal słyszalna; z innego komputera przycisk nieaktywny z wyjaśnieniem, a adres `:8100` nieosiągalny |
+| 27 | Licencja nieważna dla ustawień: w interfejsie WWW włącz funkcję, której licencja nie obejmuje (jeśli taka jest); potem ją wyłącz i **Uruchom ponownie processing** | w ciągu około 0,5 s stacja płynnie przechodzi na sygnał bez processingu (bez ciszy), stan „licencja: brak …” z listą funkcji, ostrzeżenie w edycji stacji, wpis w logu; po ponownym uruchomieniu „działa” |
+| 28 | Ten sam klucz na dwóch włączonych stacjach z processingiem; potem klucz domyślny (Ustawienia…) i dwie stacje bez własnego klucza | zapis możliwy, ostrzeżenie „ten sam klucz licencji Stereo Tool co stacja …” (przy domyślnym: „(domyślny)”) |
+| 29 | W trakcie nadawania: zmiana presetu, wyłączenie i ponowne włączenie processingu, zmiana nazwy stacji | przejścia płynne, bez ciszy i trzasków; strumienie bez ponownego łączenia (poza zmianą nazwy stacji, rozdział 5 instrukcji); wpisy w logu z nazwą stacji |
+| 30 | Pomiar obciążenia na docelowym komputerze: docelowa liczba stacji z processingiem i docelowymi presetami, 15 min pracy; Menedżer zadań (CPU całego komputera, *Zestaw roboczy* `BounceEncoder.exe`), CPU stacji w panelu | CPU całego komputera poniżej 50 %; każda stacja „działa”, bez „nie nadąża”; zanotuj CPU każdej stacji z panelu, CPU całego komputera i pamięć (orientacyjnie +600 MB na stację) |
+| 31 | Powrót po restarcie i po zabiciu procesu: `Restart-Service BounceEncoder`, potem `taskkill /F /IM BounceEncoder.exe` (jako administrator) | po restarcie processing wraca sam z presetem stacji; po zabiciu procesu usługa startuje ponownie po około 5 s i processing też wraca; konfiguracja i presety bez zmian |
+| 32 | Deinstalacja z presetami: **Nie** dla konfiguracji i **Nie** dla presetów; potem **Tak** i **Nie**; potem **Tak** i **Tak**; na koniec `uninstall.exe /S` | **Nie/Nie**: wszystko zostaje; **Tak/Nie**: zostaje tylko `C:\ProgramData\Bounce Encoder\stereotool\presets` (foldery `station-…` usunięte razem z konfiguracją); **Tak/Tak**: folder usunięty; `/S`: wszystko zostaje. Ponowna instalacja widzi zachowane presety |
+| 33 | Brak biblioteki: zatrzymaj usługę, zmień nazwę `libStereoTool_64.dll`, uruchom usługę; potem przywróć plik i uruchom usługę ponownie | stacje z processingiem nadają bez processingu (bez ciszy), stan z przyczyną „brak biblioteki Stereo Tool …”, stacje bez processingu bez zmian; po przywróceniu processing działa |
+| 34 | Czas zatrzymania usługi z docelową liczbą stacji z processingiem: `Measure-Command { Stop-Service BounceEncoder }` jako administrator, potem log | zatrzymanie poniżej 10 s, bez błędu 1053; zanotuj czas i to, czy w logu są wpisy „Stereo Tool nie zakończył pracy w ciągu …” (usuwanie instancji Stereo Tool trwa około 0,5–1,2 s każda, jedna po drugiej) |
 
 ## 4. Test wytrzymałościowy (24 h)
 
 Na docelowym komputerze, z prawdziwymi źródłami AES67 i serwerem Icecast:
 
-1. Skonfiguruj docelowe stacje (np. 2 stacje, w każdej MP3 128 kb/s, AAC-LC 128 kb/s, HE-AAC 64 kb/s, HE-AACv2 32 kb/s i FLAC), przy jednym wejściu z opóźnieniem (np. 5 s).
+1. Skonfiguruj docelowe stacje (np. 2 stacje, w każdej MP3 128 kb/s, AAC-LC 128 kb/s, HE-AAC 64 kb/s, HE-AACv2 32 kb/s i FLAC), przy jednym wejściu z opóźnieniem (np. 5 s). Stacje, które na antenie mają mieć processing, testuj **z processingiem Stereo Tool** (docelowe presety i klucze).
 2. Zanotuj czas, pamięć procesu `BounceEncoder.exe` (Menedżer zadań → Szczegóły → *Zestaw roboczy*) i liczniki ze Statystyk.
 3. Pozostaw system pod normalnym obciążeniem na **24 godziny**. Na początku, po 12 i po 24 godzinach posłuchaj każdego mountpointu przez minutę w VLC.
 
@@ -77,4 +98,5 @@ Na docelowym komputerze, z prawdziwymi źródłami AES67 i serwerem Icecast:
 - PTP zsynchronizowany przez cały czas (jeśli w sieci jest grandmaster), bez utraty synchronizacji;
 - pamięć procesu po 24 h nie rośnie ponad stan po pierwszej godzinie o więcej niż kilka MB;
 - brak restartów usługi i błędów w Dzienniku zdarzeń;
-- opóźnienie wejścia takie samo na początku i na końcu testu; brak słyszalnych zakłóceń.
+- opóźnienie wejścia takie samo na początku i na końcu testu; brak słyszalnych zakłóceń;
+- processing: każda stacja z processingiem „działa” przez cały czas, **Automatyczne ponowienia** = 0 (pole widoczne dopiero po pierwszym), w logu brak wpisów „nie nadąża” ani „licencja”; CPU stacji w panelu i CPU całego komputera (poniżej 50 %) bez trendu wzrostowego; zanotuj je na początku i na końcu.

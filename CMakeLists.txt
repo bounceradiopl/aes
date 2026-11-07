@@ -161,15 +161,19 @@ if(TARGET bam_encoder)
   # the run-time codec libraries go next to the executable (set_codec_library_dirs default)
   add_dependencies(BounceEncoder mp3lame fdk-aac)
   if(BAM_STEREOTOOL_DLL)
-    # and so does Stereo Tool (Windows x64), where the encoder loads it from
+    # and so does Stereo Tool (Windows x64), where the encoder loads it from, with its notice
+    # among the licence texts (encoder-licenses/, cmake/codecs.cmake) for the installer
     add_custom_target(bam_stereotool_dll ALL
-      COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:BounceEncoder>"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:BounceEncoder>/encoder-licenses"
       COMMAND ${CMAKE_COMMAND} -E copy_if_different "${BAM_STEREOTOOL_DLL}" "$<TARGET_FILE_DIR:BounceEncoder>/libStereoTool_64.dll"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/cmake/stereotool/StereoTool-NOTICE.txt"
+              "$<TARGET_FILE_DIR:BounceEncoder>/encoder-licenses/StereoTool-NOTICE.txt"
       VERBATIM)
   else()
     # Stereo Tool switched off in an existing build folder: no stale copy next to the encoder
     foreach(_bam_cfg_dir "" ${CMAKE_CONFIGURATION_TYPES})
-      file(REMOVE "${PROJECT_BINARY_DIR}/${_bam_cfg_dir}/libStereoTool_64.dll")
+      file(REMOVE "${PROJECT_BINARY_DIR}/${_bam_cfg_dir}/libStereoTool_64.dll"
+                  "${PROJECT_BINARY_DIR}/${_bam_cfg_dir}/encoder-licenses/StereoTool-NOTICE.txt")
     endforeach()
   endif()
 endif()

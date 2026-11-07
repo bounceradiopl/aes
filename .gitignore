@@ -5,3 +5,4 @@ build*/
 out/
 installer/nsis/*.exe
 codec-cache/
+stereotool-cache/

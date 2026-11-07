@@ -24,14 +24,33 @@ jobs:
         with:
           path: codec-cache
           key: codecs-${{ runner.os }}-${{ hashFiles('cmake/codecs.cmake') }}
+      # the Stereo Tool SDK zip (cmake/stereotool.cmake, about 360 MB) in a cache entry of its own.
+      # The download URL carries no version: once Thimeo publishes a newer Stereo Tool under the
+      # same name, a fresh download fails the pinned SHA-256 and the configure says what to do, while
+      # a cached copy keeps the builds going (GitHub drops an entry not used for 7 days: a run a
+      # week keeps it). The restore key without the hash keeps an earlier entry usable after an edit
+      # of stereotool.cmake that keeps the pin (the zip is checked against the SHA-256 anyway).
+      - name: Restore the Stereo Tool SDK
+        id: stsdk
+        uses: actions/cache/restore@v4
+        with:
+          path: stereotool-cache
+          key: stereotool-sdk-${{ runner.os }}-${{ hashFiles('cmake/stereotool.cmake') }}
+          restore-keys: stereotool-sdk-${{ runner.os }}-
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBAM_WITH_CODECS=ON -DBAM_CODEC_CACHE=codec-cache
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBAM_WITH_CODECS=ON -DBAM_CODEC_CACHE=codec-cache -DBAM_STEREOTOOL_CACHE=stereotool-cache
       - name: Save the codec source tarballs
         if: steps.codecs.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: codec-cache
           key: codecs-${{ runner.os }}-${{ hashFiles('cmake/codecs.cmake') }}
+      - name: Save the Stereo Tool SDK
+        if: steps.stsdk.outputs.cache-hit != 'true' && hashFiles('stereotool-cache/*.zip') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: stereotool-cache
+          key: stereotool-sdk-${{ runner.os }}-${{ hashFiles('cmake/stereotool.cmake') }}
       - name: Build
         run: cmake --build build
       - name: Unit and integration tests
@@ -73,6 +92,10 @@ jobs:
           jq -e 'all(.codecs[]; .available)' codecs.json
           curl -sf -b jar http://127.0.0.1:8070/api/status > status.json
           jq -e '.interface_ip == "127.0.0.1"' status.json
+          # no Stereo Tool library on Linux builds: reported as missing, never a failure of the service
+          curl -sf -b jar http://127.0.0.1:8070/api/stereotool > stereotool.json
+          jq -r '.library | "Stereo Tool: available \(.available), \(.error)"' stereotool.json
+          jq -e '.library.checked and (.library.available | not) and (.library.error | contains("brak biblioteki Stereo Tool"))' stereotool.json
           test -f public/panel.json
           kill $enc
       - name: Service log
@@ -80,6 +103,50 @@ jobs:
         run: |
           cat run/service.log || true
           cat run-encoder/encoder.log || true
+
+  # Bounce Encoder's Stereo Tool binding, processing, engine, API and configuration against the
+  # fake library (a .dylib under the real library's name), and the SDK check with _ST_MAC. Only
+  # those tests: the BounceAES Master ones need Linux or Windows networking.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore the codec source tarballs
+        id: codecs
+        uses: actions/cache/restore@v4
+        with:
+          path: codec-cache
+          key: codecs-${{ runner.os }}-${{ hashFiles('cmake/codecs.cmake') }}
+      # the Stereo Tool SDK zip in a cache entry of its own (see the linux job)
+      - name: Restore the Stereo Tool SDK
+        id: stsdk
+        uses: actions/cache/restore@v4
+        with:
+          path: stereotool-cache
+          key: stereotool-sdk-${{ runner.os }}-${{ hashFiles('cmake/stereotool.cmake') }}
+          restore-keys: stereotool-sdk-${{ runner.os }}-
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBAM_WITH_CODECS=ON -DBAM_CODEC_CACHE=codec-cache -DBAM_STEREOTOOL_CACHE=stereotool-cache
+      - name: Save the codec source tarballs
+        if: steps.codecs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: codec-cache
+          key: codecs-${{ runner.os }}-${{ hashFiles('cmake/codecs.cmake') }}
+      - name: Save the Stereo Tool SDK
+        if: steps.stsdk.outputs.cache-hit != 'true' && hashFiles('stereotool-cache/*.zip') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: stereotool-cache
+          key: stereotool-sdk-${{ runner.os }}-${{ hashFiles('cmake/stereotool.cmake') }}
+      - name: Build
+        run: cmake --build build --parallel 4 --target bam_tests
+      - name: Stereo Tool, processing and encoder tests (fake library)
+        timeout-minutes: 20
+        env:
+          BAM_TEST_PROGRESS: 1
+        working-directory: build
+        run: ./bam_tests '--test-case=stereotool:*,processing:*,encoder engine:*,encoder HTTP:*,encoder config:*'
 
   windows:
     runs-on: windows-latest
@@ -91,14 +158,28 @@ jobs:
         with:
           path: codec-cache
           key: codecs-${{ runner.os }}-${{ hashFiles('cmake/codecs.cmake') }}
+      # the Stereo Tool SDK zip in a cache entry of its own (see the linux job)
+      - name: Restore the Stereo Tool SDK
+        id: stsdk
+        uses: actions/cache/restore@v4
+        with:
+          path: stereotool-cache
+          key: stereotool-sdk-${{ runner.os }}-${{ hashFiles('cmake/stereotool.cmake') }}
+          restore-keys: stereotool-sdk-${{ runner.os }}-
       - name: Configure (MSVC x64, newest Visual Studio on the runner)
-        run: cmake -S . -B build -A x64 -DBAM_WITH_CODECS=ON -DBAM_CODEC_CACHE=codec-cache
+        run: cmake -S . -B build -A x64 -DBAM_WITH_CODECS=ON -DBAM_CODEC_CACHE=codec-cache -DBAM_STEREOTOOL_CACHE=stereotool-cache
       - name: Save the codec source tarballs
         if: steps.codecs.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: codec-cache
           key: codecs-${{ runner.os }}-${{ hashFiles('cmake/codecs.cmake') }}
+      - name: Save the Stereo Tool SDK
+        if: steps.stsdk.outputs.cache-hit != 'true' && hashFiles('stereotool-cache/*.zip') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: stereotool-cache
+          key: stereotool-sdk-${{ runner.os }}-${{ hashFiles('cmake/stereotool.cmake') }}
       - name: Build
         run: cmake --build build --config Release
       - name: Tests
@@ -114,6 +195,21 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ctest -C Release --output-on-failure -E '^bam_tests$'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Stereo Tool - the real DLL without a licence key (load, preset, process, timing)
+        # in a run of its own (the library stays loaded in the process): version 11.07, Create3
+        # without a key, a preset saved by the DLL under the preset store's temporary name and
+        # loaded again, 20 s of audio with the licence check every 250 ms, Delete; prints the times
+        # of Create3, Process(480 frames), CheckLicenseValid, SavePreset, LoadPreset and Delete
+        timeout-minutes: 10
+        working-directory: build
+        run: |
+          $dll = (Resolve-Path Release\libStereoTool_64.dll).Path
+          $hash = (Get-FileHash -Algorithm SHA256 $dll).Hash
+          if ($hash -ne '48CBDC06F44A203F7FA2895B3EC79FC63557D61DCD687563C6A17388D6308C4E') { throw "libStereoTool_64.dll has SHA-256 $hash" }
+          $env:BAM_TEST_REAL_STEREOTOOL = (Resolve-Path Release).Path
+          & Release\bam_tests.exe '--test-case=stereotool: the real library*' | Tee-Object -FilePath real-stereotool.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Select-String -Quiet -SimpleMatch 'real Stereo Tool timing: Process(480)' real-stereotool.log)) { throw 'the real Stereo Tool test did not run' }
       - name: Configure and build 32-bit (ASIO driver for 32-bit hosts such as 32-bit mAirList)
         run: |
           cmake -S . -B build32 -A Win32 -DBAM_WITH_CODECS=OFF
@@ -183,6 +279,11 @@ jobs:
             if (-not (Test-Path public\panel.json)) { throw 'public\panel.json was not written' }
             $status = Invoke-RestMethod -WebSession $web http://127.0.0.1:8070/api/status
             if ($status.interface_ip -ne '127.0.0.1') { throw "the service runs on $($status.interface_ip), not 127.0.0.1" }
+            # Stereo Tool from the program folder (loaded here, no instance: no station has processing)
+            $lib = (Invoke-RestMethod -WebSession $web http://127.0.0.1:8070/api/stereotool).library
+            $lib | Format-List available, version_text, path, error | Out-String | Write-Host
+            if (-not $lib.available -or $lib.version -ne 11070) { throw "Stereo Tool not available: $($lib.error)" }
+            if (-not $lib.path.StartsWith($b64, [System.StringComparison]::OrdinalIgnoreCase)) { throw "Stereo Tool loaded from $($lib.path)" }
           } finally {
             Stop-Process $enc -ErrorAction SilentlyContinue
             Get-Content encoder.log -Tail 30 -ErrorAction SilentlyContinue
@@ -203,6 +304,8 @@ jobs:
           Set-Location installer\nsis
           & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /V2 "/DPAYLOAD=$payload" BounceEncoder-setup.nsi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # with Stereo Tool (117 MB) inside: about 40-60 MB more than 1.0
+          "BounceEncoder-setup.exe: {0:N1} MB" -f ((Get-Item BounceEncoder-setup.exe).Length / 1MB) | Write-Host
       - name: Collect binaries
         shell: pwsh
         run: |
@@ -215,8 +318,9 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory dist-encoder | Out-Null
-          Copy-Item build\Release\BounceEncoder.exe, build\Release\BounceEncoderTray.exe, build\Release\libmp3lame.dll, build\Release\libfdk-aac-2.dll dist-encoder\
+          Copy-Item build\Release\BounceEncoder.exe, build\Release\BounceEncoderTray.exe, build\Release\libmp3lame.dll, build\Release\libfdk-aac-2.dll, build\Release\libStereoTool_64.dll dist-encoder\
           Copy-Item -Recurse build\Release\encoder-licenses dist-encoder\licencje
+          if (-not (Test-Path dist-encoder\licencje\StereoTool-NOTICE.txt)) { throw 'the Stereo Tool notice is missing' }
           Copy-Item LICENSE, LICENSING.md dist-encoder\
           Copy-Item docs\ENCODER-INSTALL.md dist-encoder\INSTRUKCJA.md
           Copy-Item docs\ENCODER-TESTING.md dist-encoder\TESTY.md

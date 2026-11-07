@@ -10,14 +10,24 @@
 #
 # Where the zip comes from (first match):
 #   BAM_STEREOTOOL_SDK_ZIP  a local copy of the zip (checked against the SHA-256, nothing downloaded)
-#   BAM_CODEC_CACHE         the codec download cache (CI): used when there, else downloaded into it
+#   BAM_STEREOTOOL_CACHE    a folder of its own for the zip (CI: a cache entry of its own, keyed by
+#                           this file): used when there, else downloaded into it
+#   BAM_CODEC_CACHE         the codec download cache: the same
 #   otherwise               downloaded into this build folder (_deps/), once
 # The extracted files are checked against their own SHA-256 on every configure; while they are
 # present and correct the zip is not opened again.
+#
+# The download URL carries no version: when Thimeo publishes a newer Stereo Tool under the same
+# name, a fresh download no longer matches the pinned SHA-256 and the configure stops with what to
+# do (a saved copy of the 11.07 zip keeps working: BAM_STEREOTOOL_SDK_ZIP or the cache folder).
+# Moving to a newer version is a deliberate change: the SHA-256s here, kStereoToolVersion and the
+# parameter indices (encoder/src/stereotool_api.hpp, checked by cmake/stereotool/sdk_check.cpp),
+# then the real-library test of the Windows CI.
 
 set(BAM_STEREOTOOL_SDK_URL "https://download.thimeo.com/Stereo_Tool_Generic_plugin.zip")
 set(BAM_STEREOTOOL_SDK_SHA256 ed07c086cd95523abf5e7d655fa1f32e556fca2539ff0e85b4e12ff3a4c3ec22)
 set(BAM_STEREOTOOL_SDK_ZIP "" CACHE FILEPATH "Local copy of Stereo_Tool_Generic_plugin.zip (pinned SHA-256; empty: download)")
+set(BAM_STEREOTOOL_CACHE "" CACHE PATH "Folder for the downloaded Stereo Tool SDK zip (empty: BAM_CODEC_CACHE, else the build folder)")
 
 set(_bam_st_dir "${PROJECT_BINARY_DIR}/_deps/stereotool-sdk/libStereoTool_1107")
 set(_bam_st_files
@@ -63,7 +73,9 @@ function(_bam_st_zip out)
     set(${out} "${zip}" PARENT_SCOPE)
     return()
   endif()
-  if(BAM_CODEC_CACHE)
+  if(BAM_STEREOTOOL_CACHE)
+    get_filename_component(cache "${BAM_STEREOTOOL_CACHE}" ABSOLUTE BASE_DIR "${PROJECT_SOURCE_DIR}")
+  elseif(BAM_CODEC_CACHE)
     get_filename_component(cache "${BAM_CODEC_CACHE}" ABSOLUTE BASE_DIR "${PROJECT_SOURCE_DIR}")
   else()
     set(cache "${PROJECT_BINARY_DIR}/_deps")
@@ -79,11 +91,28 @@ function(_bam_st_zip out)
   if(NOT EXISTS "${zip}")
     message(STATUS "Downloading the Stereo Tool SDK (about 360 MB): ${BAM_STEREOTOOL_SDK_URL}")
     file(MAKE_DIRECTORY "${cache}")
-    file(DOWNLOAD "${BAM_STEREOTOOL_SDK_URL}" "${zip}.part" EXPECTED_HASH SHA256=${sha} STATUS status TLS_VERIFY ON)
+    # the hash is checked here rather than by EXPECTED_HASH, to say what to do when it differs
+    file(DOWNLOAD "${BAM_STEREOTOOL_SDK_URL}" "${zip}.part" STATUS status TLS_VERIFY ON)
     list(GET status 0 code)
     if(NOT code EQUAL 0)
       file(REMOVE "${zip}.part")
-      message(FATAL_ERROR "Cannot download ${BAM_STEREOTOOL_SDK_URL}: ${status} (configure with -DBAM_WITH_STEREOTOOL=OFF to build without Stereo Tool)")
+      message(FATAL_ERROR "Cannot download ${BAM_STEREOTOOL_SDK_URL}: ${status}\n"
+        "Use a saved copy of the zip (-DBAM_STEREOTOOL_SDK_ZIP=<path>, SHA-256 ${sha}) or configure "
+        "with -DBAM_WITH_STEREOTOOL=OFF to build without Stereo Tool.")
+    endif()
+    file(SHA256 "${zip}.part" have)
+    if(NOT have STREQUAL sha)
+      file(REMOVE "${zip}.part")
+      message(FATAL_ERROR "The Stereo Tool SDK downloaded from ${BAM_STEREOTOOL_SDK_URL} has SHA-256 ${have}, "
+        "not the pinned ${sha} (libStereoTool 11.07). The URL carries no version: Thimeo has most likely "
+        "published a newer Stereo Tool under the same name.\n"
+        "To keep building 11.07: pass a saved copy of the 11.07 zip with -DBAM_STEREOTOOL_SDK_ZIP=<path> "
+        "(or put it into the BAM_STEREOTOOL_CACHE folder as bam_stereotool-Stereo_Tool_Generic_plugin.zip; "
+        "GitHub CI keeps it in its own cache entry, see .github/workflows/build.yml).\n"
+        "To move to the new version: update the SHA-256s in cmake/stereotool.cmake, kStereoToolVersion "
+        "(encoder/include/bam/encoder/stereotool.hpp) and the parameter indices (encoder/src/stereotool_api.hpp, "
+        "checked by cmake/stereotool/sdk_check.cpp), then run the real-library test (Windows CI).\n"
+        "Or configure with -DBAM_WITH_STEREOTOOL=OFF to build without Stereo Tool.")
     endif()
     file(RENAME "${zip}.part" "${zip}")
   endif()
