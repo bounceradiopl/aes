@@ -295,6 +295,23 @@ TEST_CASE("BounceAES HTTP: bodies without a length, chunked or too large are ref
   CHECK(f.get_status("/api/config", f.auth) == 200);  // the server still answers normally
 }
 
+// BounceAES Master answers "Expect: 100-continue" exactly as 1.2.5 did: httplib's own 100 before
+// routing, the refusal after it (the encoder's screening of the headers before the 100 is the
+// encoder's alone, see test_encoder_http.cpp).
+TEST_CASE("BounceAES HTTP: Expect: 100-continue is answered as in 1.2.5") {
+  Fixture f;
+  f.setup_and_login();
+  const std::string head = "PUT /api/config HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nCookie: " + f.cookie() +
+                           "\r\nExpect: 100-continue\r\nContent-Length: ";
+  RawExchange x = raw_exchange(f.port, head + "2000000000\r\n\r\n");
+  CHECK(x.closed);
+  CHECK(x.statuses == std::vector<int>{100, 413});
+  const std::string body = R"({"ptp_domain":0})";
+  x = raw_exchange(f.port, head + std::to_string(body.size()) + "\r\n\r\n" + body);
+  CHECK(x.closed);
+  CHECK(x.statuses == std::vector<int>{100, 200});
+}
+
 TEST_CASE("BounceAES HTTP: a body must be JSON (no cross-origin simple requests)") {
   Fixture f;
   auto r = f.client->Post("/api/setup", json{{"password", kPassword}}.dump(), "text/plain");

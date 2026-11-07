@@ -180,6 +180,9 @@ bool wrong_body_type(const httplib::Request& req) {
 }
 
 void install_request_guard(httplib::Server& server, size_t max_body_bytes, BodyLimit limit, HeaderCheck check) {
+  // the screening before "100 Continue" below is the encoder's (it passes a limit or a check);
+  // BounceAES Master passes neither and keeps httplib's own 100, as in 1.2.5
+  const bool screen_before_continue = limit || check;
   const auto limit_of = [max_body_bytes, limit = std::move(limit)](const httplib::Request& req) {
     return limit ? std::min(limit(req), max_body_bytes) : max_body_bytes;
   };
@@ -222,6 +225,7 @@ void install_request_guard(httplib::Server& server, size_t max_body_bytes, BodyL
   });
   // httplib sends "100 Continue" before routing: the same checks first, so a refused request is
   // answered (and the connection closed) before the client sends its body
+  if (!screen_before_continue) return;
   server.set_expect_100_continue_handler([screen](const httplib::Request& req, httplib::Response& res) {
     return screen(req, res) ? res.status : 100;
   });

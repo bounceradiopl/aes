@@ -74,9 +74,10 @@ using HeaderCheck = std::function<bool(const httplib::Request&, httplib::Respons
 // Sets up `server`: one request per connection, the body size limit, JSON answers for httplib's
 // own refusals, and a pre-routing handler with the security headers, refuse() and `check`. With
 // `limit`, each request gets the smaller of limit(req) and `max_body_bytes` (e.g. one upload route
-// allowed more than the rest); without it, `max_body_bytes` for every request. A request with
-// "Expect: 100-continue" gets the same checks before the 100: a refused one is answered instead,
-// and the client never sends its body.
+// allowed more than the rest); without it, `max_body_bytes` for every request. With `limit` or
+// `check` (the encoder), a request with "Expect: 100-continue" gets the same checks before the
+// 100: a refused one is answered instead, and the client never sends its body. Without both
+// (BounceAES Master) httplib sends its 100 and the checks run at routing, as in 1.2.5.
 void install_request_guard(httplib::Server& server, size_t max_body_bytes = kMaxBodyBytes, BodyLimit limit = {},
                            HeaderCheck check = {});
 
