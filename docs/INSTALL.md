@@ -99,6 +99,9 @@ Ten sam plik pobierzesz później przyciskiem **SDP** przy wyjściu albo z okna 
 ### Aktualizacja z wersji 1.0
 Konfiguracja 1.0 przenosi się sama przy pierwszym uruchomieniu 1.1 (kopia: `config.json.v1.bak`). Urządzenie N staje się wyjściem N (zasilanym z ASIO N), subskrypcją N (jeśli miało źródło, połączoną z wejściem ASIO N) i nazwą pary ASIO N, więc wszystko gra tak jak wcześniej.
 
+### Co nowego w 1.2.5: poprawki bezpieczeństwa panelu
+Panel odrzuca złośliwie zbudowane zapytania, zanim ktokolwiek się zaloguje: JSON zagnieżdżony głębiej niż 16 poziomów, z więcej niż 10 000 obiektów i tablic, 20 000 wartości albo 2 000 pól w jednym obiekcie dostaje od razu błąd 400 (wcześniej takie zapytanie mogło zatrzymać usługę albo zająć procesor na kilka sekund). Bardzo długie hasła nie obciążają już procesora przy logowaniu. Zapisane hasło działa dalej, konfiguracja zostaje bez zmian. Te same poprawki ma Bounce Encoder 1.0.4.
+
 ### Co nowego w 1.2.4: ikona BA
 Nowa ikona, żeby nie mylić BounceAES Master z Bounce Encoderem: litery **BA** na czarnym kwadracie z różową kropką (Bounce Encoder od 1.0.3 ma litery **BE**). Ta sama ikona jest na skrótach, w instalatorze, na liście aplikacji i w karcie panelu w przeglądarce. W zasobniku stan pokazuje kolorowa kropka w prawym dolnym rogu, z tymi samymi kolorami co wcześniej (rozdział 3). Bez zmian w działaniu. Jeśli po aktualizacji skrót na pulpicie wciąż ma starą ikonę, wystarczy wylogować się i zalogować ponownie (Windows trzyma ikony w pamięci podręcznej).
 

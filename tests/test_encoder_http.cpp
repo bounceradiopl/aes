@@ -159,7 +159,7 @@ TEST_CASE("encoder HTTP: login, sessions and 401 without a session") {
   const json h = json::parse(health->body);
   CHECK(h["service"] == "ok");
   CHECK(h["product"] == "Bounce Encoder");
-  CHECK(h["version"] == "1.0.3");
+  CHECK(h["version"] == "1.0.4");
 
   const json state = json::parse(f.client->Get("/api/auth-state")->body);
   CHECK(state["password_set"] == false);
@@ -553,7 +553,7 @@ TEST_CASE("encoder HTTP: status of stations, inputs, streams and PTP") {
       },
       10000));
   CHECK(s["running"] == true);
-  CHECK(s["version"] == "1.0.3");
+  CHECK(s["version"] == "1.0.4");
   CHECK(s["ptp"]["enabled"] == false);
   CHECK(s["ptp"]["state"] == "disabled");
   CHECK(s["ptp"]["free_run"] == true);
