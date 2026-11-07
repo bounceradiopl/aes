@@ -283,15 +283,16 @@ double fake_block_ms() {
 // "Most" is more than half: then the calls took longer than work_ms + (budget_ms - work_ms) / 2.
 double headroom_limit_ms(double work_ms, double budget_ms) { return work_ms + (budget_ms - work_ms) / 2.0; }
 
-// Samples the fake's calls and their wall time every 20 ms on a thread of its own, from its
-// construction to stop().
+// Samples the fake's calls, their wall time and the worker's state every 20 ms on a thread of its
+// own, from its construction to stop().
 class CallSampler {
  public:
-  CallSampler() {
+  explicit CallSampler(const PW& w) : w_(w) {
     samples_.reserve(4000);
     thread_ = std::thread([this] {
       while (on_.load() && samples_.size() < samples_.capacity()) {
-        samples_.push_back({bp::monotonic_ns(), fake().value("process_calls"), fake().value("process_busy_us")});
+        const auto st = w_.status();
+        samples_.push_back({bp::monotonic_ns(), fake().value("process_calls"), fake().value("process_busy_us"), st.state, st.reason_code});
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
       }
     });
@@ -303,43 +304,85 @@ class CallSampler {
     on_.store(false);
     if (thread_.joinable()) thread_.join();
   }
-  // The longest mean time of a call over any 0.5 s with at least 10 calls, in ms (stops first).
-  double slowest_ms() {
+  bool ever_running() {
+    stop();
+    return std::any_of(samples_.begin(), samples_.end(), [](const Sample& x) { return x.state == be::ProcessingState::Running; });
+  }
+  // When the worker was first seen bypassing as too slow after it had run (0: never).
+  int64_t too_slow_ns() {
+    stop();
+    bool ran = false;
+    for (const Sample& x : samples_) {
+      ran = ran || x.state == be::ProcessingState::Running;
+      if (ran && x.state == be::ProcessingState::Bypass && x.reason == be::ProcessingReason::TooSlow) return x.ns;
+    }
+    return 0;
+  }
+  // The longest mean time of a call over any 0.5 s with at least 10 calls that lies within
+  // [from_ns, to_ns], in ms.
+  double slowest_ms(int64_t from_ns, int64_t to_ns) {
     stop();
     double slowest = 0;
     for (size_t i = 0, j = 0; i < samples_.size(); ++i) {
+      if (samples_[i].ns < from_ns) continue;
+      j = std::max(j, i);
       while (j < samples_.size() && samples_[j].ns - samples_[i].ns < 500'000'000) ++j;
-      if (j == samples_.size()) break;
+      if (j == samples_.size() || samples_[j].ns > to_ns) break;
       const long long calls = samples_[j].calls - samples_[i].calls;
       if (calls >= 10)
         slowest = std::max(slowest, double(samples_[j].busy_us - samples_[i].busy_us) / 1000.0 / double(calls));
     }
     return slowest;
   }
+  // The longest single call that ended within [from_ns, to_ns] (one call between two samples), in ms.
+  double longest_ms(int64_t from_ns, int64_t to_ns) {
+    stop();
+    double longest = 0;
+    for (size_t i = 0; i + 1 < samples_.size(); ++i)
+      if (samples_[i].ns >= from_ns && samples_[i + 1].ns <= to_ns && samples_[i + 1].calls - samples_[i].calls == 1)
+        longest = std::max(longest, double(samples_[i + 1].busy_us - samples_[i].busy_us) / 1000.0);
+    return longest;
+  }
 
  private:
   struct Sample {
     int64_t ns;
     long long calls, busy_us;
+    be::ProcessingState state;
+    be::ProcessingReason reason;
   };
+  const PW& w_;
   std::vector<Sample> samples_;
   std::atomic<bool> on_{true};
   std::thread thread_;
 };
 
-// Why a bypass of the fake with process_work_us is the runner's doing, "" when it is not: one call
-// took more than the worker's 200 ms (stuck), or over some 0.5 s the calls lost more than half of
-// the headroom (headroom_limit_ms). Draining a backlog keeps the fake busy all the time, but each
-// call still takes about work_ms: no excuse, so a bypass while it drains still fails.
-std::string runner_excuse(CallSampler& calls, double work_ms, double budget_ms) {
-  const double slowest = calls.slowest_ms();
-  const double longest = double(fake().value("process_busy_max_us")) / 1000.0;
+// Why a bypass of the fake with process_work_us is the runner's doing, "" when it is not. Only a
+// bypass as too slow (or, when processing never ran, one that never got past starting or the
+// licence check) can be excused, and only by what the runner did right before it: within the 2 s
+// before the bypass was seen, one call took more than the worker's 200 ms (stuck), or over some
+// 0.5 s the calls lost more than half of the headroom (headroom_limit_ms). Draining a backlog
+// keeps the fake busy all the time, but each call still takes about work_ms: no excuse, so a
+// bypass while it drains still fails, and so does a bypass for any other reason.
+std::string runner_excuse(CallSampler& calls, double work_ms, double budget_ms, const be::ProcessingStatus& st) {
+  using R = be::ProcessingReason;
+  int64_t from = 0, to = INT64_MAX;
+  if (st.reason_code == R::TooSlow) {
+    const int64_t at = calls.too_slow_ns();
+    if (at == 0) return {};
+    from = at - 2'000'000'000;
+    to = at;
+  } else if (calls.ever_running() || (st.reason_code != R::Starting && st.reason_code != R::LicenceCheck)) {
+    return {};
+  }
+  const double slowest = calls.slowest_ms(from, to);
+  const double longest = calls.longest_ms(from, to);
   std::ostringstream why;
   if (longest >= 200.0)
-    why << "one call of Stereo Tool took " << longest << " ms on this runner";
+    why << "one call of Stereo Tool took " << longest << " ms on this runner right before the bypass";
   else if (slowest > headroom_limit_ms(work_ms, budget_ms))
-    why << "calls of Stereo Tool took " << slowest << " ms on average over 0.5 s on this runner (" << work_ms
-        << " ms of work per " << budget_ms << " ms: most of the headroom lost)";
+    why << "calls of Stereo Tool took " << slowest << " ms on average over 0.5 s on this runner right before the bypass ("
+        << work_ms << " ms of work per " << budget_ms << " ms: most of the headroom lost)";
   return why.str();
 }
 
@@ -700,9 +743,9 @@ TEST_CASE("processing: a station catch-up burst that Stereo Tool drains keeps pr
   Collector col;
   Input input;
   PW w(settings(col), "burst");
-  CallSampler calls;  // how fast Stereo Tool really is (runner_excuse)
+  CallSampler calls(w);  // how fast Stereo Tool really is, and when the worker bypassed (runner_excuse)
   if (!feed_until(w, input, be::ProcessingState::Running, 10'000'000)) {
-    if (const std::string why = runner_excuse(calls, work_ms, 10.0); !why.empty()) {
+    if (const std::string why = runner_excuse(calls, work_ms, 10.0, w.status()); !why.empty()) {
       MESSAGE("skipped: " << why << " (" << w.status().reason << ")");
       return;
     }
@@ -723,13 +766,13 @@ TEST_CASE("processing: a station catch-up burst that Stereo Tool drains keeps pr
   feed(w, input, 72000, 10'000'000);  // 1.5 s of real time after it
   const auto st = w.status();
   if (st.state != be::ProcessingState::Running) {
-    if (const std::string why = runner_excuse(calls, work_ms, 10.0); !why.empty()) {
+    if (const std::string why = runner_excuse(calls, work_ms, 10.0, st); !why.empty()) {
       MESSAGE("skipped: " << why << " (" << st.reason << ")");
       fake().set("process_work_us", 0);
       return;
     }
-    FAIL_CHECK("bypassed although Stereo Tool kept up: " << st.reason << " (cpu " << st.cpu_pct << " %, slowest call "
-                                                          << calls.slowest_ms() << " ms)");
+    FAIL_CHECK("bypassed although Stereo Tool kept up: " << st.reason << " (cpu " << st.cpu_pct << " %, slowest 0.5 s "
+                                                          << calls.slowest_ms(0, INT64_MAX) << " ms per call)");
   }
   fake().set("process_work_us", 0);
   REQUIRE(drained(w, col, input));
@@ -789,12 +832,12 @@ TEST_CASE("processing: CPU is the Stereo Tool time over the audio time, per seco
   Input input;
   PW w(settings(col), "s8");
   CHECK(w.status().cpu_pct == 0);
-  CallSampler calls;
+  CallSampler calls(w);
   const bool running = feed_until(w, input, be::ProcessingState::Running, 5'000'000);
   if (running) feed(w, input, 96000, 5'000'000);  // twice real time: Stereo Tool keeps up
   const auto st = w.status();
   if (st.state != be::ProcessingState::Running) {
-    if (const std::string why = runner_excuse(calls, 2.0, 5.0); !why.empty()) {
+    if (const std::string why = runner_excuse(calls, 2.0, 5.0, st); !why.empty()) {
       MESSAGE("skipped: " << why << " (fed at twice real time; " << st.reason << ")");
       return;
     }

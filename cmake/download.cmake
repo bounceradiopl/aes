@@ -3,10 +3,12 @@
 # are tried in order, in up to three rounds (2 s and then 5 s apart), until one gives a file with
 # the expected SHA-256; only that file is kept. A URL that answers with other content (a wrong
 # SHA-256) is not asked again: that is no outage. One server's outage or TLS trouble (CI saw
-# "SSL connect error" from downloads.xiph.org on macOS) then falls back to the next URL.
+# "SSL connect error" from downloads.xiph.org on macOS) then falls back to the next URL. A server
+# that stops sending for 60 s counts as an outage too (INACTIVITY_TIMEOUT), so a stalled transfer
+# never hangs the configure.
 #
 #   bam_download_pinned(<file> <sha256> <error-var> <wrong-sha-var> <url>...)
-#     <error-var>      empty on success, else what went wrong with the last URL tried
+#     <error-var>      empty on success, else what went wrong with the last URL tried (it names the URL)
 #     <wrong-sha-var>  the SHA-256 a URL delivered instead of <sha256> (empty when none did)
 include_guard(GLOBAL)
 
@@ -22,7 +24,7 @@ function(bam_download_pinned file sha error_var wrong_var)
     set(next_urls "")
     foreach(url IN LISTS urls)
       file(REMOVE "${file}.part")
-      file(DOWNLOAD "${url}" "${file}.part" STATUS status TLS_VERIFY ON)
+      file(DOWNLOAD "${url}" "${file}.part" STATUS status TLS_VERIFY ON INACTIVITY_TIMEOUT 60)
       list(GET status 0 code)
       if(code EQUAL 0)
         file(SHA256 "${file}.part" have)

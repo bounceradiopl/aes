@@ -96,7 +96,7 @@ function(_bam_st_zip out)
     # retried on an outage; a wrong SHA-256 is not retried (it says what to do below)
     bam_download_pinned("${zip}" ${sha} error have "${BAM_STEREOTOOL_SDK_URL}")
     if(error AND NOT have)
-      message(FATAL_ERROR "Cannot download ${BAM_STEREOTOOL_SDK_URL}: ${error}\n"
+      message(FATAL_ERROR "Cannot download the Stereo Tool SDK: ${error}\n"
         "Use a saved copy of the zip (-DBAM_STEREOTOOL_SDK_ZIP=<path>, SHA-256 ${sha}) or configure "
         "with -DBAM_WITH_STEREOTOOL=OFF to build without Stereo Tool.")
     endif()

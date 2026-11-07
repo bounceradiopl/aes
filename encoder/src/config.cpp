@@ -450,7 +450,8 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
       add(sp + ".id", label + "nieprawidłowy identyfikator „" + st.id + "” (dozwolone litery, cyfry, „-” i „_”, najwyżej 32 znaki)");
     } else if (station_number(st.id) >= kMaxStationNumber) {
       // also what a new station gets once a hand-made id took the largest number: name the station
-      // with the largest valid number (the cause) and say how out
+      // with the largest valid number when it is the cause (its number + 1 reached the counter;
+      // else the counter got there through a station deleted since, or by hand) and say how out
       std::string way_out;
       size_t largest = c.stations.size();
       for (size_t j = 0; j < c.stations.size(); ++j) {
@@ -459,6 +460,10 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
             (largest == c.stations.size() || n > station_number(c.stations[largest].id)))
           largest = j;
       }
+      // (the counter, capped at the limit: handing out the refused id steps it past)
+      if (largest < c.stations.size() &&
+          station_number(c.stations[largest].id) + 1 < std::min<int64_t>(c.next_station_number, kMaxStationNumber))
+        largest = c.stations.size();  // not the cause
       if (largest < c.stations.size()) {
         const StationConfig& big = c.stations[largest];
         way_out = "numery stacji skończyły się przez " + station_ref(big, largest) + " z ręcznie nadanym identyfikatorem „" +

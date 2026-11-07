@@ -1341,6 +1341,32 @@ TEST_CASE("encoder config: station numbers never wrap: ids past 17 digits are re
   CHECK(next.stations[0].id != "s99999999999999999");
   CHECK(find_issue(be::validate_config(next), "stations[0].id"));
   CHECK(next.next_station_number >= prev.next_station_number);
+  // the refusal names the station that took the last number: one whose number + 1 reached the counter
+  {
+    be::EncoderConfig full = be::default_encoder_config();
+    full.stations = {st, st};
+    full.stations[0].id = "s99999999999999999";
+    full.stations[0].name = "Radio Ostatni Numer";
+    be::normalize_config(full);
+    const auto issues = be::validate_config(full);
+    const auto* i = find_issue(issues, "stations[1].id");
+    REQUIRE(i);
+    CHECK_MESSAGE(contains(i->message, "Radio Ostatni Numer"), i->message);
+  }
+  // ... and never one whose number did not: the counter got there through a station deleted since
+  {
+    be::EncoderConfig full = be::default_encoder_config();
+    full.stations = {st, st};
+    full.stations[0].id = "s5";
+    full.stations[0].name = "Radio Niewinna";
+    full.next_station_number = 100'000'000'000'000'000LL;  // as config.json keeps it
+    be::normalize_config(full);
+    const auto issues = be::validate_config(full);
+    const auto* i = find_issue(issues, "stations[1].id");
+    REQUIRE(i);
+    CHECK_MESSAGE(!contains(i->message, "Radio Niewinna"), i->message);
+    CHECK_MESSAGE(contains(i->message, "tej stacji już nie ma"), i->message);
+  }
   // leading zeros count as the number they are
   c = be::default_encoder_config();
   c.stations = {st, st};
