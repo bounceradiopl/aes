@@ -349,11 +349,13 @@ void EncoderEngine::Impl::update_processing(StationRuntime& rt, const EncoderCon
     ++rt.fade_in;
   }
   if (!want) return;
+  if (p.worker) p.worker->set_station_name(sc.name);  // a renamed station keeps its worker
   if (!p.worker) {
     ProcessingSettings s;
     s.license_key = key;
     s.preset_path = path;
     s.web_port = port;
+    s.station_name = sc.name;
     s.streams = active_streams(rt);  // from its first block on, however long the rest takes
     if (port > 0) s.wait_for_gone = port_holders(port, rt, finished);
     if (path.empty()) s.setup_error = "brak folderu presetów Stereo Tool";  // never Stereo Tool's defaults on air

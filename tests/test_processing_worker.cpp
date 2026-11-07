@@ -25,6 +25,7 @@
 #include "../encoder/src/engine_internal.hpp"
 #include "../encoder/src/stereotool_api.hpp"  // the web interface parameter indices
 #include "bam/encoder/stereotool.hpp"
+#include "bam/log.hpp"
 #include "bam/platform/process.hpp"
 #include "bam/platform/time.hpp"
 #include "fake_stereotool/fake_control.hpp"
@@ -401,9 +402,17 @@ TEST_CASE("processing: an invalid licence bypasses, aligned, and names the unlic
     fake().set("license_valid", 0);
     Collector col;
     Input input;
-    PW w(settings(col), "s4");
+    auto named = settings(col);
+    named.station_name = "Radio Przed";
+    PW w(named, "s4");
+    w.set_station_name("Radio Licencja");  // renamed: the worker's log lines follow
     feed(w, input, 48000);
     const auto st = status_when(w, [](auto& s) { return !s.unlicensed_features.empty(); });
+    // logged before the features are published
+    bool logged = false;
+    for (const auto& e : bam::Logger::instance().recent())
+      logged = logged || e.message == "Processing stacji „Radio Licencja”: licencja Stereo Tool nie obejmuje funkcji: " + kUnlicensed;
+    CHECK(logged);
     CHECK(st.state == be::ProcessingState::Bypass);
     CHECK_MESSAGE(contains(st.reason, "licencja"), st.reason);
     CHECK_FALSE(st.license_valid);

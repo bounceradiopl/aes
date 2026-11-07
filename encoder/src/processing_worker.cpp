@@ -127,6 +127,7 @@ struct ProcessingWorker::Core {
   std::array<std::string, kFailureTexts> failures;
   uint64_t failure_count = 0;
   std::string unlicensed;  // the features the last check found unlicensed
+  std::string station_name;  // for the log (set_station_name()); empty: station_id
 
   // Stereo Tool thread only
   std::unique_ptr<StereoToolInstance> st;
@@ -147,6 +148,13 @@ uint64_t set_failure(Core& c, std::string text) {
   std::lock_guard lock(c.text_m);
   c.failures[c.failure_count % kFailureTexts] = std::move(text);
   return ++c.failure_count;
+}
+
+// "Processing stacji „<name>”: " for the worker's log lines, like the engine's (station id when
+// the name is empty).
+std::string log_who(const Core& c) {
+  std::lock_guard lock(c.text_m);
+  return "Processing stacji „" + (c.station_name.empty() ? c.station_id : c.station_name) + "”: ";
 }
 
 uint64_t last_failure(const Core& c) {
@@ -213,7 +221,7 @@ Done setup(Core& c, bool restart, uint32_t* latency) {
     if (c.web_port > 0) {
       web = st->set_web_interface(true, c.web_port);
       if (!web && !st->failed())
-        log_warning("Processing stacji " + c.station_id + ": Stereo Tool nie przyjął portu interfejsu WWW " +
+        log_warning(log_who(c) + "Stereo Tool nie przyjął portu interfejsu WWW " +
                     std::to_string(c.web_port) + " (interfejs WWW wyłączony)");
     }
     take_requested_preset(c);
@@ -289,7 +297,7 @@ Done process_block(Core& c, Verdict* verdict, bool* crashed) {
     *verdict = valid ? Verdict::Valid : Verdict::Invalid;
     if (!valid) {
       std::string features = without_key(c.st->unlicensed_features(), c.key);
-      log_warning("Processing stacji " + c.station_id + ": licencja Stereo Tool nie obejmuje funkcji: " +
+      log_warning(log_who(c) + "licencja Stereo Tool nie obejmuje funkcji: " +
                   (features.empty() ? std::string("(Stereo Tool nie podał listy)") : features));
       std::lock_guard lock(c.text_m);
       c.unlicensed = std::move(features);
@@ -385,6 +393,7 @@ ProcessingWorker::ProcessingWorker(const ProcessingSettings& s, std::string stat
   c.setup_error = s.setup_error;
   c.wait_for_gone = s.wait_for_gone;
   c.station_id = station_id_;
+  c.station_name = s.station_name;
   c.name = "station-" + station_id_;
   c.block_tap = s.st_block_tap;
   c.job.assign(kBlockFrames * 2, 0.0f);
@@ -430,6 +439,11 @@ void ProcessingWorker::set_preset(std::string sts_path) {
     core_->preset_change = true;
   }
   preset_change_.store(true);
+}
+
+void ProcessingWorker::set_station_name(std::string name) {
+  std::lock_guard lock(core_->text_m);
+  core_->station_name = std::move(name);
 }
 
 bool ProcessingWorker::save_preset(const std::string& sts_path, int timeout_ms, std::string* error, bool* busy) {
@@ -487,7 +501,7 @@ void ProcessingWorker::stop() {
     // stuck in a library call: the thread keeps the shared Core and ends when (if) the call returns
     char secs[32];
     std::snprintf(secs, sizeof secs, "%.1f", timeout_ms / 1000.0);
-    log_warning("Processing stacji " + station_id_ + ": Stereo Tool nie zakończył pracy w ciągu " + secs +
+    log_warning(log_who(*core_) + "Stereo Tool nie zakończył pracy w ciągu " + secs +
                 " s; jego wątek zostaje do zamknięcia usługi");
     st_thread_.detach();
   }

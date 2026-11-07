@@ -449,8 +449,13 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
     } else if (!valid_id(st.id)) {
       add(sp + ".id", label + "nieprawidłowy identyfikator „" + st.id + "” (dozwolone litery, cyfry, „-” i „_”, najwyżej 32 znaki)");
     } else if (station_number(st.id) >= kMaxStationNumber) {
+      // also what a new station gets once a hand-made id took the largest number: say how out
       add(sp + ".id", label + "identyfikator „" + st.id + "” ma za duży numer (najwyżej " +
-                          std::to_string(kMaxStationNumber - 1) + "; nadaj stacji inny identyfikator)");
+                          std::to_string(kMaxStationNumber - 1) +
+                          "): nadaj stacji inny identyfikator. Jeśli to nowa stacja dodana w panelu, numery stacji "
+                          "skończyły się przez ręcznie nadany bardzo duży numer: zatrzymaj usługę, w config.json "
+                          "zmień identyfikator tej stacji na mniejszy (np. „s100”), ustaw „next_station_number” na "
+                          "największy numer stacji + 1 i uruchom usługę");
     } else if (auto [it, inserted] = station_ids.emplace(ascii_lower(st.id), i); !inserted) {
       const bool other_case = c.stations[it->second].id != st.id;
       add(sp + ".id", label + "identyfikator „" + st.id + "” jest już używany przez " + station_ref(c.stations[it->second], it->second) +

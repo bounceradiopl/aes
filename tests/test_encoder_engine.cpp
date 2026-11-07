@@ -1888,6 +1888,9 @@ TEST_CASE("encoder engine: a Stereo Tool too slow is retried automatically, a li
   CHECK(licence.unlicensed_features == "Fake: Declipper, Fake: Multiband");
   CHECK(log_lines_with(who + "automatyczna ponowna próba") == retries_logged);
   CHECK(logged(who + "licencja Stereo Tool nie obejmuje funkcji"));
+  // the worker's own line names the station like the engine's, with the features
+  CHECK(logged(who + "licencja Stereo Tool nie obejmuje funkcji: Fake: Declipper, Fake: Multiband"));
+  CHECK(log_lines_with("Processing stacji s1:") == 0);
   CHECK(log_lines_with(kKey1) == 0);
 }
 

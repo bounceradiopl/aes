@@ -219,6 +219,7 @@ struct ProcessingSettings {
   std::string preset_path;  // the .sts to load; empty: Stereo Tool's own defaults
   std::string home_dir;     // the instance's home folder; empty: the library's default
   int web_port = 0;         // the instance's web interface (127.0.0.1 only); 0: off
+  std::string station_name;  // for the log ("Processing stacji „…”"); empty: the station id
   std::string setup_error;  // Polish: why processing cannot be set up at all (nothing is created)
   // The streams the output goes to from the first block on (set_streams() replaces them later):
   // a worker never hands a block to no stream list.
@@ -346,6 +347,8 @@ class ProcessingWorker {
   // crossfade to the unprocessed signal, the preset, the latency, the licence check, crossfade
   // back). A missing or failed instance is built with it.
   void set_preset(std::string sts_path);
+  // Any thread: the station's name in the worker's own log lines (after a rename).
+  void set_station_name(std::string name);
   // Any thread (not the audio threads): saves the instance's current settings to `sts_path` on the
   // Stereo Tool thread, between two blocks, and waits up to timeout_ms for it. Meanwhile the
   // output waits too; a save longer than kMaxBehindNs bypasses (reason Saving, never "too slow")
