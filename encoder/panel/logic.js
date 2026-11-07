@@ -384,6 +384,7 @@
           return s;
         }
         case "crash": return err("awaria: uruchom ponownie usługę");
+        case "previous_crash": return err("wyłączony po awarii usługi · uruchom ponownie processing");
         case "process": return err("błąd Stereo Tool");
         case "setup": return err(p.reason || "błąd uruchomienia Stereo Tool");
         default: return err(p.reason || "bez processingu");

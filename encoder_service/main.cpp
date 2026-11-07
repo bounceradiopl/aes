@@ -102,6 +102,8 @@ int run(const std::string& config_path, bool protect, const std::string& dir_err
   opts.stereotool_dir = dir_of(config_path) + kSep + be::kStereoToolDirName;
   opts.protect_stereotool_dir = protect;
   opts.keep_stereotool_at_stop = true;  // engine.stop() below is the end of the process (ruling S7)
+  // the crash-loop guard: next to config.json, in the folder only administrators may write to
+  opts.crash_marker_path = dir_of(config_path) + kSep + "running.marker";
   be::EncoderEngine engine(opts);
   std::string err;
   if (!engine.start(cfg, &err)) {

@@ -554,6 +554,7 @@ std::string ProcessingWorker::reason_text(Reason why, uint64_t failure_id) const
                " (nie odpowiada) — do końca zapisu sygnał bez processingu";
       return "zapis presetu Stereo Tool (do jego końca sygnał bez processingu)";
     }
+    case Reason::PreviousCrash: return kPreviousCrashReason;  // the engine's (a held station has no worker)
   }
   return {};
 }

@@ -53,6 +53,15 @@ struct EncoderEngineOptions {
   // about 0.5-1.2 s per instance, one after another, which with many stations would outlast the
   // Windows stop wait. A station removed or switched off while running is still deleted.
   bool keep_stereotool_at_stop = false;
+  // Crash-loop guard (owner decision, final review). The service uses "<config folder>\running.marker"
+  // (the folder is for administrators only): start() writes it ("processing=0"), it says
+  // "processing=1" from the first processing worker on, and a clean stop() removes it. When start()
+  // finds it from a previous run that ended otherwise (a crash, a kill) with processing, every
+  // enabled station with processing starts without it (state Error, reason PreviousCrash; its
+  // streams get the unprocessed mix) until "Uruchom ponownie processing" (restart_processing), a
+  // save of that station (release_processing_hold) or a change of its processing settings; a
+  // warning is logged. Empty: no marker, no guard (tests, unless they ask for it).
+  std::string crash_marker_path;
 };
 
 struct InputStatus {
@@ -119,6 +128,7 @@ enum class ProcessingReason {
   Crash,         // a crash in the library: nothing until the service restarts
   RestartWaits,  // a restart waits for a Stereo Tool call to return
   Saving,        // a preset save took longer than 200 ms: unprocessed until it is over, then back
+  PreviousCrash,  // the previous run of the service ended unclean with processing: off until restarted by hand
 };
 inline const char* processing_reason_name(ProcessingReason r) {
   switch (r) {
@@ -131,6 +141,7 @@ inline const char* processing_reason_name(ProcessingReason r) {
     case ProcessingReason::Crash: return "crash";
     case ProcessingReason::RestartWaits: return "restart_waits";
     case ProcessingReason::Saving: return "saving";
+    case ProcessingReason::PreviousCrash: return "previous_crash";
     case ProcessingReason::None: break;
   }
   return "";
@@ -236,6 +247,9 @@ class EncoderEngine {
   // is built anew; after a crash only a service restart helps). false with a Polish *error when
   // the station runs no processing.
   bool restart_processing(const std::string& station_id, std::string* error);
+  // A save of the station in the panel (PUT /api/stations/<id>): a station held by the crash-loop
+  // guard (EncoderEngineOptions::crash_marker_path) gets its processing back. false when it was not held.
+  bool release_processing_hold(const std::string& station_id);
   // The password Stereo Tool's web interface of the station asks for (user "Admin"; random per
   // processing worker, kept through restarts and preset changes, new with a new instance after a
   // key or port change), with the interface's port. For a logged-in panel user on request only:

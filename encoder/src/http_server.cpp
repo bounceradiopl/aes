@@ -879,7 +879,11 @@ struct EncoderHttpServer::Impl {
             doc["stations"][*i] = *body;
             return true;
           },
-          [&](json& out, const EncoderConfig&) { out["id"] = id; });
+          [&](json& out, const EncoderConfig&) {
+            out["id"] = id;
+            // a station held by the crash-loop guard: saving it in the panel brings its processing back
+            engine.release_processing_hold(id);
+          });
     });
 
     del(R"(/api/stations/([A-Za-z0-9_-]+))", kSession, [this](const httplib::Request& req, httplib::Response& res) {

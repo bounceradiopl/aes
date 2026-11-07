@@ -213,6 +213,10 @@ class StreamWorker {
 
 // ---- Stereo Tool processing (processing_worker.cpp) ----
 
+// The reason of a station held by the crash-loop guard (ProcessingReason::PreviousCrash).
+inline constexpr const char* kPreviousCrashReason =
+    "awaria przy poprzednim uruchomieniu — processing wyłączony, uruchom ponownie ręcznie (Uruchom ponownie processing)";
+
 // What a ProcessingWorker runs with, fixed for its lifetime.
 struct ProcessingSettings {
   std::string license_key;  // the effective key (the station's, else the default); a secret: never logged

@@ -9,9 +9,13 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <mutex>
+#include <set>
 #include <thread>
 
 #include "bam/config.hpp"  // ptime_us_to_frames
@@ -199,6 +203,10 @@ struct EncoderEngine::Impl {
 
   PresetStore store;
 
+  // crash-loop guard (EncoderEngineOptions::crash_marker_path)
+  std::set<std::string> held;      // stations whose processing waits for a restart by hand
+  bool marker_processing = false;  // the marker says processing=1
+
   explicit Impl(EncoderEngineOptions o) : opts(o), store(o.stereotool_dir, o.protect_stereotool_dir) { set_free_run(); }
 
   void set_free_run() {
@@ -230,7 +238,109 @@ struct EncoderEngine::Impl {
   void housekeeping();
   void shutdown();
   StationStatus station_status(const StationConfig& sc) const;
+  void write_marker(bool processing);
+  void hold_after_unclean_end(const EncoderConfig& cfg);
+  void release_changed_holds(const EncoderConfig& next);
+  void release_hold(const std::string& station_id, const std::string& why);
 };
+
+// ---- the crash-loop guard ----
+
+namespace {
+
+std::filesystem::path marker_fs_path(const std::string& utf8) {
+  return std::filesystem::path(reinterpret_cast<const char8_t*>(utf8.c_str()));
+}
+
+}  // namespace
+
+// "processing=0" / "processing=1" (processing has run in this run of the service), replacing the
+// file whole (a half-written marker would read as no processing).
+void EncoderEngine::Impl::write_marker(bool processing) {
+  marker_processing = processing;
+  if (opts.crash_marker_path.empty()) return;
+  const auto path = marker_fs_path(opts.crash_marker_path);
+  auto tmp = path;
+  tmp += ".tmp";
+  std::error_code ec;
+  {
+    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+    out << (processing ? "processing=1\n" : "processing=0\n");
+    if (!out.flush()) ec = std::make_error_code(std::errc::io_error);
+  }
+  if (!ec) std::filesystem::rename(tmp, path, ec);
+  if (ec) log_warning("Bounce Encoder: nie można zapisać znacznika pracy usługi " + opts.crash_marker_path + ": " + ec.message());
+}
+
+// At start(): a marker left by a previous run that did not stop cleanly, with processing, holds
+// every enabled station with processing; then this run's marker ("processing=0").
+void EncoderEngine::Impl::hold_after_unclean_end(const EncoderConfig& cfg) {
+  held.clear();
+  if (opts.crash_marker_path.empty()) return;
+  std::ifstream in(marker_fs_path(opts.crash_marker_path), std::ios::binary);
+  if (in) {
+    const std::string previous((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    if (previous.find("processing=1") != std::string::npos) {
+      std::string names;
+      for (const StationConfig& sc : cfg.stations) {
+        if (!sc.enabled || !sc.processing.enabled) continue;
+        held.insert(sc.id);
+        names += (names.empty() ? "„" : ", „") + sc.name + "”";
+      }
+      log_warning("Bounce Encoder: poprzednie uruchomienie usługi nie zakończyło się poprawnie, a działał processing Stereo Tool" +
+                  (names.empty() ? std::string(" (żadna stacja nie ma teraz processingu)")
+                                 : " — processing stacji " + names +
+                                       " wyłączony do ręcznego uruchomienia („Uruchom ponownie processing” albo zapis stacji w panelu); "
+                                       "stacje nadają sygnał bez processingu"));
+    } else {
+      log_info("Bounce Encoder: poprzednie uruchomienie usługi nie zakończyło się poprawnie (processing Stereo Tool nie działał)");
+    }
+  }
+  write_marker(false);
+}
+
+// apply_config(): a held station whose processing settings change (another preset, key or port,
+// switched off) is held no more; with processing on it gets its worker in this apply.
+void EncoderEngine::Impl::release_changed_holds(const EncoderConfig& next) {
+  for (auto it = held.begin(); it != held.end();) {
+    const std::string id = *it;
+    size_t now = next.stations.size(), before = config.stations.size();
+    for (size_t i = 0; i < next.stations.size(); ++i)
+      if (next.stations[i].id == id) now = i;
+    for (size_t i = 0; i < config.stations.size(); ++i)
+      if (config.stations[i].id == id) before = i;
+    bool keep = now < next.stations.size() && before < config.stations.size() && next.stations[now].enabled;
+    if (keep) {
+      const ProcessingWanted a = processing_wanted(next, now), b = processing_wanted(config, before);
+      keep = a.want && a.want == b.want && a.key == b.key && a.port == b.port && a.path == b.path &&
+             same_preset_name(next.stations[now].processing.preset, config.stations[before].processing.preset);
+    }
+    if (keep) {
+      ++it;
+      continue;
+    }
+    if (now < next.stations.size() && next.stations[now].processing.enabled && next.stations[now].enabled)
+      log_info(processing_who(next.stations[now].name) + "zmiana ustawień processingu: processing wraca po awarii przy poprzednim uruchomieniu");
+    it = held.erase(it);
+  }
+}
+
+// restart_processing() / release_processing_hold(): the held station gets its worker now.
+void EncoderEngine::Impl::release_hold(const std::string& station_id, const std::string& why) {
+  held.erase(station_id);
+  auto it = stations.find(station_id);
+  if (!running || it == stations.end()) return;
+  for (size_t index = 0; index < config.stations.size(); ++index) {
+    if (config.stations[index].id != station_id) continue;
+    log_info(processing_who(config.stations[index].name) + why);
+    std::vector<std::shared_ptr<ProcessingWorker>> finished;
+    update_processing(*it->second, config, index, finished);
+    publish(*it->second);
+    stop_workers(std::move(finished));
+    return;
+  }
+}
 
 // The workers of the current runtime that `next` does not keep exactly as they are.
 static bool keeps_worker(const EncoderConfig& next, const std::string& station_id, const StreamWorker& w) {
@@ -349,8 +459,10 @@ void EncoderEngine::Impl::update_processing(StationRuntime& rt, const EncoderCon
     ++rt.fade_in;
   }
   if (!want) return;
+  if (held.count(sc.id)) return;  // the crash-loop guard: no worker until a restart by hand (station_status says so)
   if (p.worker) p.worker->set_station_name(sc.name);  // a renamed station keeps its worker
   if (!p.worker) {
+    if (!marker_processing) write_marker(true);  // before Stereo Tool is touched in this run
     ProcessingSettings s;
     s.license_key = key;
     s.preset_path = path;
@@ -702,6 +814,7 @@ bool EncoderEngine::start(const EncoderConfig& config, std::string* error) {
   m.iface_checked_ns = m.started_ns;
   m.rx = std::make_unique<RxThread>(m.clock);
   m.running = true;
+  m.hold_after_unclean_end(config);
   m.apply(config);
   {
     std::lock_guard hk(m.hk_m);
@@ -725,6 +838,12 @@ void EncoderEngine::stop() {
   if (!m.running) return;
   m.running = false;
   m.shutdown();
+  m.held.clear();
+  if (!m.opts.crash_marker_path.empty()) {  // a clean stop: the next start needs no guard
+    std::error_code ec;
+    std::filesystem::remove(marker_fs_path(m.opts.crash_marker_path), ec);
+    if (ec) log_warning("Bounce Encoder: nie można usunąć znacznika pracy usługi " + m.opts.crash_marker_path + ": " + ec.message());
+  }
   log_info("Bounce Encoder: silnik zatrzymany");
 }
 
@@ -735,10 +854,12 @@ void EncoderEngine::apply_config(const EncoderConfig& config) {
   for (const StationConfig& o : m.config.stations)
     if (std::none_of(config.stations.begin(), config.stations.end(), [&](const StationConfig& s) { return s.id == o.id; }))
       deleted.push_back(o.id);
-  if (!m.running)
+  if (!m.running) {
     m.config = config;
-  else
+  } else {
+    m.release_changed_holds(config);
     m.apply(config);  // stops the processing workers that go before it returns
+  }
   // a deleted station's Stereo Tool home folder goes with it (ruling S4: no id is given again, so
   // nothing would ever use it)
   for (const std::string& id : deleted) {
@@ -816,6 +937,11 @@ StationStatus EncoderEngine::Impl::station_status(const StationConfig& sc) const
     ss.codec_available = codec_available(s.codec);
     ss.codec_library = codec_library_path(s.codec);
     st.streams.push_back(std::move(ss));
+  }
+  if (rt && !rt->proc.worker && sc.processing.enabled && held.count(sc.id)) {
+    st.processing.state = ProcessingState::Error;  // the crash-loop guard: the streams get the unprocessed mix
+    st.processing.reason_code = ProcessingReason::PreviousCrash;
+    st.processing.reason = detail::kPreviousCrashReason;
   }
   if (rt && rt->proc.worker) {
     const ProcessingRuntime& p = rt->proc;
@@ -915,6 +1041,10 @@ bool EncoderEngine::restart_processing(const std::string& station_id, std::strin
   auto& m = *impl_;
   std::lock_guard lock(m.m);
   auto it = m.stations.find(station_id);
+  if (m.running && it != m.stations.end() && m.held.count(station_id)) {
+    m.release_hold(station_id, "ponowne uruchomienie (ręczne)");
+    return true;
+  }
   if (!m.running || it == m.stations.end() || !it->second->proc.worker) {
     if (error) *error = "ta stacja nie ma działającego processingu";
     return false;
@@ -925,6 +1055,14 @@ bool EncoderEngine::restart_processing(const std::string& station_id, std::strin
   p.retrying = false;
   log_info(processing_who(it->second->cfg.name) + "ponowne uruchomienie (ręczne)");
   p.worker->restart();
+  return true;
+}
+
+bool EncoderEngine::release_processing_hold(const std::string& station_id) {
+  auto& m = *impl_;
+  std::lock_guard lock(m.m);
+  if (!m.held.count(station_id)) return false;
+  m.release_hold(station_id, "zapis stacji: processing wraca po awarii przy poprzednim uruchomieniu");
   return true;
 }
 

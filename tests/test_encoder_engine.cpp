@@ -41,6 +41,7 @@
 #include "bam/platform/udp.hpp"
 #include "bam/rtp.hpp"
 #include "bam/sdp.hpp"
+#include "test_util.hpp"
 #include "../encoder/src/engine_internal.hpp"  // AudioQueue (the station -> stream handover)
 #include "../encoder/src/stereotool_api.hpp"   // the web interface parameter index
 #include "bam/log.hpp"
@@ -2130,6 +2131,140 @@ TEST_CASE("encoder engine: a configuration without a web port slot runs Stereo T
   REQUIRE(processing_running(engine, "s2"));
   CHECK(processing_of(engine, "s2").web_port == 0);  // never a port taken from the position
   CHECK(fake().sts("station-s2", be::detail::st::kParamWebserverEnable) == std::optional<std::string>("0"));
+}
+
+namespace {
+
+// The crash-loop guard's marker of a test engine (EncoderEngineOptions::crash_marker_path).
+struct Marker {
+  std::string path;
+  explicit Marker(const StDir& dir) : path((fs::path(dir.path) / "running.marker").string()) { fs::create_directories(dir.path); }
+  bool exists() const { return fs::exists(path); }
+  std::string text() const { return read_file(path); }
+  void write(const std::string& text) const { write_file(path, text); }
+};
+
+be::EncoderConfig guarded_config() {
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  be::StationConfig a = station("s1", "Radio Awaria");
+  a.processing = processing("P.sts");
+  be::StationConfig b = station("s2", "Radio Awaria Dwa");
+  b.processing = processing("P.sts", kKey2);
+  cfg.stations = {a, b, station("s3", "Radio Bez Processingu")};
+  return ready(cfg);
+}
+
+bool held(const be::EncoderEngine& e, const std::string& id) {
+  const be::ProcessingStatus p = processing_of(e, id);
+  return p.state == be::ProcessingState::Error && p.reason_code == be::ProcessingReason::PreviousCrash &&
+         p.reason.find("awaria przy poprzednim uruchomieniu") != std::string::npos;
+}
+
+}  // namespace
+
+TEST_CASE("encoder engine: the crash-loop guard's marker: written at start, says when processing ran, removed by a clean stop") {
+  UseFake use;
+  StDir dir("marker");
+  const Marker marker(dir);
+  be::EncoderEngineOptions opts = st_options(dir);
+  opts.crash_marker_path = marker.path;
+  {
+    be::EncoderConfig cfg = guarded_config();
+    cfg.stations[0].processing.enabled = false;
+    cfg.stations[1].processing.enabled = false;
+    be::EncoderEngine engine(opts);
+    REQUIRE(engine.put_preset("P.sts", fake_preset(0.5, 64)).ok());
+    std::string err;
+    REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+    CHECK(marker.text() == "processing=0\n");  // nothing of Stereo Tool ran yet
+    cfg.stations[0].processing.enabled = true;
+    engine.apply_config(cfg);
+    CHECK(marker.text() == "processing=1\n");  // from the first worker on
+    REQUIRE(processing_running(engine, "s1"));
+    engine.stop();
+    CHECK_FALSE(marker.exists());  // a clean stop
+  }
+  {
+    // an unclean end of a run without processing: no guard
+    marker.write("processing=0\n");
+    be::EncoderEngine engine(opts);
+    std::string err;
+    REQUIRE_MESSAGE(engine.start(guarded_config(), &err), err);
+    CHECK(processing_running(engine, "s1"));
+    CHECK(processing_running(engine, "s2"));
+    CHECK(marker.text() == "processing=1\n");
+  }
+  CHECK_FALSE(marker.exists());  // the destructor stops cleanly too
+}
+
+TEST_CASE("encoder engine: after an unclean end with processing, every processing station starts without it until restarted by hand") {
+  UseFake use;
+  StDir dir("guard");
+  const Marker marker(dir);
+  marker.write("processing=1\n");  // the previous run crashed with Stereo Tool running
+  be::EncoderEngineOptions opts = st_options(dir);
+  opts.crash_marker_path = marker.path;
+  be::EncoderEngine engine(opts);
+  REQUIRE(engine.put_preset("P.sts", fake_preset(0.5, 64)).ok());
+  REQUIRE(engine.put_preset("Q.sts", fake_preset(0.25, 32)).ok());
+  be::EncoderConfig cfg = guarded_config();
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  CHECK(held(engine, "s1"));
+  CHECK(held(engine, "s2"));
+  CHECK(processing_of(engine, "s3").state == be::ProcessingState::Off);
+  CHECK(logged("poprzednie uruchomienie usługi nie zakończyło się poprawnie"));
+  CHECK(marker.text() == "processing=0\n");
+  bp::sleep_ns(300'000'000);
+  CHECK(fake().value("create_calls") == 0);  // Stereo Tool is not touched at all
+  for (const auto& st : engine.status().stations) CHECK(st.running);  // the stations play, unprocessed
+
+  // "Uruchom ponownie processing" of one station: it runs, the other stays held
+  REQUIRE_MESSAGE(engine.restart_processing("s1", &err), err);
+  CHECK(processing_running(engine, "s1"));
+  CHECK(marker.text() == "processing=1\n");
+  CHECK(held(engine, "s2"));
+  CHECK(logged("Processing stacji „Radio Awaria”: ponowne uruchomienie (ręczne)"));
+  // a save of the other station in the panel
+  CHECK(engine.release_processing_hold("s2"));
+  CHECK(processing_running(engine, "s2"));
+  CHECK_FALSE(engine.release_processing_hold("s2"));  // not held any more
+  CHECK(fake().value("created") == 2);
+  engine.stop();
+  CHECK_FALSE(marker.exists());
+}
+
+TEST_CASE("encoder engine: a held station gets its processing back when its processing settings change") {
+  UseFake use;
+  StDir dir("guardchange");
+  const Marker marker(dir);
+  marker.write("processing=1\n");
+  be::EncoderEngineOptions opts = st_options(dir);
+  opts.crash_marker_path = marker.path;
+  be::EncoderEngine engine(opts);
+  REQUIRE(engine.put_preset("P.sts", fake_preset(0.5, 64)).ok());
+  REQUIRE(engine.put_preset("Q.sts", fake_preset(0.25, 32)).ok());
+  be::EncoderConfig cfg = guarded_config();
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  REQUIRE(held(engine, "s1"));
+  // a change elsewhere (a name) keeps it held
+  cfg.stations[2].name = "Radio Inna Nazwa";
+  engine.apply_config(cfg);
+  CHECK(held(engine, "s1"));
+  // another preset for s1: back
+  cfg.stations[0].processing.preset = "Q.sts";
+  engine.apply_config(cfg);
+  CHECK(processing_running(engine, "s1"));
+  CHECK(held(engine, "s2"));
+  // switched off and on again: back as well
+  cfg.stations[1].processing.enabled = false;
+  engine.apply_config(cfg);
+  CHECK(processing_of(engine, "s2").state == be::ProcessingState::Off);
+  cfg.stations[1].processing.enabled = true;
+  engine.apply_config(cfg);
+  CHECK(processing_running(engine, "s2"));
 }
 
 TEST_CASE("encoder engine: a save Stereo Tool does not finish in time is reported, processing comes back after it") {

@@ -100,10 +100,11 @@ json station_json(const std::string& name, bool enabled, const std::string& pass
                                     {"password", password}}})}};
 }
 
-be::EncoderEngineOptions http_engine_options(const std::string& stereotool_dir) {
+be::EncoderEngineOptions http_engine_options(const std::string& stereotool_dir, const std::string& crash_marker = "") {
   be::EncoderEngineOptions o;
   o.enable_ptp = false;
   o.stereotool_dir = stereotool_dir;  // empty: no presets folder
+  o.crash_marker_path = crash_marker;  // empty: no crash-loop guard
   return o;
 }
 
@@ -114,7 +115,8 @@ struct Fixture {
   std::unique_ptr<httplib::Client> client;
   httplib::Headers auth;
 
-  explicit Fixture(const std::string& stereotool_dir = "") : engine(http_engine_options(stereotool_dir)) {
+  explicit Fixture(const std::string& stereotool_dir = "", const std::string& crash_marker = "")
+      : engine(http_engine_options(stereotool_dir, crash_marker)) {
     be::EncoderConfig cfg = be::default_encoder_config();
     cfg.interface_ip = kLoopback;  // tests never join groups on a real network
     cfg.http_bind = kLoopback;
@@ -1914,6 +1916,48 @@ TEST_CASE("encoder HTTP: the Stereo Tool web interface password is given only on
   for (const auto& e : bam::Logger::instance().recent()) bodies.push_back(e.message);
   for (const std::string& b : bodies) CHECK_MESSAGE(b.find(pw) == std::string::npos, b.substr(0, 300));
   CHECK(saved.find("sts.") != std::string::npos);  // the fake wrote its values (the password among them)
+}
+
+// The crash-loop guard (owner decision): a station held after an unclean end with processing gets
+// its processing back when it is saved in the panel (or restarted by hand).
+TEST_CASE("encoder HTTP: a save of a station held by the crash-loop guard brings its processing back") {
+  fake_st::UseFake use;
+  StFolder dir("guard");
+  const std::string marker = (fs::path(dir.path) / "running.marker").string();
+  Fixture f(dir.path, marker);
+  f.setup_and_login();
+  REQUIRE(f.post("/api/stereotool/presets", upload_body("Start.sts", fake_sts(0.5, 128)))->status == 200);
+  json cfg = f.get("/api/config");
+  cfg["stations"] = json::array({processing_station("Radio Jeden", true, "Start.sts", kStationKey),
+                                 processing_station("Radio Dwa", true, "Start.sts", kDefaultKey)});
+  auto r = f.put("/api/config", cfg);
+  REQUIRE_MESSAGE(r->status == 200, r->body);
+  const json out = json::parse(r->body);
+  const std::string s1 = out["config"]["stations"][0]["id"], s2 = out["config"]["stations"][1]["id"];
+  // the service ends unclean while Stereo Tool runs, and starts again
+  const be::EncoderConfig running_cfg = f.engine.config();
+  f.engine.stop();
+  write_file(marker, "processing=1\n");
+  std::string err;
+  REQUIRE_MESSAGE(f.engine.start(running_cfg, &err), err);
+  json status = f.get("/api/status");
+  for (int i : {0, 1}) {
+    CHECK(status["stations"][i]["processing"]["state"] == "error");
+    CHECK(status["stations"][i]["processing"]["reason_code"] == "previous_crash");
+    CHECK_MESSAGE(status["stations"][i]["processing"]["reason"].get<std::string>().find("awaria przy poprzednim uruchomieniu") !=
+                      std::string::npos,
+                  status.dump());
+  }
+  // a save of the first station (as the panel sends it): its processing is back, the other one waits
+  json station = f.get("/api/config")["stations"][0];
+  r = f.put("/api/stations/" + s1, station);
+  REQUIRE_MESSAGE(r->status == 200, r->body);
+  CHECK(wait_for([&] { return f.get("/api/status")["stations"][0]["processing"]["state"] == "running"; }, 10000));
+  CHECK(f.get("/api/status")["stations"][1]["processing"]["reason_code"] == "previous_crash");
+  // "Uruchom ponownie processing" of the other
+  r = f.client->Post("/api/stations/" + s2 + "/processing/restart", f.auth, "", "application/json");
+  REQUIRE_MESSAGE(r->status == 200, r->body);
+  CHECK(wait_for([&] { return f.get("/api/status")["stations"][1]["processing"]["state"] == "running"; }, 10000));
 }
 
 TEST_CASE("encoder HTTP: a station replaced by one with an id in another case gets its own instance; a deleted station's folder goes") {

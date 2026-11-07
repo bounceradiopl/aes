@@ -370,6 +370,11 @@ test("processing states in Polish", () => {
   assert.equal(L.processingState(p({ state: "bypass", reason_code: "crash" }), true).text, "awaria: uruchom ponownie usługę");
   assert.equal(L.processingState(p({ state: "error", reason_code: "setup", reason: "nie można wczytać presetu" }), true).text, "nie można wczytać presetu");
   assert.equal(L.processingState(p({ state: "bypass", reason_code: "saving" }), true).text, "zapis presetu…");
+  // the crash-loop guard: off after an unclean end of the service, until restarted by hand
+  const held = L.processingState(p({ state: "error", reason_code: "previous_crash", reason: "awaria przy poprzednim uruchomieniu — processing wyłączony, uruchom ponownie ręcznie" }), true);
+  assert.equal(held.kind, "err");
+  assert.equal(held.text, "wyłączony po awarii usługi · uruchom ponownie processing");
+  assert.match(held.title, /awaria przy poprzednim uruchomieniu/);
   assert.equal(L.processingState(p({ state: "off", web_port: 0 }), true).kind, "err");
   assert.equal(L.fmtPct(12.34), "12,3 %");
   assert.equal(L.fmtMs(7.66), "7,7 ms");
