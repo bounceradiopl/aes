@@ -304,7 +304,7 @@ jobs:
           Set-Location installer\nsis
           & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /V2 "/DPAYLOAD=$payload" BounceEncoder-setup.nsi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # with Stereo Tool (117 MB) inside: about 40-60 MB more than 1.0
+          # with Stereo Tool (117 MB) inside: about 30 MB more than 1.0
           "BounceEncoder-setup.exe: {0:N1} MB" -f ((Get-Item BounceEncoder-setup.exe).Length / 1MB) | Write-Host
       - name: Collect binaries
         shell: pwsh
@@ -321,7 +321,9 @@ jobs:
           Copy-Item build\Release\BounceEncoder.exe, build\Release\BounceEncoderTray.exe, build\Release\libmp3lame.dll, build\Release\libfdk-aac-2.dll, build\Release\libStereoTool_64.dll dist-encoder\
           Copy-Item -Recurse build\Release\encoder-licenses dist-encoder\licencje
           if (-not (Test-Path dist-encoder\licencje\StereoTool-NOTICE.txt)) { throw 'the Stereo Tool notice is missing' }
-          Copy-Item LICENSE, LICENSING.md dist-encoder\
+          # under the installer's names, which the docs and the Stereo Tool notice use
+          Copy-Item LICENSE dist-encoder\LICENSE.txt
+          Copy-Item LICENSING.md dist-encoder\LICENCJE.md
           Copy-Item docs\ENCODER-INSTALL.md dist-encoder\INSTRUKCJA.md
           Copy-Item docs\ENCODER-TESTING.md dist-encoder\TESTY.md
       - uses: actions/upload-artifact@v4

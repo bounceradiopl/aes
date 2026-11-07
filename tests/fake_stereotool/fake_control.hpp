@@ -25,6 +25,7 @@ struct Fake {
   long long (*value)(const char*) = nullptr;
   int (*text_fn)(const char*, char*, int) = nullptr;
   int (*sts_fn)(const char*, int, char*, int) = nullptr;
+  long long (*drop_live)() = nullptr;  // deletes the instances left live (the end of the process)
 
   std::optional<std::string> text(const char* what) const {
     char buf[1024];
@@ -50,11 +51,13 @@ inline Fake& fake() {
     x.value = reinterpret_cast<long long (*)(const char*)>(x.lib.symbol("fake_stereotool_value"));
     x.text_fn = reinterpret_cast<int (*)(const char*, char*, int)>(x.lib.symbol("fake_stereotool_text"));
     x.sts_fn = reinterpret_cast<int (*)(const char*, int, char*, int)>(x.lib.symbol("fake_stereotool_sts"));
+    x.drop_live = reinterpret_cast<long long (*)()>(x.lib.symbol("fake_stereotool_drop_live"));
     REQUIRE(x.reset);
     REQUIRE(x.set);
     REQUIRE(x.value);
     REQUIRE(x.text_fn);
     REQUIRE(x.sts_fn);
+    REQUIRE(x.drop_live);
     return x;
   }();
   return f;

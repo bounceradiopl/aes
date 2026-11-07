@@ -121,6 +121,9 @@ class StereoToolInstance {
 
   bool failed() const { return failed_; }
   bool abandoned() const { return abandoned_; }  // this instance crashed (a structured exception)
+  // The process is about to end (ruling S7): the destructor leaves the library's instance alone
+  // (no stereoTool_Delete); the end of the process frees its memory and ports.
+  void leave_to_process_exit() { left_ = true; }
   const std::string& failure() const { return failure_; }  // Polish, empty unless failed()
 
  private:
@@ -134,6 +137,7 @@ class StereoToolInstance {
   gStereoTool* st_ = nullptr;
   bool failed_ = false;
   bool abandoned_ = false;
+  bool left_ = false;  // leave_to_process_exit()
   std::string failure_;
   bool web_set_ = false, web_enabled_ = false;
   int web_port_ = 0;

@@ -21,7 +21,8 @@ the optional per-station processing.
   station sends its signal unprocessed.
 
 Bounce Encoder's licence (GPL-3.0-or-later) has an additional permission (GNU GPL version 3,
-section 7) to combine it with libStereoTool: see LICENCJE.md in the program folder.
+section 7) to combine it with libStereoTool: see LICENCJE.md in the program folder (LICENSING.md in
+the source repository).
 
 
 Po polsku
@@ -32,4 +33,4 @@ jest objęta licencją GPL Bounce Encodera. Bounce Encoder ładuje ją w czasie 
 tylko z folderu programu. Każda stacja z włączonym processingiem potrzebuje własnego klucza licencji
 Stereo Tool. Plik jest dołączony do instalatora dla BOUNCE SP. Z O.O. (licencjobiorcy); przekazanie
 instalatora albo tego pliku poza BOUNCE SP. Z O.O. wymaga zgody Thimeo, a odbiorca potrzebuje
-własnych licencji. Szczegóły: LICENCJE.md.
+własnych licencji. Szczegóły: LICENCJE.md w folderze programu (w repozytorium: LICENSING.md).

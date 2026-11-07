@@ -24,6 +24,8 @@
 # parameter indices (encoder/src/stereotool_api.hpp, checked by cmake/stereotool/sdk_check.cpp),
 # then the real-library test of the Windows CI.
 
+include(${CMAKE_CURRENT_LIST_DIR}/download.cmake)
+
 set(BAM_STEREOTOOL_SDK_URL "https://download.thimeo.com/Stereo_Tool_Generic_plugin.zip")
 set(BAM_STEREOTOOL_SDK_SHA256 ed07c086cd95523abf5e7d655fa1f32e556fca2539ff0e85b4e12ff3a4c3ec22)
 set(BAM_STEREOTOOL_SDK_ZIP "" CACHE FILEPATH "Local copy of Stereo_Tool_Generic_plugin.zip (pinned SHA-256; empty: download)")
@@ -91,18 +93,14 @@ function(_bam_st_zip out)
   if(NOT EXISTS "${zip}")
     message(STATUS "Downloading the Stereo Tool SDK (about 360 MB): ${BAM_STEREOTOOL_SDK_URL}")
     file(MAKE_DIRECTORY "${cache}")
-    # the hash is checked here rather than by EXPECTED_HASH, to say what to do when it differs
-    file(DOWNLOAD "${BAM_STEREOTOOL_SDK_URL}" "${zip}.part" STATUS status TLS_VERIFY ON)
-    list(GET status 0 code)
-    if(NOT code EQUAL 0)
-      file(REMOVE "${zip}.part")
-      message(FATAL_ERROR "Cannot download ${BAM_STEREOTOOL_SDK_URL}: ${status}\n"
+    # retried on an outage; a wrong SHA-256 is not retried (it says what to do below)
+    bam_download_pinned("${zip}" ${sha} error have "${BAM_STEREOTOOL_SDK_URL}")
+    if(error AND NOT have)
+      message(FATAL_ERROR "Cannot download ${BAM_STEREOTOOL_SDK_URL}: ${error}\n"
         "Use a saved copy of the zip (-DBAM_STEREOTOOL_SDK_ZIP=<path>, SHA-256 ${sha}) or configure "
         "with -DBAM_WITH_STEREOTOOL=OFF to build without Stereo Tool.")
     endif()
-    file(SHA256 "${zip}.part" have)
-    if(NOT have STREQUAL sha)
-      file(REMOVE "${zip}.part")
+    if(have)
       message(FATAL_ERROR "The Stereo Tool SDK downloaded from ${BAM_STEREOTOOL_SDK_URL} has SHA-256 ${have}, "
         "not the pinned ${sha} (libStereoTool 11.07). The URL carries no version: Thimeo has most likely "
         "published a newer Stereo Tool under the same name.\n"
@@ -114,7 +112,6 @@ function(_bam_st_zip out)
         "checked by cmake/stereotool/sdk_check.cpp), then run the real-library test (Windows CI).\n"
         "Or configure with -DBAM_WITH_STEREOTOOL=OFF to build without Stereo Tool.")
     endif()
-    file(RENAME "${zip}.part" "${zip}")
   endif()
   set(${out} "${zip}" PARENT_SCOPE)
 endfunction()

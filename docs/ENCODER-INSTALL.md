@@ -275,7 +275,8 @@ Preset to plik `.sts` z ustawieniami Stereo Tool. Presety są wspólne dla wszys
 ### Włączenie processingu na stacji
 1. W **Edycja stacji** → sekcja **Processing** włącz przełącznik, wybierz preset z listy (albo **Wgraj preset…**) i wpisz klucz licencji (albo zostaw puste pole, gdy jest klucz domyślny).
 2. **Zapisz stację.** Strumienie stacji nadają dalej bez przerwy: najpierw bez processingu, a po około 1–2 s (uruchomienie Stereo Tool i sprawdzenie licencji) z processingiem, z płynnym przejściem.
-3. Przy starcie processingu wysyłanie do strumieni zatrzymuje się jednorazowo na czas opóźnienia Stereo Tool (około 90 ms): nic nie jest wycinane ani wstawiane, dźwięk dociera do serwera o tyle później. Słuchacze tego nie słyszą (odtwarzacze mają własny bufor). Odtąd cała stacja ma to opóźnienie (pole **Opóźnienie**, zwykle około 90 ms).
+3. Uruchomienie Stereo Tool trwa około 1 s na stację, a stacje uruchamiają go jedna po drugiej. Po starcie usługi z wieloma stacjami z processingiem ostatnia dostaje processing po kilkunastu sekundach (np. przy 16 stacjach po około 16 s); do tego czasu każda nadaje bez processingu.
+4. Przy starcie processingu wysyłanie do strumieni zatrzymuje się jednorazowo na czas opóźnienia Stereo Tool (około 90 ms): nic nie jest wycinane ani wstawiane, dźwięk dociera do serwera o tyle później. Słuchacze tego nie słyszą (odtwarzacze mają własny bufor). Odtąd cała stacja ma to opóźnienie (pole **Opóźnienie**, zwykle około 90 ms).
 
 Zmiana presetu w działającej stacji: płynne przejście na sygnał bez processingu, wczytanie presetu, sprawdzenie licencji i płynny powrót (około 1 s). Zmiana klucza albo portu interfejsu WWW uruchamia Stereo Tool stacji od nowa (kilka sekund bez processingu). Wyłączenie processingu: płynne przejście na sygnał bez processingu.
 
@@ -294,7 +295,7 @@ Stan widać w edycji stacji (pola **Stan**, **Procesor**, **Opóźnienie**, **In
 | Stan | Znaczenie | Co zrobić |
 |---|---|---|
 | działa · CPU N % | Stereo Tool przetwarza sygnał stacji. CPU to czas pracy Stereo Tool w stosunku do czasu dźwięku (100 % = jeden rdzeń) | — |
-| uruchamianie… | Stereo Tool się uruchamia (około 1 s), stacja nadaje bez processingu | — |
+| uruchamianie… | Stereo Tool się uruchamia (około 1 s; po starcie usługi stacje po kolei, więc ostatnia może czekać kilkanaście sekund), stacja nadaje bez processingu | — |
 | sprawdzanie licencji… | pierwsze 0,5 s dźwięku przez Stereo Tool, na antenie jeszcze bez processingu | — |
 | zapis presetu… | trwa **Zapisz jako preset…** | — |
 | nie nadąża · ponowna próba za … | Stereo Tool zalega ponad 200 ms (przeciążony procesor albo zbyt ciężki preset); stacja nadaje bez processingu | Bounce Encoder sam próbuje ponownie po 30 s, potem po 2, 5 i dalej co 10 min; po 10 min pracy bez problemu licznik prób zaczyna się od nowa. Sprawdź obciążenie procesora (niżej) |
@@ -308,22 +309,21 @@ Stan widać w edycji stacji (pola **Stan**, **Procesor**, **Opóźnienie**, **In
 Nagłówek sekcji Processing pokazuje wersję biblioteki („Stereo Tool 11.07”) albo przyczynę, dla której jest niedostępna.
 
 ### Procesor i pamięć
-Stereo Tool jest ciężki: każda stacja z processingiem to osobna instancja Stereo Tool, która zajmuje **około 600 MB pamięci** i, zależnie od presetu, **do jednego rdzenia procesora**. Utrzymuj obciążenie całego procesora (Menedżer zadań) **poniżej 50 %**, żeby chwilowe skoki (inne programy, aktualizacje Windows) nie spowodowały stanu „nie nadąża”.
+Stereo Tool jest ciężki: każda stacja z processingiem to osobna instancja Stereo Tool, która zajmuje **około 600 MB pamięci** i **jeden rdzeń procesora**. Do tego jeden rdzeń na odbiór AES67, kodeki i wysyłanie. Utrzymuj obciążenie całego procesora (Menedżer zadań) **najwyżej na 50 %**, żeby chwilowe skoki (inne programy, aktualizacje Windows) nie spowodowały stanu „nie nadąża”.
 
-Orientacyjnie (obok Stereo Tool zostaje miejsce na kodeki, odbiór AES67 i system):
+Szacunek (1 rdzeń i około 600 MB na instancję Stereo Tool, 1 rdzeń na wejścia i wyjścia, procesor obciążony najwyżej w połowie):
 
-| Stacje z processingiem | Procesor (rdzenie fizyczne, współczesne, np. Intel Core i5/i7 12. generacji i nowsze) | Pamięć RAM |
+| Stacje z processingiem | Procesor | Pamięć RAM |
 |---|---|---|
-| 1–2 | 4 rdzenie | 8 GB |
-| 3–4 | 8 rdzeni | 16 GB |
-| 5–8 | 16 rdzeni | 16 GB (lepiej 32 GB) |
-| 9–16 | 24–32 rdzenie (stacja robocza albo serwer) | 32 GB |
+| 4 | około 10–12 rdzeni | 16 GB |
+| 8 | około 18–20 rdzeni | 32 GB |
+| 16 | około 34–36 rdzeni | 32–64 GB, albo dwa komputery po 8 stacji |
 
-To szacunek: ciężkie presety (np. declipper, wielopasmowe kompresory z dużą liczbą pasm) potrzebują więcej. Przed pracą na antenie zmierz obciążenie na docelowym komputerze z docelową liczbą stacji (TESTY.md) i plan zasilania ustaw na „Wysoka wydajność” (rozdział 12).
+Jedna instancja Stereo Tool pracuje na jednym rdzeniu, więc **szybkość pojedynczego rdzenia jest ważniejsza niż liczba rdzeni**: lepiej sprawdzają się procesory z wysokim taktowaniem (np. stacjonarne). To szacunek: zużycie zależy od presetu. Przed pracą na antenie zmierz obciążenie na docelowym komputerze z docelowymi presetami i liczbą stacji (panel pokazuje CPU każdej stacji, TESTY.md) i plan zasilania ustaw na „Wysoka wydajność” (rozdział 12).
 
 ### Identyfikatory stacji i porty
 - Nowa stacja zawsze dostaje nowy identyfikator (`s1`, `s2`, …), nigdy identyfikator usuniętej stacji, więc nie przejmie jej plików Stereo Tool (`stereotool\station-<id>\`, usuwane razem ze stacją).
-- Porty interfejsów WWW: port bazowy + numer stacji (0–15), domyślnie 8100–8115, tylko na `127.0.0.1`. Nie mogą obejmować portu panelu. Reguła zapory instalatora ich nie otwiera (i tak są osiągalne tylko z tego komputera).
+- Porty interfejsów WWW: port bazowy + numer stacji (0–15), domyślnie 8100–8115. Nie mogą obejmować portu panelu. Reguła zapory instalatora dotyczy całego programu `BounceEncoder.exe`, więc nie ogranicza tych portów; interfejsy są osiągalne tylko z tego komputera, bo nasłuchują wyłącznie na `127.0.0.1`.
 
 ## 11. Statystyki i logi
 
@@ -373,6 +373,8 @@ Uruchomienie usługi w oknie konsoli (do diagnostyki, po zatrzymaniu usługi Win
 
 Windows czeka na zatrzymanie usługi do 10 s. Jeśli przy zatrzymaniu pojawia się błąd przekroczenia czasu, zapisz, ile trwało, i dołącz log (TESTY.md, rozdział 3).
 
+Przy zatrzymaniu usługi ze stacjami z processingiem log ma wpis „Processing: instancje Stereo Tool (N) nie są usuwane przy zatrzymaniu usługi; pamięć zwalnia zakończenie procesu”. To zamierzone: usuwanie instancji Stereo Tool trwa około sekundy każda, a zakończenie procesu i tak zwalnia ich pamięć, więc usługa zatrzymuje się szybko. Wpis „Stereo Tool nie zakończył pracy w ciągu … s” znaczy, że Stereo Tool zawiesił się w wywołaniu (dołącz log do zgłoszenia).
+
 ## 14. Znane ograniczenia
 
 - **Panel tylko w zaufanej sieci.** Biblioteka HTTP panelu czyta bardzo długie pierwsze wiersze żądań w całości, zanim sprawdzi logowanie. Komputer z dostępem do portu panelu może w ten sposób zająć dużo pamięci usługi. Ustaw adres panelu na kartę sieci administracyjnej albo `127.0.0.1` (rozdział 4) i nie wystawiaj portu 8070 do internetu (z zewnątrz tylko przez odwrotne proxy z HTTPS i własnym uwierzytelnieniem). Poprawka przyjdzie z aktualizacją biblioteki, wspólną dla BounceAES Master i Bounce Encoder.
@@ -419,4 +421,4 @@ Pełne teksty licencji i nota Stereo Tool (`StereoTool-NOTICE.txt`) są w folder
 
 **Podpisywanie plików:** jak w BounceAES Master (INSTALL.md, rozdział 11): `installer\sign.ps1 -Path <folder>` podpisuje pliki `.exe` i `.dll` (także biblioteki kodeków) i instalator własnym certyfikatem firmy. Pomija `libStereoTool_64.dll`: to plik Thimeo i zostaje dokładnie taki, jak go wydał producent (jego SHA-256 jest w `licencje\StereoTool-NOTICE.txt`). Nigdy nie używaj certyfikatu ani nazwy innego producenta.
 
-**Budowanie ze źródeł** (README.md, rozdział o kompilacji): konfiguracja 64-bitowego buildu z kodekami pobiera archiwa źródeł LAME, fdk-aac, libogg i libFLAC (sourceforge.net, github.com, xiph.org, sprawdzane po SHA-256), więc potrzebuje dostępu do sieci, chyba że kodeki są wyłączone (`-DBAM_WITH_CODECS=OFF`, wtedy bez Bounce Encodera). `-DBAM_CODEC_CACHE=<folder>` zachowuje archiwa i przy kolejnych konfiguracjach używa ich bez sieci. Buildy 64-bitowe pobierają też SDK Stereo Tool (około 360 MB, z download.thimeo.com, sprawdzane po SHA-256; `-DBAM_STEREOTOOL_SDK_ZIP=<plik>` używa zapisanej kopii, `-DBAM_WITH_STEREOTOOL=OFF` buduje bez Stereo Tool). Adres Thimeo nie zawiera wersji: gdy pojawi się nowsza wersja, pobranie nie zgodzi się z sumą i konfiguracja powie, co zrobić (zachowaj kopię archiwum 11.07).
+**Budowanie ze źródeł** (README.md, rozdział o kompilacji): konfiguracja 64-bitowego buildu z kodekami pobiera archiwa źródeł LAME, fdk-aac, libogg i libFLAC (sourceforge.net, github.com, xiph.org, sprawdzane po SHA-256), więc potrzebuje dostępu do sieci, chyba że kodeki są wyłączone (`-DBAM_WITH_CODECS=OFF`, wtedy bez Bounce Encodera). `-DBAM_CODEC_CACHE=<folder>` zachowuje archiwa i przy kolejnych konfiguracjach używa ich bez sieci. Buildy 64-bitowe pobierają też SDK Stereo Tool (około 360 MB, z download.thimeo.com, sprawdzane po SHA-256; `-DBAM_STEREOTOOL_SDK_ZIP=<plik>` używa zapisanej kopii, `-DBAM_STEREOTOOL_CACHE=<folder>` trzyma pobrane archiwum i przy kolejnych konfiguracjach bierze je stamtąd, `-DBAM_WITH_STEREOTOOL=OFF` buduje bez Stereo Tool). Adres Thimeo nie zawiera wersji: gdy pojawi się nowsza wersja, pobranie nie zgodzi się z sumą i konfiguracja powie, co zrobić (zachowaj kopię archiwum 11.07).

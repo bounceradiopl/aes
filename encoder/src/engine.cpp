@@ -659,6 +659,12 @@ void EncoderEngine::Impl::shutdown() {
     for (auto& [sid, w] : rt->streams) workers.push_back(w);
     if (rt->proc.worker) processing.push_back(rt->proc.worker);
   }
+  if (opts.keep_stereotool_at_stop && !processing.empty()) {
+    // ruling S7: the process ends next; deleting instance after instance would outlast the stop
+    for (auto& w : processing) w->keep_instance_at_stop();
+    log_info("Processing: instancje Stereo Tool (" + std::to_string(processing.size()) +
+             ") nie są usuwane przy zatrzymaniu usługi; pamięć zwalnia zakończenie procesu");
+  }
   // side by side: a Stereo Tool that hangs (e.g. in Delete after another instance crashed) holds
   // the stop for its timeout once, not once per station
   std::thread stop_processing([&] { stop_workers(std::move(processing)); });

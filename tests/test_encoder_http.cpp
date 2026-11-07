@@ -2130,8 +2130,14 @@ TEST_CASE("encoder HTTP: an id the client gives never reuses a deleted id or an 
   r = f.post("/api/stations", station_json("Za nia", false, "haslo-j", "/j.mp3"));
   CHECK(r->status == 400);
   CHECK_MESSAGE(r->body.find("za duży numer") != std::string::npos, r->body);
-  // and what to do about it (the panel shows the message as it is)
+  // and what to do about it (the panel shows the message as it is), naming the station that holds
+  // the largest number and its Stereo Tool folder left behind by a new id
   CHECK_MESSAGE(r->body.find("next_station_number") != std::string::npos, r->body);
+  CHECK_MESSAGE(json::parse(r->body)["error"].get<std::string>().find("„Najwieksza” z ręcznie nadanym identyfikatorem „s99999999999999999”") !=
+                    std::string::npos,
+                r->body);
+  CHECK_MESSAGE(json::parse(r->body)["error"].get<std::string>().find("stereotool\\station-s99999999999999999") != std::string::npos,
+                r->body);
   cfg = f.get("/api/config");
   cfg["stations"] = json::array({station_json("Zamiast", false, "haslo-k", "/k.mp3")});  // drops it, adds one
   r = f.put("/api/config", cfg);

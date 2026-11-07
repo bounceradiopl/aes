@@ -119,6 +119,7 @@ struct ProcessingWorker::Core {
   std::atomic<int> licence{-1};  // the last check: -1 none yet, 0 invalid, 1 valid
   std::atomic<int> web_port_active{0};  // the instance is up with its web interface on this port
   std::atomic<bool> side_busy{false};   // a save is under way (the output thread waits without bypassing)
+  std::atomic<bool> keep_instance{false};  // keep_instance_at_stop(): no stereoTool_Delete when it ends
   // the save under way was given up by its caller after this many ms (0: not given up / none)
   std::atomic<int> save_overdue_ms{0};
   mutable std::mutex text_m;
@@ -365,8 +366,10 @@ void st_main(std::shared_ptr<Core> c) {
     }
     c->cv.notify_all();
   }
-  drop_instance(*c);  // stereoTool_Delete on this thread (it may hang after a crash: stop() does not wait for ever)
-  c->gone->store(true);  // its web interface port is free for the next instance
+  const bool keep = c->keep_instance.load() && c->st;
+  if (keep) c->st->leave_to_process_exit();  // ruling S7: the end of the process frees it
+  drop_instance(*c);  // else stereoTool_Delete on this thread (it may hang after a crash: stop() does not wait for ever)
+  if (!keep) c->gone->store(true);  // its web interface port is free for the next instance
   {
     std::lock_guard lock(c->m);
     c->finished = true;
@@ -440,6 +443,8 @@ void ProcessingWorker::set_preset(std::string sts_path) {
   }
   preset_change_.store(true);
 }
+
+void ProcessingWorker::keep_instance_at_stop() { core_->keep_instance.store(true); }
 
 void ProcessingWorker::set_station_name(std::string name) {
   std::lock_guard lock(core_->text_m);

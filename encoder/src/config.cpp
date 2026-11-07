@@ -449,13 +449,29 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
     } else if (!valid_id(st.id)) {
       add(sp + ".id", label + "nieprawidłowy identyfikator „" + st.id + "” (dozwolone litery, cyfry, „-” i „_”, najwyżej 32 znaki)");
     } else if (station_number(st.id) >= kMaxStationNumber) {
-      // also what a new station gets once a hand-made id took the largest number: say how out
+      // also what a new station gets once a hand-made id took the largest number: name the station
+      // with the largest valid number (the cause) and say how out
+      std::string way_out;
+      size_t largest = c.stations.size();
+      for (size_t j = 0; j < c.stations.size(); ++j) {
+        const int64_t n = station_number(c.stations[j].id);
+        if (j != i && n > 0 && n < kMaxStationNumber &&
+            (largest == c.stations.size() || n > station_number(c.stations[largest].id)))
+          largest = j;
+      }
+      if (largest < c.stations.size()) {
+        const StationConfig& big = c.stations[largest];
+        way_out = "numery stacji skończyły się przez " + station_ref(big, largest) + " z ręcznie nadanym identyfikatorem „" +
+                  big.id + "”: zatrzymaj usługę, w config.json zmień jej identyfikator na mniejszy (np. „s100”; jej folder "
+                  "stereotool\\station-" + big.id + " zostaje wtedy niepotrzebny i można go usunąć), ustaw "
+                  "„next_station_number” na największy numer stacji + 1 i uruchom usługę";
+      } else {
+        way_out = "numery stacji skończyły się przez ręcznie nadany bardzo duży numer (tej stacji już nie ma): zatrzymaj "
+                  "usługę, w config.json ustaw „next_station_number” na największy numer stacji + 1 i uruchom usługę";
+      }
       add(sp + ".id", label + "identyfikator „" + st.id + "” ma za duży numer (najwyżej " +
                           std::to_string(kMaxStationNumber - 1) +
-                          "): nadaj stacji inny identyfikator. Jeśli to nowa stacja dodana w panelu, numery stacji "
-                          "skończyły się przez ręcznie nadany bardzo duży numer: zatrzymaj usługę, w config.json "
-                          "zmień identyfikator tej stacji na mniejszy (np. „s100”), ustaw „next_station_number” na "
-                          "największy numer stacji + 1 i uruchom usługę");
+                          "): nadaj stacji inny identyfikator. Jeśli to nowa stacja dodana w panelu, " + way_out);
     } else if (auto [it, inserted] = station_ids.emplace(ascii_lower(st.id), i); !inserted) {
       const bool other_case = c.stations[it->second].id != st.id;
       add(sp + ".id", label + "identyfikator „" + st.id + "” jest już używany przez " + station_ref(c.stations[it->second], it->second) +

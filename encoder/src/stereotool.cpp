@@ -404,7 +404,7 @@ std::unique_ptr<StereoToolInstance> StereoToolInstance::create(const std::string
 }
 
 StereoToolInstance::~StereoToolInstance() {
-  if (!st_ || abandoned_) return;
+  if (!st_ || abandoned_ || left_) return;
   // also after a C++ exception: the library unwound in order, so its ports and memory are freed
   std::string reason;
   auto destroy = [&] { api_->destroy(st_); };

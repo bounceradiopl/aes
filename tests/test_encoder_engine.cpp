@@ -1913,6 +1913,45 @@ TEST_CASE("encoder engine: a preset uploaded after the station asked for it star
   CHECK(fake().text("load_path") == std::optional<std::string>((fs::path(dir.presets()) / "late.STS").string()));
 }
 
+TEST_CASE("encoder engine: at the end of the service Stereo Tool instances are not deleted, a removed station's is (ruling S7)") {
+  UseFake use;
+  StDir dir("exit");
+  struct DropLive {
+    ~DropLive() { fake().drop_live(); }  // the end of the process, for the tests that follow
+  } drop;
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  for (int i = 1; i <= 3; ++i) {
+    be::StationConfig st = station("s" + std::to_string(i), "Radio Koniec " + std::to_string(i));
+    st.processing = processing("P.sts", i == 1 ? kKey1 : kKey2);
+    cfg.stations.push_back(st);
+  }
+  cfg = ready(cfg);
+  be::EncoderEngineOptions opts = st_options(dir);
+  opts.keep_stereotool_at_stop = true;
+  be::EncoderEngine engine(opts);
+  REQUIRE(engine.put_preset("P.sts", fake_preset(0.5, 64)).ok());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  for (const char* id : {"s1", "s2", "s3"}) REQUIRE(processing_running(engine, id));
+  REQUIRE(fake().value("live") == 3);
+  fake().set("delete_sleep_us", 1'000'000);  // like the real library: deleting takes a while
+  // a station removed while the service runs: its instance is deleted
+  be::EncoderConfig fewer = cfg;
+  fewer.stations.pop_back();
+  engine.apply_config(fewer);
+  CHECK(wait_for([] { return fake().value("deleted") == 1; }, 5000));
+  CHECK(fake().value("live") == 2);
+  // the end of the service: no Delete, and no waiting for one
+  const int64_t t0 = bp::monotonic_ns();
+  engine.stop();
+  const int64_t took = bp::monotonic_ns() - t0;
+  CHECK_MESSAGE(took < 900'000'000, "stop took " << took / 1'000'000 << " ms");
+  CHECK(fake().value("delete_calls") == 1);
+  CHECK(fake().value("live") == 2);
+  CHECK(logged("instancje Stereo Tool (2) nie są usuwane przy zatrzymaniu usługi"));
+}
+
 TEST_CASE("encoder engine: the status does not wait for the Stereo Tool library to load") {
   UseFake use;
   StDir dir("loading");

@@ -14,7 +14,8 @@
 //   violation, a structured exception), process_sleep_us 0, create_sleep_us 0 (inside Create3),
 //   version_crashes 0 / bind_crashes 0 (Windows: an access violation in GetSoftwareVersion /
 //   global_setBindIp), save_fails 0, sts_rejects -1 (the .sts index SetStsValue refuses),
-//   save_sleep_us 0 (inside SavePreset), version_sleep_us 0 (inside GetSoftwareVersion: a slow load).
+//   save_sleep_us 0 (inside SavePreset), version_sleep_us 0 (inside GetSoftwareVersion: a slow load),
+//   delete_sleep_us 0 (inside Delete: the real one takes about 0.5-1.2 s).
 // A manual run can set options through the environment (BAM_FAKE_STEREOTOOL_OPTIONS, see State).
 #include <chrono>
 #include <cstdint>
@@ -27,6 +28,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -60,11 +62,16 @@ namespace {
 constexpr int kWebserverEnable = bam::encoder::detail::st::kParamWebserverEnable;
 constexpr int kWebserverPort = bam::encoder::detail::st::kParamWebserverPort;
 
+// Process, CheckLicenseValid and GetLatency2 allocate nothing once their counters exist (the first
+// call creates them): on Linux the tests' operator new also serves this library (one global
+// namespace of symbols), and "processing: no allocation per block ..." counts every allocation on
+// the Stereo Tool thread. So the maps compare transparently (a lookup by name builds no
+// std::string: libstdc++ keeps only 15 characters in place, "process_sleep_us" has 16).
 struct State {
   std::mutex mutex;
-  std::map<std::string, double> options;
-  std::map<std::string, long long> values;   // counters and recorded numbers
-  std::map<std::string, std::string> texts;  // recorded strings (absent: not recorded / NULL)
+  std::map<std::string, double, std::less<>> options;
+  std::map<std::string, long long, std::less<>> values;   // counters and recorded numbers
+  std::map<std::string, std::string, std::less<>> texts;  // recorded strings (absent: not recorded / NULL)
   std::vector<gStereoTool*> live;            // instances not deleted yet
 
   void defaults() {
@@ -73,7 +80,7 @@ struct State {
                {"process_throws", 0},  {"process_crashes", 0}, {"process_sleep_us", 0},
                {"create_sleep_us", 0}, {"version_crashes", 0}, {"bind_crashes", 0},
                {"save_fails", 0},      {"sts_rejects", -1},    {"save_sleep_us", 0},
-               {"version_sleep_us", 0}};
+               {"version_sleep_us", 0}, {"delete_sleep_us", 0}};
     values.clear();
     texts.clear();
   }
@@ -104,9 +111,15 @@ struct State {
       options[name] = value;
     }
   }
-  double opt(const char* name) {
+  double opt(std::string_view name) {
     auto it = options.find(name);
     return it == options.end() ? 0.0 : it->second;
+  }
+  // The counter or recorded number `name`, created (0) on first use.
+  long long& value(std::string_view name) {
+    auto it = values.find(name);
+    if (it == values.end()) it = values.emplace(std::string(name), 0).first;
+    return it->second;
   }
   void text(const char* what, const char* value) {
     if (value)
@@ -144,8 +157,8 @@ FAKE_ST_EXPORT void stereoTool_global_setBindIp(const char* web, const char* uec
   bool crashes = false;
   {
     std::lock_guard<std::mutex> lock(s.mutex);
-    ++s.values["bind_calls"];
-    s.values["bind_create_calls"] = s.values["create_calls"];  // Create3 calls (since reset) before it
+    ++s.value("bind_calls");
+    s.value("bind_create_calls") = s.value("create_calls");  // Create3 calls (since reset) before it
     s.text("bind_web", web);
     s.text("bind_uecp", uecp);
     crashes = s.opt("bind_crashes") != 0;
@@ -160,7 +173,7 @@ FAKE_ST_EXPORT int stereoTool_GetSoftwareVersion() {
   long long sleep_us = 0;
   {
     std::lock_guard<std::mutex> lock(s.mutex);
-    ++s.values["version_calls"];
+    ++s.value("version_calls");
     version = int(s.opt("version"));
     crashes = s.opt("version_crashes") != 0;
     sleep_us = (long long)s.opt("version_sleep_us");
@@ -177,9 +190,9 @@ FAKE_ST_EXPORT gStereoTool* stereoTool_Create3(const bool has_gui, const char* k
   long long sleep_us = 0;
   {
     std::lock_guard<std::mutex> lock(s.mutex);
-    ++s.values["create_calls"];
-    s.values["create_has_gui"] = has_gui;
-    s.values["create_load_ini"] = load_ini;
+    ++s.value("create_calls");
+    s.value("create_has_gui") = has_gui;
+    s.value("create_load_ini") = load_ini;
     s.text("create_key", key);
     s.text("create_name", st_name);
     s.text("create_home", home_path);
@@ -198,21 +211,28 @@ FAKE_ST_EXPORT gStereoTool* stereoTool_Create3(const bool has_gui, const char* k
   st->sts[kWebserverEnable] = "0";
   st->sts[kWebserverPort] = "8080";
   s.live.push_back(st);
-  ++s.values["created"];
+  ++s.value("created");
   return st;
 }
 
 FAKE_ST_EXPORT void stereoTool_Delete(gStereoTool* st) {
   auto& s = state();
+  long long sleep_us = 0;
+  {
+    std::lock_guard<std::mutex> lock(s.mutex);
+    ++s.value("delete_calls");
+    sleep_us = (long long)s.opt("delete_sleep_us");
+  }
+  if (sleep_us > 0) std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
   std::lock_guard<std::mutex> lock(s.mutex);
   for (auto it = s.live.begin(); it != s.live.end(); ++it)
     if (*it == st) {
       s.live.erase(it);
-      ++s.values["deleted"];
+      ++s.value("deleted");
       delete st;
       return;
     }
-  ++s.values["delete_unknown"];  // not an instance of ours (or deleted twice)
+  ++s.value("delete_unknown");  // not an instance of ours (or deleted twice)
 }
 
 FAKE_ST_EXPORT void stereoTool_Process(gStereoTool* st, float* samples, int32_t numsamples, int32_t channels,
@@ -222,10 +242,10 @@ FAKE_ST_EXPORT void stereoTool_Process(gStereoTool* st, float* samples, int32_t 
   bool throws = false, crashes = false;
   {
     std::lock_guard<std::mutex> lock(s.mutex);
-    ++s.values["process_calls"];
-    s.values["process_frames"] += numsamples;
-    s.values["process_channels"] = channels;
-    s.values["process_rate"] = samplerate;
+    ++s.value("process_calls");
+    s.value("process_frames") += numsamples;
+    s.value("process_channels") = channels;
+    s.value("process_rate") = samplerate;
     throws = s.opt("process_throws") != 0;
     crashes = s.opt("process_crashes") != 0;
     sleep_us = (long long)s.opt("process_sleep_us");
@@ -254,9 +274,9 @@ FAKE_ST_EXPORT void stereoTool_Process(gStereoTool* st, float* samples, int32_t 
 FAKE_ST_EXPORT int stereoTool_GetLatency2(gStereoTool* st, int32_t samplerate, bool feed_silence) {
   auto& s = state();
   std::lock_guard<std::mutex> lock(s.mutex);
-  ++s.values["latency_calls"];
-  s.values["latency_rate"] = samplerate;
-  s.values["latency_feed_silence"] = feed_silence;
+  ++s.value("latency_calls");
+  s.value("latency_rate") = samplerate;
+  s.value("latency_feed_silence") = feed_silence;
   return st->latency;
 }
 
@@ -265,8 +285,8 @@ FAKE_ST_EXPORT int stereoTool_GetLatency2(gStereoTool* st, int32_t samplerate, b
 FAKE_ST_EXPORT bool stereoTool_LoadPreset(gStereoTool* st, const char* filename, int loadsave_type) {
   auto& s = state();
   std::lock_guard<std::mutex> lock(s.mutex);
-  ++s.values["load_calls"];
-  s.values["load_type"] = loadsave_type;
+  ++s.value("load_calls");
+  s.value("load_type") = loadsave_type;
   s.text("load_path", filename);
   std::ifstream f(filename ? filename : "", std::ios::binary);
   std::string line;
@@ -294,8 +314,8 @@ FAKE_ST_EXPORT bool stereoTool_SavePreset(gStereoTool* st, const char* filename,
   }
   if (sleep_us > 0) std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
   std::lock_guard<std::mutex> lock(s.mutex);
-  ++s.values["save_calls"];
-  s.values["save_type"] = loadsave_type;
+  ++s.value("save_calls");
+  s.value("save_type") = loadsave_type;
   s.text("save_path", filename);
   if (s.opt("save_fails") != 0) return false;
   std::ofstream f(filename ? filename : "", std::ios::binary | std::ios::trunc);
@@ -309,7 +329,7 @@ FAKE_ST_EXPORT bool stereoTool_SavePreset(gStereoTool* st, const char* filename,
 FAKE_ST_EXPORT bool stereoTool_SetStsValue(gStereoTool* st, int index, int subindex, const char* value) {
   auto& s = state();
   std::lock_guard<std::mutex> lock(s.mutex);
-  ++s.values["sts_set_calls"];
+  ++s.value("sts_set_calls");
   if (subindex != 0 || !value || index == int(s.opt("sts_rejects"))) return false;
   st->sts[index] = value;
   // a web interface port is one socket: two live instances serving on it is a conflict
@@ -319,14 +339,14 @@ FAKE_ST_EXPORT bool stereoTool_SetStsValue(gStereoTool* st, int index, int subin
   };
   if (serving(st))
     for (const gStereoTool* other : s.live)
-      if (other != st && serving(other) && other->sts.at(kWebserverPort) == st->sts.at(kWebserverPort)) ++s.values["port_conflicts"];
+      if (other != st && serving(other) && other->sts.at(kWebserverPort) == st->sts.at(kWebserverPort)) ++s.value("port_conflicts");
   return true;
 }
 
 FAKE_ST_EXPORT bool stereoTool_CheckLicenseValid(gStereoTool*) {
   auto& s = state();
   std::lock_guard<std::mutex> lock(s.mutex);
-  ++s.values["license_calls"];
+  ++s.value("license_calls");
   return s.opt("license_valid") != 0;
 }
 
@@ -354,6 +374,17 @@ FAKE_ST_EXPORT void fake_stereotool_set(const char* option, double value) {
   auto& s = state();
   std::lock_guard<std::mutex> lock(s.mutex);
   s.options[option] = value;
+}
+
+// Deletes the instances still live (left to the end of the process by the binding, ruling S7):
+// the tests' stand-in for that end. Returns how many there were.
+FAKE_ST_EXPORT long long fake_stereotool_drop_live() {
+  auto& s = state();
+  std::lock_guard<std::mutex> lock(s.mutex);
+  const long long n = (long long)s.live.size();
+  for (gStereoTool* st : s.live) delete st;
+  s.live.clear();
+  return n;
 }
 
 // Counters ("created", "deleted", "process_calls", "bind_calls", "port_conflicts": an instance

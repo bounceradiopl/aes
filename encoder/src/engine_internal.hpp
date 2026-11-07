@@ -373,6 +373,10 @@ class ProcessingWorker {
   // Stops both threads; waits for the Stereo Tool thread at most the stop timeout (a call stuck
   // in the library leaves that thread behind, logged). Idempotent.
   void stop();
+  // Before stop() when the process ends next (ruling S7): the Stereo Tool thread lets go of its
+  // instance without deleting it (StereoToolInstance::leave_to_process_exit), so the stop does not
+  // wait for stereoTool_Delete. instance_gone() is then never set (the instance keeps its port).
+  void keep_instance_at_stop();
 
   struct Core;  // shared with the Stereo Tool thread, which may outlive the worker (stop())
 

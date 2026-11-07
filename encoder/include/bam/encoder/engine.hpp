@@ -47,6 +47,11 @@ struct EncoderEngineOptions {
   // processing then reports an error and runs unprocessed).
   std::string stereotool_dir;
   bool protect_stereotool_dir = false;  // create its folders with the admin-only ACL (data_dir.hpp)
+  // Ruling S7: stop() comes right before the process ends (the service), so it leaves the Stereo
+  // Tool instances to the end of the process instead of deleting them: stereoTool_Delete takes
+  // about 0.5-1.2 s per instance, one after another, which with many stations would outlast the
+  // Windows stop wait. A station removed or switched off while running is still deleted.
+  bool keep_stereotool_at_stop = false;
 };
 
 struct InputStatus {
