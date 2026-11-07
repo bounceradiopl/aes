@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "bam/http/guard.hpp"
 
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstring>
@@ -66,6 +67,52 @@ bool is_json_type(const std::string& value) {
     pos = next;
   }
   return true;
+}
+
+std::string json_shape_error(std::string_view text) {
+  size_t depth = 0, containers = 0, values = 0;
+  std::array<size_t, kMaxJsonDepth + 1> members{};  // members of the open object at each depth
+  bool in_string = false, escaped = false;
+  for (const char ch : text) {
+    if (in_string) {
+      if (escaped) escaped = false;
+      else if (ch == '\\') escaped = true;
+      else if (ch == '"') in_string = false;
+      continue;
+    }
+    if (ch == '"') {
+      in_string = true;
+    } else if (ch == '[' || ch == '{') {
+      if (++depth > kMaxJsonDepth)
+        return "JSON w treści żądania jest zbyt zagnieżdżony (najwyżej " + std::to_string(kMaxJsonDepth) + " poziomów)";
+      if (++containers > kMaxJsonContainers)
+        return "JSON w treści żądania ma zbyt wiele obiektów i tablic (najwyżej " + std::to_string(kMaxJsonContainers) + ")";
+      members[depth] = 0;
+    } else if ((ch == ']' || ch == '}') && depth > 0) {
+      --depth;  // a malformed body may close more than it opened: the parser refuses it
+    } else if (ch == ',' || ch == ':') {
+      // each separates or names a value: a flat list or a wide object costs memory, and an object
+      // with many keys is parsed in quadratic time (nlohmann::ordered_json looks every key up)
+      if (++values > kMaxJsonValues)
+        return "JSON w treści żądania ma zbyt wiele wartości (najwyżej " + std::to_string(kMaxJsonValues) + ")";
+      if (ch == ':' && ++members[depth] > kMaxJsonMembers)
+        return "obiekt w treści żądania ma zbyt wiele pól (najwyżej " + std::to_string(kMaxJsonMembers) + ")";
+    }
+  }
+  return {};
+}
+
+std::optional<nlohmann::ordered_json> parse_json_body(const httplib::Request& req, httplib::Response& res) {
+  if (const std::string why = json_shape_error(req.body); !why.empty()) {
+    send_error(res, 400, why);
+    return std::nullopt;
+  }
+  try {
+    return nlohmann::ordered_json::parse(req.body);
+  } catch (const std::exception&) {
+    send_error(res, 400, "nieprawidłowy JSON w treści żądania");
+    return std::nullopt;
+  }
 }
 
 // The request allowlist, checked on the headers before httplib reads anything else: only what
