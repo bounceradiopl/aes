@@ -131,6 +131,16 @@ std::string PresetStore::station_home(const std::string& station_id, std::string
   return home;
 }
 
+bool PresetStore::remove_station_home(const std::string& station_id, std::string* error) {
+  if (root_.empty() || station_id.empty()) return true;
+  const std::string home = join(root_, kStationHomePrefix + station_id);
+  std::lock_guard lock(m_);
+  std::error_code ec;
+  fs::remove_all(fs_path(home), ec);
+  if (ec && error) *error = "nie udało się usunąć folderu " + home + ": " + ec.message();
+  return !ec;
+}
+
 std::string PresetStore::find_locked(std::string_view name) const {
   if (root_.empty() || !valid_preset_name(name)) return {};
   for (const auto& [stored, bytes] : scan(presets_dir()))

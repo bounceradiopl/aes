@@ -41,8 +41,11 @@ constexpr size_t kMaxSdpBytes = 64 * 1024;
 constexpr size_t kParseLimitFactor = 4;
 constexpr const char* kStationIdPrefix = "s";
 // next_station_number is kept at most here: a counter edited by hand cannot overflow the numbering
-// (more than 16 stations are never given ids in one configuration anyway)
-constexpr int kMaxStationNumber = 1'000'000'000;
+// (more than 16 stations are never given ids in one configuration anyway). Every number up to it
+// (and the few given past it) has at most kMaxStationDigits digits, all of which station_number
+// reads, so no id the numbering gives is ever overlooked.
+constexpr int64_t kMaxStationNumber = 100'000'000'000'000'000LL;  // 10^17
+constexpr size_t kMaxStationDigits = 18;
 constexpr const char* kStreamIdPrefix = "str";
 
 // ---- labels for the messages ----
@@ -115,11 +118,7 @@ bool valid_mount(std::string_view m) {
   return true;
 }
 
-std::string lower(std::string s) {
-  for (auto& ch : s)
-    if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
-  return s;
-}
+std::string lower(std::string s) { return ascii_lower(s); }
 
 bool same_server(const StreamConfig& a, const StreamConfig& b) { return a.port == b.port && lower(a.host) == lower(b.host); }
 
@@ -144,13 +143,6 @@ std::string key_shape_error(std::string_view key) {
   return {};
 }
 
-// ASCII lower case (ids are ASCII): ids that differ only in case are the same folder on Windows.
-std::string ascii_lower(std::string s) {
-  for (char& ch : s)
-    if (ch >= 'A' && ch <= 'Z') ch = char(ch - 'A' + 'a');
-  return s;
-}
-
 bool is_alnum(char ch) { return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'); }
 
 bool in_gain_range(double db) { return db >= kGainMinDb && db <= kGainMaxDb; }
@@ -159,7 +151,7 @@ double round_to(double v, double step) { return std::round(v / step) * step; }
 
 // The smallest "<prefix><n>" with n >= from not in `used`; it is added to `used` and `from` moves
 // past it, so assigning k ids costs O((k + |used|) log |used|) in total, not a rescan from 1 each.
-std::string next_id(const char* prefix, std::set<std::string>& used, int& from) {
+std::string next_id(const char* prefix, std::set<std::string>& used, int64_t& from) {
   for (;; ++from) {
     std::string id = prefix + std::to_string(from);
     if (used.insert(id).second) {
@@ -289,6 +281,12 @@ json to_json(const EncoderConfig& c, bool api) {
 }
 
 }  // namespace
+
+std::string ascii_lower(std::string s) {
+  for (char& ch : s)
+    if (ch >= 'A' && ch <= 'Z') ch = char(ch - 'A' + 'a');
+  return s;
+}
 
 EncoderConfig default_encoder_config() { return EncoderConfig{}; }
 
@@ -600,10 +598,10 @@ std::vector<EncoderConfigIssue> config_warnings(const EncoderConfig& c) {
   return warnings;
 }
 
-// n of a station id "s<n>" (any case, n of at most 9 digits), else 0.
-int station_number(std::string_view id) {
-  if (id.size() < 2 || id.size() > 10 || (id[0] != 's' && id[0] != 'S')) return 0;
-  int n = 0;
+// n of a station id "s<n>" (any case, n of at most kMaxStationDigits digits), else 0.
+int64_t station_number(std::string_view id) {
+  if (id.size() < 2 || id.size() > 1 + kMaxStationDigits || (id[0] != 's' && id[0] != 'S')) return 0;
+  int64_t n = 0;
   for (char ch : id.substr(1)) {
     if (ch < '0' || ch > '9') return 0;
     n = n * 10 + (ch - '0');
@@ -620,7 +618,7 @@ std::vector<std::string> normalize_config(EncoderConfig& c) {
     if (!st.id.empty()) station_ids.insert(ascii_lower(st.id));
   // ruling S4: new ids continue past every number given so far (the counter) and every "s<n>" in
   // the configuration (a 1.0 file has no counter); a gap may be a deleted station's id
-  int next_station = std::clamp(c.next_station_number, 1, kMaxStationNumber);
+  int64_t next_station = std::clamp<int64_t>(c.next_station_number, 1, kMaxStationNumber);
   for (const auto& st : c.stations) next_station = std::max(next_station, station_number(st.id) + 1);
   // web port slots: a station without one gets the lowest free slot; given ones are never moved
   std::set<int> slots;
@@ -664,7 +662,7 @@ std::vector<std::string> normalize_config(EncoderConfig& c) {
     std::set<std::string> stream_ids;
     for (const auto& s : st.streams)
       if (!s.id.empty()) stream_ids.insert(s.id);
-    int next_stream = 1;
+    int64_t next_stream = 1;
     for (auto& s : st.streams) {
       if (s.id.empty()) s.id = next_id(kStreamIdPrefix, stream_ids, next_stream);
       s.gain_db = round_to(s.gain_db, 0.5);
@@ -682,6 +680,20 @@ EncoderConfig mask_passwords(const EncoderConfig& c) {
     for (auto& s : st.streams) s.password.clear();
   }
   return m;
+}
+
+void retire_reused_ids(EncoderConfig& next, const EncoderConfig& previous) {
+  for (auto& st : next.stations) {
+    if (st.id.empty()) continue;
+    bool same = false, other_case = false;
+    for (const auto& o : previous.stations) {
+      same |= o.id == st.id;
+      other_case |= ascii_lower(o.id) == ascii_lower(st.id);
+    }
+    if (same) continue;
+    const int64_t n = station_number(st.id);
+    if (other_case || (n > 0 && n < previous.next_station_number)) st.id.clear();  // normalize_config gives a new one
+  }
 }
 
 void merge_passwords(EncoderConfig& next, const EncoderConfig& previous) {

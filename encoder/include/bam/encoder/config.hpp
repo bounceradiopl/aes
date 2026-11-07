@@ -114,7 +114,7 @@ struct EncoderConfig {
   // Ruling S4: the number of the next new station id ("s<n>"); ids are never given twice in the
   // lifetime of a configuration (a new station must never take over a deleted one's running
   // Stereo Tool instance or home folder). In the file only, not in the API form.
-  int next_station_number = 1;
+  int64_t next_station_number = 1;
   std::vector<StationConfig> stations;
 };
 
@@ -178,6 +178,16 @@ std::vector<EncoderConfigIssue> config_warnings(const EncoderConfig& c);
 // not, are left as they are) and trims spaces, tabs and line ends around pasted Stereo Tool keys.
 // Returns Polish notices for the changes the user should hear about (raised latencies).
 std::vector<std::string> normalize_config(EncoderConfig& c);
+
+// Ruling S4 for an update from the API (before merge_passwords): a station of `next` whose id is
+// not exactly one of `previous` but is one of them in another case, or is "s<n>" with n below
+// previous.next_station_number (a deleted station's id), is a new station: its id is cleared, so
+// normalize_config gives it a number never given before. It never takes over another station's
+// stored keys and passwords, or a deleted one's Stereo Tool runtime.
+void retire_reused_ids(EncoderConfig& next, const EncoderConfig& previous);
+
+// ASCII lower case (ids, host names and preset names are compared without regard to case).
+std::string ascii_lower(std::string s);
 
 // A copy without any secret: stream passwords, Stereo Tool keys and the panel password hash are
 // emptied.

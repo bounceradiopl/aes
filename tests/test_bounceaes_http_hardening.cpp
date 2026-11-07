@@ -596,3 +596,35 @@ TEST_CASE("BounceAES HTTP: a server stopped right after it started does not hang
     REQUIRE(server.start(kLoopback, 0, &err));
   }  // the destructor stops it as well
 }
+
+TEST_CASE("BounceAES HTTP: deeply nested or container-heavy JSON is refused before it is parsed, even without a session") {
+  Fixture f;
+  const std::string nested = std::string(500'000, '[') + std::string(500'000, ']');  // valid JSON, 1 MB
+  const int64_t t0 = bp::monotonic_ns();
+  auto r = f.client->Post("/api/setup", nested, "application/json");
+  REQUIRE(r);
+  CHECK(r->status == 400);
+  CHECK_MESSAGE(json::parse(r->body)["error"].get<std::string>().find("zagnieżdż") != std::string::npos, r->body);
+  CHECK_FALSE(f.password_set());
+  f.setup_and_login();
+  r = f.client->Post("/api/login", nested, "application/json");
+  REQUIRE(r);
+  CHECK(r->status == 400);
+  std::string flat = "[";
+  for (int i = 0; i < 200'000; ++i) flat += i ? ",{}" : "{}";
+  flat += "]";
+  r = f.client->Post("/api/login", flat, "application/json");
+  CHECK(r->status == 400);
+  CHECK_MESSAGE(json::parse(r->body)["error"].get<std::string>().find("zbyt wiele") != std::string::npos, r->body);
+  CHECK(bp::monotonic_ns() - t0 < 5'000'000'000);
+  r = f.client->Post("/api/login", json{{"password", std::string(100'000, '{')}}.dump(), "application/json");
+  REQUIRE_MESSAGE(r, httplib::to_string(r.error()));
+  CHECK(r->status == 401);  // brackets in a string are not nesting
+  // the panel's own requests still parse: the whole configuration back as it came
+  auto cfg = f.client->Get("/api/config", f.auth);
+  REQUIRE(cfg);
+  REQUIRE(cfg->status == 200);
+  auto put = f.client->Put("/api/config", f.auth, cfg->body, "application/json");
+  REQUIRE(put);
+  CHECK_MESSAGE(put->status == 200, put->body);
+}

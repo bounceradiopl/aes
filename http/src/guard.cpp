@@ -69,6 +69,43 @@ bool is_json_type(const std::string& value) {
   return true;
 }
 
+std::string json_shape_error(std::string_view text) {
+  size_t depth = 0, containers = 0;
+  bool in_string = false, escaped = false;
+  for (const char ch : text) {
+    if (in_string) {
+      if (escaped) escaped = false;
+      else if (ch == '\\') escaped = true;
+      else if (ch == '"') in_string = false;
+      continue;
+    }
+    if (ch == '"') {
+      in_string = true;
+    } else if (ch == '[' || ch == '{') {
+      if (++depth > kMaxJsonDepth)
+        return "JSON w treści żądania jest zbyt zagnieżdżony (najwyżej " + std::to_string(kMaxJsonDepth) + " poziomów)";
+      if (++containers > kMaxJsonContainers)
+        return "JSON w treści żądania ma zbyt wiele obiektów i tablic (najwyżej " + std::to_string(kMaxJsonContainers) + ")";
+    } else if ((ch == ']' || ch == '}') && depth > 0) {
+      --depth;  // a malformed body may close more than it opened: the parser refuses it
+    }
+  }
+  return {};
+}
+
+std::optional<nlohmann::ordered_json> parse_json_body(const httplib::Request& req, httplib::Response& res) {
+  if (const std::string why = json_shape_error(req.body); !why.empty()) {
+    send_error(res, 400, why);
+    return std::nullopt;
+  }
+  try {
+    return nlohmann::ordered_json::parse(req.body);
+  } catch (const std::exception&) {
+    send_error(res, 400, "nieprawidłowy JSON w treści żądania");
+    return std::nullopt;
+  }
+}
+
 // The request allowlist, checked on the headers before httplib reads anything else: only what
 // cannot be read safely is refused here. GET, POST, PUT and DELETE only; no Content-Encoding; no
 // Range on the API; a body only with one plain Content-Length of at most `max_body_bytes` (no
@@ -132,9 +169,16 @@ bool wrong_body_type(const httplib::Request& req) {
   return (length > 0 || req.path == "/api/setup") && !is_json_type(req.get_header_value("Content-Type"));
 }
 
-void install_request_guard(httplib::Server& server, size_t max_body_bytes, BodyLimit limit) {
+void install_request_guard(httplib::Server& server, size_t max_body_bytes, BodyLimit limit, HeaderCheck check) {
   const auto limit_of = [max_body_bytes, limit = std::move(limit)](const httplib::Request& req) {
     return limit ? std::min(limit(req), max_body_bytes) : max_body_bytes;
+  };
+  // On the headers, before any body is read: true when answered.
+  const auto screen = [limit_of, check = std::move(check)](const httplib::Request& req, httplib::Response& res) {
+    res.set_header("X-Frame-Options", "DENY");
+    res.set_header("X-Content-Type-Options", "nosniff");
+    res.set_header("Cache-Control", "no-store");
+    return refuse(req, res, limit_of(req)) || (check && check(req, res));
   };
   // One request per connection. With a keep-alive count of 1, httplib serves exactly one request,
   // answers it with "Connection: close" and closes the socket, so nothing a client sends after
@@ -161,11 +205,13 @@ void install_request_guard(httplib::Server& server, size_t max_body_bytes, BodyL
   // Runs on the headers, before any body is read: what cannot be read safely (refuse). The
   // connection closes after every answer (one request per connection), so an unread body is never
   // parsed; bounded bodies are read first and answered by guard().
-  server.set_pre_routing_handler([limit_of](const httplib::Request& req, httplib::Response& res) {
-    res.set_header("X-Frame-Options", "DENY");
-    res.set_header("X-Content-Type-Options", "nosniff");
-    res.set_header("Cache-Control", "no-store");
-    return refuse(req, res, limit_of(req)) ? httplib::Server::HandlerResponse::Handled : httplib::Server::HandlerResponse::Unhandled;
+  server.set_pre_routing_handler([screen](const httplib::Request& req, httplib::Response& res) {
+    return screen(req, res) ? httplib::Server::HandlerResponse::Handled : httplib::Server::HandlerResponse::Unhandled;
+  });
+  // httplib sends "100 Continue" before routing: the same checks first, so a refused request is
+  // answered (and the connection closed) before the client sends its body
+  server.set_expect_100_continue_handler([screen](const httplib::Request& req, httplib::Response& res) {
+    return screen(req, res) ? res.status : 100;
   });
 }
 

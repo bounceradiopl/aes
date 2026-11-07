@@ -432,15 +432,17 @@ void ProcessingWorker::set_preset(std::string sts_path) {
   preset_change_.store(true);
 }
 
-bool ProcessingWorker::save_preset(const std::string& sts_path, int timeout_ms, std::string* error) {
+bool ProcessingWorker::save_preset(const std::string& sts_path, int timeout_ms, std::string* error, bool* busy) {
+  if (busy) *busy = false;
   auto request = std::make_shared<SaveRequest>();
   request->path = sts_path;
   std::unique_lock lock(core_->m);
   std::string why;
   if (core_->quit || core_->finished) {
     why = "processing tej stacji jest zatrzymany";
-  } else if (core_->save) {
+  } else if (core_->save || core_->side_busy.load()) {
     why = "zapis presetu tej stacji już trwa";
+    if (busy) *busy = true;
   } else {
     core_->save = request;
     core_->cv.notify_all();

@@ -1297,13 +1297,13 @@ TEST_CASE("encoder config: a station id is never given twice, even after its sta
   CHECK(loaded->next_station_number == 9);
 
   // a counter edited by hand far out of range is brought back (no overflow)
-  for (int64_t bad : {int64_t(-5), int64_t(0), int64_t(2147483647)}) {
+  for (int64_t bad : {int64_t(-5), int64_t(0), int64_t(2147483647), int64_t(9'000'000'000'000'000'000)}) {
     file["next_station_number"] = bad;
     loaded = be::config_from_json(file.dump(), &err);
     REQUIRE_MESSAGE(loaded, err);
     be::normalize_config(*loaded);
     CHECK(loaded->next_station_number >= 9);
-    CHECK(loaded->next_station_number <= 1'000'000'001);
+    CHECK(loaded->next_station_number <= 100'000'000'000'000'001LL);  // 10^17 + 1 at most: no overflow
     CHECK(be::validate_config(*loaded).empty());
   }
 }

@@ -48,14 +48,8 @@ using http::send_json;
 
 std::string session_cookie(const httplib::Request& req) { return http::session_cookie(req, kCookie); }
 
-std::optional<json> parse_body(const httplib::Request& req, httplib::Response& res) {
-  try {
-    return json::parse(req.body);
-  } catch (const std::exception&) {
-    send_error(res, 400, "nieprawidłowy JSON w treści żądania");
-    return std::nullopt;
-  }
-}
+// Every request body: depth- and size-checked before it is parsed (bam/http/guard.hpp).
+std::optional<json> parse_body(const httplib::Request& req, httplib::Response& res) { return http::parse_json_body(req, res); }
 
 // A text field of a request body; "" when missing or not text.
 std::string text(const json& body, const char* key) {
@@ -144,6 +138,7 @@ std::optional<std::string> base64_decode(std::string_view in) {
       if (d < 0) return std::nullopt;
       v = v << 6 | uint32_t(d);
     }
+    if (last && ((pad == 2 && (v & 0xFFFF) != 0) || (pad == 1 && (v & 0xFF) != 0))) return std::nullopt;  // bits past the data
     out += char((v >> 16) & 0xFF);
     if (!last || pad < 2) out += char((v >> 8) & 0xFF);
     if (!last || pad < 1) out += char(v & 0xFF);
@@ -159,13 +154,29 @@ std::string stereotool_version_text(int version) {
   return buf;
 }
 
+// The library's error for the status (every panel, the live feed): the folders it was looked for
+// in become "folder programu" (GET /api/stereotool keeps them, with the path).
+std::string without_program_folder(std::string text) {
+  std::vector<std::string> dirs;
+  for (const std::string& c : stereotool_library_candidates())
+    if (const size_t sep = c.find_last_of("/\\"); sep != std::string::npos && sep > 0) dirs.push_back(c.substr(0, sep));
+  std::sort(dirs.begin(), dirs.end(), [](const std::string& a, const std::string& b) { return a.size() > b.size(); });
+  const std::string folder = "folder programu";
+  for (const std::string& d : dirs)
+    for (size_t at = text.find(d); at != std::string::npos; at = text.find(d, at + folder.size())) text.replace(at, d.size(), folder);
+  for (const std::string& twice : {folder + "; " + folder, "w folderze programu: " + folder})
+    for (size_t at = text.find(twice); at != std::string::npos; at = text.find(twice, at))
+      text.replace(at, twice.size(), twice.rfind("w ", 0) == 0 ? "w folderze programu" : folder);
+  return text;
+}
+
 json stereotool_library_json(const StereoToolInfo& i, bool with_path) {
   json j = {{"checked", i.checked},
             {"loading", i.loading},
             {"available", i.available},
             {"version", i.version},
             {"version_text", stereotool_version_text(i.version)},
-            {"error", i.error},
+            {"error", with_path ? i.error : without_program_folder(i.error)},
             {"abandoned", i.abandoned}};
   if (with_path) j["path"] = i.path;
   return j;
@@ -405,6 +416,7 @@ const char* preset_error_code(PresetError e) {
     case PresetError::NotFound: return "not_found";
     case PresetError::InUse: return "in_use";
     case PresetError::NotRunning: return "not_running";
+    case PresetError::Busy: return "busy";
     case PresetError::Failed: return "failed";
     case PresetError::None: break;
   }
@@ -419,7 +431,8 @@ int preset_error_status(PresetError e) {
     case PresetError::TooMany:
     case PresetError::Exists:
     case PresetError::InUse:
-    case PresetError::NotRunning: return 409;
+    case PresetError::NotRunning:
+    case PresetError::Busy: return 409;
     case PresetError::NotFound: return 404;
     case PresetError::Failed:
     case PresetError::None: break;
@@ -458,8 +471,9 @@ json preset_info_json(const std::vector<PresetInfo>& presets, std::string_view n
   return nullptr;
 }
 
-std::string station_label(const StationConfig& st, size_t i) {  // "Stacja „Radio X”" / "Stacja 2"
-  return st.name.empty() ? "Stacja " + std::to_string(i + 1) : "Stacja „" + st.name + "”";
+// "„Radio X”" / "nr 2": the station in messages
+std::string station_name(const StationConfig& st, size_t i) {
+  return st.name.empty() ? "nr " + std::to_string(i + 1) : "„" + st.name + "”";
 }
 
 // A station update without "processing" keeps the stored block; a partial one changes only the
@@ -530,11 +544,18 @@ struct EncoderHttpServer::Impl {
     server->new_task_queue = [] { return new httplib::ThreadPool(kHttpThreads); };
     // Ruling E11: one request per connection, the request allowlist before any body is read, JSON
     // answers for httplib's own refusals (bam/http/guard.hpp). The body limit is 1 MB for every
-    // request except a preset upload with a valid session (6 MB: base64 of a 4 MB preset); an
-    // upload without one stays at 1 MB, so nobody can make the server read more before logging in.
-    http::install_request_guard(*server, kMaxPresetUploadBytes, [this](const httplib::Request& req) {
-      return req.method == "POST" && req.path == kPresetUploadPath && authorized(req) ? kMaxPresetUploadBytes : kMaxApiBodyBytes;
-    });
+    // request except a preset upload (6 MB: base64 of a 4 MB preset), and an upload over 1 MB
+    // without a valid session is answered 401 on its headers, unread: nobody can make the server
+    // read more than 1 MB before logging in.
+    const auto upload = [](const httplib::Request& req) { return req.method == "POST" && req.path == kPresetUploadPath; };
+    http::install_request_guard(
+        *server, kMaxPresetUploadBytes,
+        [upload](const httplib::Request& req) { return upload(req) ? kMaxPresetUploadBytes : kMaxApiBodyBytes; },
+        [this, upload](const httplib::Request& req, httplib::Response& res) {
+          if (!upload(req) || req.get_header_value_u64("Content-Length") <= kMaxApiBodyBytes || authorized(req)) return false;
+          send_error(res, 401, "wymagane logowanie");
+          return true;
+        });
     routes(*server);
   }
 
@@ -606,6 +627,7 @@ struct EncoderHttpServer::Impl {
                 400);
       return;
     }
+    retire_reused_ids(*next, prev);  // before the merge: such a station is a new one
     merge_passwords(*next, prev);
     std::vector<std::string> notices = normalize_config(*next);
     std::vector<EncoderConfigIssue> issues = validate_config(*next);
@@ -661,7 +683,7 @@ struct EncoderHttpServer::Impl {
         listed = true;
       }
       if (std::any_of(stored.begin(), stored.end(), [&](const PresetInfo& s) { return same_preset_name(s.name, p.preset); })) continue;
-      issues.push_back({station_path(i) + ".processing.preset", station_label(st, i) + ": preset Stereo Tool „" + p.preset +
+      issues.push_back({station_path(i) + ".processing.preset", "Stacja " + station_name(st, i) + ": preset Stereo Tool „" + p.preset +
                                                                      "” nie jest wgrany: wgraj go w oknie presetów albo wybierz inny"});
     }
     return issues;
@@ -1108,10 +1130,6 @@ std::optional<IssuePlace> issue_place(const std::string& field) {
   }
 }
 
-std::string station_name(const StationConfig& st, size_t i) {
-  return st.name.empty() ? "nr " + std::to_string(i + 1) : "„" + st.name + "”";
-}
-
 void reset_global(EncoderConfig& c, const std::string& field) {
   const EncoderConfig d = default_encoder_config();
   if (field == "interface_ip") c.interface_ip = d.interface_ip;
@@ -1178,11 +1196,8 @@ EncoderConfig startup_config(const std::string& path) {
     std::map<std::string, std::string> seen;  // id in lower case -> the first station's id
     for (size_t i = 0; i < cfg.stations.size(); ++i) {
       std::string& id = cfg.stations[i].id;
-      std::string lower = id;
-      for (char& ch : lower)
-        if (ch >= 'A' && ch <= 'Z') ch = char(ch - 'A' + 'a');
       if (id.empty()) continue;
-      if (auto [it, inserted] = seen.emplace(lower, id); !inserted) {
+      if (auto [it, inserted] = seen.emplace(ascii_lower(id), id); !inserted) {
         renamed.push_back({i, id, it->second});
         id.clear();
       }

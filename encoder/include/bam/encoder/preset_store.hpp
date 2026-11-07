@@ -40,6 +40,7 @@ enum class PresetError {
   NotFound,
   InUse,       // a station refers to it (EncoderEngine::remove_preset)
   NotRunning,  // the station runs no processing (EncoderEngine::save_processing_preset)
+  Busy,        // a save of that station is under way already
   Failed,      // the file system or Stereo Tool failed
 };
 
@@ -69,6 +70,10 @@ class PresetStore {
   bool prepare(std::string* error);
   // The station's home folder, created when missing; empty (with a Polish *error) when it cannot be.
   std::string station_home(const std::string& station_id, std::string* error);
+  // Removes a deleted station's home folder with everything in it (Stereo Tool's files for that
+  // instance); true when it is gone (or never was). Only for a station no longer configured, after
+  // its worker stopped.
+  bool remove_station_home(const std::string& station_id, std::string* error);
 
   std::vector<PresetInfo> list() const;  // sorted by name, case-insensitively
   // The full path of the stored preset matching `name` (any case); when there is none, where it

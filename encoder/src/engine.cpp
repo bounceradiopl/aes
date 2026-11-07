@@ -723,11 +723,20 @@ void EncoderEngine::stop() {
 void EncoderEngine::apply_config(const EncoderConfig& config) {
   auto& m = *impl_;
   std::lock_guard lock(m.m);
-  if (!m.running) {
+  std::vector<std::string> deleted;  // stations no longer configured at all (not just disabled)
+  for (const StationConfig& o : m.config.stations)
+    if (std::none_of(config.stations.begin(), config.stations.end(), [&](const StationConfig& s) { return s.id == o.id; }))
+      deleted.push_back(o.id);
+  if (!m.running)
     m.config = config;
-    return;
+  else
+    m.apply(config);  // stops the processing workers that go before it returns
+  // a deleted station's Stereo Tool home folder goes with it (ruling S4: no id is given again, so
+  // nothing would ever use it)
+  for (const std::string& id : deleted) {
+    std::string err;
+    if (!m.store.remove_station_home(id, &err)) log_warning("Stereo Tool: " + err);
   }
-  m.apply(config);
 }
 
 EncoderConfig EncoderEngine::config() const {
@@ -880,10 +889,11 @@ PresetResult EncoderEngine::save_processing_preset(const std::string& station_id
   }
   // the engine is not held while Stereo Tool saves (on its own thread, between two blocks)
   std::string err;
-  if (!worker->save_preset(temp, detail::save_preset_timeout_ms(), &err)) {
+  bool busy = false;
+  if (!worker->save_preset(temp, detail::save_preset_timeout_ms(), &err, &busy)) {
     m.store.abandon(temp);  // one written after a timeout goes at the next start
     log_warning(who + "nie zapisano presetu „" + std::string(name) + "”: " + err);
-    return {PresetError::Failed, err};
+    return {busy ? PresetError::Busy : PresetError::Failed, err};
   }
   PresetResult r = m.store.commit(name, temp);
   if (r.ok())

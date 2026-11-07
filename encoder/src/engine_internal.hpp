@@ -251,9 +251,6 @@ void set_save_preset_timeout_ms(int ms);
 // How long a preset save is waited for (EncoderEngine::save_processing_preset): 10 s.
 int save_preset_timeout_ms();
 
-namespace testing {
-}  // namespace testing
-
 // The last kSlots values one thread wrote, numbered 1, 2, ... (their seq), read by any thread
 // without a lock and without blocking the writer (ProcessingWorker's events).
 class EventRing {
@@ -353,8 +350,8 @@ class ProcessingWorker {
   // Stereo Tool thread, between two blocks, and waits up to timeout_ms for it. Meanwhile the
   // output waits too; a save longer than kMaxBehindNs bypasses (reason Saving, never "too slow")
   // until it is over, then processing goes on by itself (a new session on the same instance, no
-  // restart). false with a Polish *error.
-  bool save_preset(const std::string& sts_path, int timeout_ms, std::string* error);
+  // restart). false with a Polish *error; *busy is set when another save was under way.
+  bool save_preset(const std::string& sts_path, int timeout_ms, std::string* error, bool* busy = nullptr);
   // Any thread: fades the output out over kRampFrames of the next frames emitted, then hands
   // nothing more to the streams (faded_out()). For a switch away from this worker: the station's
   // new path fades in once faded_out() (the engine waits for it, bounded).
