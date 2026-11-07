@@ -167,7 +167,7 @@ TEST_CASE("encoder HTTP: login, sessions and 401 without a session") {
   const json h = json::parse(health->body);
   CHECK(h["service"] == "ok");
   CHECK(h["product"] == "Bounce Encoder");
-  CHECK(h["version"] == "1.0.3");
+  CHECK(h["version"] == "1.0.4");
 
   const json state = json::parse(f.client->Get("/api/auth-state")->body);
   CHECK(state["password_set"] == false);
@@ -576,7 +576,7 @@ TEST_CASE("encoder HTTP: status of stations, inputs, streams and PTP") {
       },
       10000));
   CHECK(s["running"] == true);
-  CHECK(s["version"] == "1.0.3");
+  CHECK(s["version"] == "1.0.4");
   CHECK(s["ptp"]["enabled"] == false);
   CHECK(s["ptp"]["state"] == "disabled");
   CHECK(s["ptp"]["free_run"] == true);
@@ -2144,57 +2144,68 @@ TEST_CASE("encoder HTTP: an id the client gives never reuses a deleted id or an 
   }
 }
 
-TEST_CASE("encoder HTTP: deeply nested or container-heavy JSON is refused before it is parsed, even without a session") {
+TEST_CASE("encoder HTTP: deeply nested, container-heavy or very wide JSON is refused before it is parsed, even without a session") {
   Fixture f;
-  auto login = [&](const std::string& body) { return f.client->Post("/api/login", body, "application/json"); };
+  const auto error_of = [](const httplib::Result& r) { return json::parse(r->body)["error"].get<std::string>(); };
+  const auto login = [&](const std::string& body) { return f.client->Post("/api/login", body, "application/json"); };
   // a password is needed for /api/login to look at the body; /api/setup is the first one
   const std::string nested = std::string(500'000, '[') + std::string(500'000, ']');  // valid JSON, 1 MB
   const int64_t t0 = bp::monotonic_ns();
   auto r = f.client->Post("/api/setup", nested, "application/json");
   REQUIRE(r);
   CHECK(r->status == 400);
-  CHECK_MESSAGE(json::parse(r->body)["error"].get<std::string>().find("zagnieżdż") != std::string::npos, r->body);
+  CHECK_MESSAGE(error_of(r).find("zagnieżdż") != std::string::npos, r->body);
+  CHECK(json::parse(f.client->Get("/api/auth-state")->body)["password_set"] == false);
   f.setup_and_login();
   r = login(nested);
   REQUIRE(r);
   CHECK(r->status == 400);
-  CHECK_MESSAGE(json::parse(r->body)["error"].get<std::string>().find("zagnieżdż") != std::string::npos, r->body);
-  // objects too, and brackets inside strings do not count
+  CHECK_MESSAGE(error_of(r).find("zagnieżdż") != std::string::npos, r->body);
+  // objects too
   std::string objects;
   for (int i = 0; i < 40; ++i) objects += "{\"a\":";
   objects += "1" + std::string(40, '}');
-  CHECK(login(objects)->status == 400);
-  CHECK(login(json{{"password", std::string(100'000, '[')}}.dump())->status == 401);  // a string, not nesting
-  // many small containers (a flat list of empty arrays): refused as well
+  r = login(objects);
+  REQUIRE(r);
+  CHECK(r->status == 400);
+  // many small containers (a flat list of empty arrays)
   std::string flat = "[";
   for (int i = 0; i < 200'000; ++i) flat += i ? ",[]" : "[]";
   flat += "]";
   r = login(flat);
+  REQUIRE(r);
   CHECK(r->status == 400);
-  CHECK_MESSAGE(json::parse(r->body)["error"].get<std::string>().find("zbyt wiele") != std::string::npos, r->body);
+  CHECK_MESSAGE(error_of(r).find("zbyt wiele") != std::string::npos, r->body);
   // a flat list of 1 MB of numbers, and an object of 90 000 keys (parsed in quadratic time)
   std::string numbers = "[0";
   while (numbers.size() < 1'000'000) numbers += ",0";
   numbers += "]";
   r = login(numbers);
+  REQUIRE(r);
   CHECK(r->status == 400);
-  CHECK_MESSAGE(json::parse(r->body)["error"].get<std::string>().find("zbyt wiele wartości") != std::string::npos, r->body);
+  CHECK_MESSAGE(error_of(r).find("zbyt wiele wartości") != std::string::npos, r->body);
   std::string keys = "{";
   for (int i = 0; i < 90'000; ++i) keys += (i ? ",\"k" : "\"k") + std::to_string(i) + "\":0";
   keys += "}";
   const int64_t t1 = bp::monotonic_ns();
   r = login(keys);
+  REQUIRE(r);
   CHECK(r->status == 400);
   CHECK(bp::monotonic_ns() - t1 < 1'000'000'000);
   std::string wide = "{";  // under the value cap, over the members of one object
   for (int i = 0; i < 2'500; ++i) wide += (i ? ",\"k" : "\"k") + std::to_string(i) + "\":0";
   wide += "}";
   r = login(wide);
+  REQUIRE(r);
   CHECK(r->status == 400);
-  CHECK_MESSAGE(json::parse(r->body)["error"].get<std::string>().find("zbyt wiele pól") != std::string::npos, r->body);
+  CHECK_MESSAGE(error_of(r).find("zbyt wiele pól") != std::string::npos, r->body);
   CHECK(bp::monotonic_ns() - t0 < 5'000'000'000);  // refused quickly: nothing was built
+  // brackets, commas and colons in a string are not structure
+  r = login(json{{"password", std::string(100'000, '[') + std::string(50'000, ',') + std::string(50'000, ':')}}.dump());
+  REQUIRE(r);
+  CHECK(r->status == 401);
   // 16 levels are fine, 17 are not
-  auto deep = [](int levels) {  // the object counts as one level
+  const auto deep = [](int levels) {  // the object counts as one level
     return R"({"password":"zlehaslo123","x":)" + std::string(size_t(levels - 1), '[') + std::string(size_t(levels - 1), ']') + "}";
   };
   CHECK(login(deep(16))->status == 401);
@@ -2224,22 +2235,22 @@ TEST_CASE("encoder HTTP: deeply nested or container-heavy JSON is refused before
     cfg["stations"].push_back(station);
   }
   const std::string body = cfg.dump();
-  size_t values = 0;
-  bool in_string = false, escaped = false;
-  for (char ch : body) {
-    if (in_string) {
-      escaped = !escaped && ch == '\\';
-      if (!escaped && ch == '"') in_string = false;
-      continue;
-    }
-    in_string = ch == '"';
-    values += ch == ',' || ch == ':';
-  }
-  CAPTURE(values);
-  CHECK(values * 3 < bam::http::kMaxJsonValues);  // three times the largest configuration fits
+  CAPTURE(json_value_separators(body));
+  CHECK(json_value_separators(body) * 3 < bam::http::kMaxJsonValues);  // three times the largest configuration fits
   r = f.put("/api/config", cfg);
   REQUIRE(r);
   CHECK_MESSAGE(r->status == 200, r->body.substr(0, 400));
+  CHECK(f.engine.config().stations.size() == size_t(be::kMaxStations));
+}
+
+TEST_CASE("encoder HTTP: a login with a 100 KB password is answered within a second") {
+  Fixture f;
+  f.setup_and_login();
+  const int64_t t0 = bp::monotonic_ns();
+  auto r = f.client->Post("/api/login", json{{"password", std::string(100'000, 'x')}}.dump(), "application/json");
+  REQUIRE(r);
+  CHECK(r->status == 401);
+  CHECK(bp::monotonic_ns() - t0 < 1'000'000'000);
 }
 
 #endif  // BAM_WITH_CODECS
