@@ -8,6 +8,17 @@
 // An accepted one is saved to the configuration file first, then applied to the engine; changes
 // are serialized (one at a time). Stream passwords and the panel password hash never leave the
 // server (config_to_api_json).
+//
+// Stereo Tool processing (Bounce Encoder 1.1, every route with the session, JSON only): GET
+// /api/stereotool (library, presets, web interfaces, warnings), GET /api/stereotool/presets,
+// POST /api/stereotool/presets ({name, data_base64}), GET and DELETE
+// /api/stereotool/presets/<name>, POST /api/stations/<id>/processing/save-preset ({name}) and
+// /processing/restart; /api/status has each station's "processing" and the library's
+// "stereotool". Licence keys never leave the server ("license_key_set",
+// "stereotool_default_key_set" only). A station update without "processing" keeps the stored
+// block (a partial one changes only its keys); switching processing on for an enabled station with
+// a preset that is not uploaded is refused (400, field-mapped). Accepted changes answer with
+// "warnings" (config_warnings).
 #pragma once
 #include <cstddef>
 #include <cstdint>
@@ -31,6 +42,11 @@ extern const EncoderPanelAsset kEncoderPanelAssets[];
 extern const size_t kEncoderPanelAssetCount;
 
 inline constexpr size_t kMaxApiBodyBytes = 1024 * 1024;  // larger request bodies get 413
+// POST /api/stereotool/presets alone, and only with a valid session: base64 of a 4 MB preset
+// (kMaxPresetBytes) in its JSON. Every other request (and an upload without a session) keeps
+// kMaxApiBodyBytes; one request per connection holds for this route too.
+inline constexpr size_t kMaxPresetUploadBytes = 6 * 1024 * 1024;
+inline constexpr const char* kPresetUploadPath = "/api/stereotool/presets";
 
 class EncoderHttpServer {
  public:

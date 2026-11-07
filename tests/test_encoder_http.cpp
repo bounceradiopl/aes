@@ -24,6 +24,7 @@
 #include "bam/encoder/data_dir.hpp"
 #include "bam/encoder/engine.hpp"
 #include "bam/encoder/http_server.hpp"
+#include "bam/encoder/icecast.hpp"  // testing::base64
 #include "bam/encoder/paths.hpp"
 #include "bam/log.hpp"
 #include "bam/platform/process.hpp"
@@ -32,6 +33,9 @@
 #include "bam/sdp.hpp"
 #include "http_attack.hpp"
 #include "test_util.hpp"
+#ifdef BAM_FAKE_STEREOTOOL_PATH
+#include "fake_stereotool/fake_control.hpp"
+#endif
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -94,18 +98,21 @@ json station_json(const std::string& name, bool enabled, const std::string& pass
                                     {"password", password}}})}};
 }
 
+be::EncoderEngineOptions http_engine_options(const std::string& stereotool_dir) {
+  be::EncoderEngineOptions o;
+  o.enable_ptp = false;
+  o.stereotool_dir = stereotool_dir;  // empty: no presets folder
+  return o;
+}
+
 struct Fixture {
   std::string config_path = unique_path("http");
-  be::EncoderEngine engine{[] {
-    be::EncoderEngineOptions o;
-    o.enable_ptp = false;
-    return o;
-  }()};
+  be::EncoderEngine engine;
   std::unique_ptr<be::EncoderHttpServer> server;
   std::unique_ptr<httplib::Client> client;
   httplib::Headers auth;
 
-  Fixture() {
+  explicit Fixture(const std::string& stereotool_dir = "") : engine(http_engine_options(stereotool_dir)) {
     be::EncoderConfig cfg = be::default_encoder_config();
     cfg.interface_ip = kLoopback;  // tests never join groups on a real network
     cfg.http_bind = kLoopback;
@@ -1417,4 +1424,540 @@ TEST_CASE("encoder HTTP: methods, encodings, ranges and body types outside the a
   // the panel files still answer, and the live feed still runs on its own connection
   CHECK(f.client->Get("/")->status == 200);
 }
+// ---- Stereo Tool processing API (Bounce Encoder 1.1) ----
+
+namespace {
+
+namespace fs = std::filesystem;
+
+// test keys only, never a real one
+constexpr const char* kStationKey = "<FAKE-HTTP-STATION-KEY-77>";
+constexpr const char* kDefaultKey = "<FAKE-HTTP-DEFAULT-KEY-88>";
+
+// A key, with or without its brackets, anywhere in `text`.
+bool has_key(const std::string& text) {
+  for (const std::string k : {kStationKey, kDefaultKey})
+    if (text.find(k) != std::string::npos || text.find(k.substr(1, k.size() - 2)) != std::string::npos) return true;
+  return false;
+}
+
+// A stereotool folder of its own for a test server.
+struct StFolder {
+  std::string path;
+  explicit StFolder(const std::string& tag) {
+    path = (fs::temp_directory_path() / ("bam_enc_http_st_" + tag + "_" + std::to_string(bp::current_pid()))).string();
+    std::error_code ec;
+    fs::remove_all(path, ec);
+  }
+  ~StFolder() {
+    std::error_code ec;
+    fs::remove_all(path, ec);
+  }
+  StFolder(const StFolder&) = delete;
+  StFolder& operator=(const StFolder&) = delete;
+  std::vector<std::string> files() const {  // every file under it, relative
+    std::vector<std::string> out;
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(path, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
+      if (it->is_regular_file()) out.push_back(fs::relative(it->path(), path).generic_string());
+    return out;
+  }
+};
+
+std::string fake_sts(double gain, int latency) {
+  char buf[96];
+  std::snprintf(buf, sizeof buf, "[FakeStereoTool]\ngain=%.9g\nlatency=%d\n", gain, latency);
+  return buf;
+}
+
+json upload_body(const std::string& name, const std::string& data) { return {{"name", name}, {"data_base64", be::testing::base64(data)}}; }
+
+// A station with processing and nothing else (no inputs: it mixes silence; no streams).
+json processing_station(const std::string& name, bool enabled, const std::string& preset, const std::string& key) {
+  return {{"name", name}, {"enabled", enabled}, {"processing", {{"enabled", true}, {"preset", preset}, {"license_key", key}}}};
+}
+
+std::string url_path(const std::string& name) {  // a preset name in a path (only spaces need it here)
+  std::string out;
+  for (char ch : name) out += ch == ' ' ? std::string("%20") : std::string(1, ch);
+  return "/api/stereotool/presets/" + out;
+}
+
+}  // namespace
+
+TEST_CASE("encoder HTTP: every Stereo Tool route needs a session") {
+  Fixture f;
+  f.setup_and_login();
+  httplib::Client anon(kLoopback, f.server->port());
+  CHECK(anon.Get("/api/stereotool")->status == 401);
+  CHECK(anon.Get("/api/stereotool/presets")->status == 401);
+  CHECK(anon.Get("/api/stereotool/presets/FM.sts")->status == 401);
+  CHECK(anon.Delete("/api/stereotool/presets/FM.sts")->status == 401);
+  CHECK(anon.Post("/api/stereotool/presets", upload_body("FM.sts", "x").dump(), "application/json")->status == 401);
+  CHECK(anon.Post("/api/stations/s1/processing/save-preset", R"({"name":"A.sts"})", "application/json")->status == 401);
+  CHECK(anon.Post("/api/stations/s1/processing/restart", "", "application/json")->status == 401);
+  // JSON only, on every route
+  CHECK(f.client->Post("/api/stereotool/presets", f.auth, upload_body("FM.sts", "x").dump(), "text/plain")->status == 415);
+  CHECK(f.client->Post("/api/stations/s1/processing/save-preset", f.auth, R"({"name":"A.sts"})", "text/plain")->status == 415);
+  CHECK(f.client->Post("/api/stations/s1/processing/restart", f.auth, "x", "text/plain")->status == 415);
+}
+
+#ifdef BAM_FAKE_STEREOTOOL_PATH
+
+TEST_CASE("encoder HTTP: Stereo Tool presets are uploaded, listed, downloaded and deleted, with sanitised names and limits") {
+  fake_st::UseFake use;
+  StFolder dir("presets");
+  Fixture f(dir.path);
+  f.setup_and_login();
+
+  json st = f.get("/api/stereotool");
+  CHECK(st["library"]["available"] == true);  // the fake, looked for by this request
+  CHECK(st["library"]["checked"] == true);
+  CHECK(st["library"]["version"] == 11070);
+  CHECK(st["library"]["version_text"] == "11.07");
+  CHECK(st["library"]["abandoned"] == 0);
+  CHECK(st["presets"].empty());
+  CHECK(st["limits"]["max_preset_bytes"] == be::kMaxPresetBytes);
+  CHECK(st["limits"]["max_presets"] == be::kMaxPresets);
+  CHECK(st["limits"]["max_upload_bytes"] == be::kMaxPresetUploadBytes);
+  CHECK(st["web_port_base"] == 8100);
+  CHECK(st["default_key_set"] == false);
+  CHECK(st["stations"].empty());
+  CHECK(st["warnings"].empty());
+
+  // upload
+  auto r = f.post("/api/stereotool/presets", upload_body("FM Rock.sts", fake_sts(0.5, 128)));
+  REQUIRE(r);
+  REQUIRE_MESSAGE(r->status == 200, r->body);
+  json out = json::parse(r->body);
+  CHECK(out["ok"] == true);
+  CHECK(out["preset"] == json{{"name", "FM Rock.sts"}, {"bytes", fake_sts(0.5, 128).size()}});
+  REQUIRE(out["presets"].size() == 1);
+  CHECK(out["presets"][0]["name"] == "FM Rock.sts");
+  CHECK(out["presets"][0]["used_by"].empty());
+  CHECK(f.get("/api/stereotool/presets")["presets"] == out["presets"]);
+
+  // download, in any case
+  json got = f.get(url_path("fm rock.STS"));
+  CHECK(got["name"] == "FM Rock.sts");
+  CHECK(got["bytes"] == fake_sts(0.5, 128).size());
+  CHECK(got["data_base64"] == be::testing::base64(fake_sts(0.5, 128)));
+  r = f.client->Get("/api/stereotool/presets/Brak.sts", f.auth);
+  CHECK(r->status == 404);
+  CHECK(json::parse(r->body)["code"] == "not_found");
+
+  // a duplicate in another case
+  r = f.post("/api/stereotool/presets", upload_body("fm rock.STS", "x"));
+  CHECK(r->status == 409);
+  CHECK(json::parse(r->body)["code"] == "exists");
+  CHECK(json::parse(r->body)["field"] == "name");
+
+  // names: refused, never quoted, nothing written anywhere
+  const std::vector<std::string> before = dir.files();
+  for (const std::string& bad : std::vector<std::string>{"../config.json", "..\\x.sts", "../../x.sts", "C:x.sts", "a/b.sts", "a\\b.sts", "CON.sts", "nul.sts",
+                                "zażółć.sts", " spacja.sts", "x.txt", ".sts", "x.sts\nGET", std::string("x\0y.sts", 7),
+                                std::string(kStationKey) + ".sts"}) {
+    CAPTURE(bad);
+    r = f.post("/api/stereotool/presets", upload_body(bad, "dane"));
+    REQUIRE(r);
+    CHECK(r->status == 400);
+    const json e = json::parse(r->body);
+    CHECK(e["code"] == "bad_name");
+    CHECK(e["field"] == "name");
+    CHECK(e["ok"] == false);
+    if (bad.size() > 4) CHECK_MESSAGE(r->body.find(json(bad).dump().substr(1, bad.size() - 1)) == std::string::npos, r->body);
+    CHECK_FALSE(has_key(r->body));
+  }
+  CHECK(dir.files() == before);
+  CHECK_FALSE(exists((fs::path(dir.path).parent_path() / "config.json").string()));
+  for (const json& bad : {json{{"data_base64", "eA=="}}, json{{"name", 5}, {"data_base64", "eA=="}}, json{{"name", ""}, {"data_base64", "eA=="}}}) {
+    r = f.post("/api/stereotool/presets", bad);
+    CHECK(r->status == 400);
+    CHECK(json::parse(r->body)["field"] == "name");
+  }
+  CHECK(f.post("/api/stereotool/presets", json::array())->status == 400);
+  CHECK(f.client->Post("/api/stereotool/presets", f.auth, "{nie json", "application/json")->status == 400);
+
+  // the data: strict base64, not empty, at most 4 MB
+  for (const std::string bad : {"eA", "eA=", "e A==", "eA==\n", "!!!!", "eA==eA==", "=eA=", "data:;base64,eA=="}) {
+    CAPTURE(bad);
+    r = f.post("/api/stereotool/presets", {{"name", "Zle.sts"}, {"data_base64", bad}});
+    CHECK(r->status == 400);
+    CHECK(json::parse(r->body)["code"] == "bad_data");
+    CHECK(json::parse(r->body)["field"] == "data_base64");
+  }
+  r = f.post("/api/stereotool/presets", {{"name", "Zle.sts"}});
+  CHECK(r->status == 400);
+  CHECK(json::parse(r->body)["field"] == "data_base64");
+  r = f.post("/api/stereotool/presets", {{"name", "Pusty.sts"}, {"data_base64", ""}});
+  CHECK(r->status == 400);
+  CHECK(json::parse(r->body)["code"] == "empty");
+  // the base64 decoder against the encoder, every tail length
+  for (const std::string& data : std::vector<std::string>{"a", "ab", "abc", "abcd", std::string("\0\xff\x10", 3)}) {
+    const std::string name = "Dlugosc " + std::to_string(data.size()) + ".sts";
+    REQUIRE_MESSAGE(f.post("/api/stereotool/presets", upload_body(name, data))->status == 200, name);
+    CHECK(f.get(url_path(name))["data_base64"] == be::testing::base64(data));
+    REQUIRE(f.client->Delete(url_path(name), f.auth)->status == 200);
+  }
+  const std::string max(be::kMaxPresetBytes, 'p');
+  r = f.post("/api/stereotool/presets", upload_body("Duzy.sts", max + "p"));  // a body over 1 MB: only this route takes it
+  REQUIRE(r);
+  CHECK(r->status == 413);
+  CHECK(json::parse(r->body)["code"] == "too_large");
+  r = f.post("/api/stereotool/presets", upload_body("Duzy.sts", max));
+  REQUIRE(r);
+  REQUIRE_MESSAGE(r->status == 200, r->body.substr(0, 300));
+  got = f.get(url_path("Duzy.sts"));
+  CHECK(got["bytes"] == be::kMaxPresetBytes);
+  CHECK(got["data_base64"].get<std::string>().size() == (be::kMaxPresetBytes + 2) / 3 * 4);
+  r = f.post("/api/stereotool/presets", {{"name", "Za duzy.sts"}, {"data_base64", std::string((be::kMaxPresetBytes + 2) / 3 * 4 + 4, 'A')}});
+  CHECK(r->status == 413);  // refused before decoding
+
+  // traversal through the path: only names in the presets folder
+  for (const std::string path : {"/api/stereotool/presets/..%2Fconfig.json", "/api/stereotool/presets/..%2F..%2Fx.sts",
+                                 "/api/stereotool/presets/%2E%2E%2Fpresets%2FFM%20Rock.sts", "/api/stereotool/presets/a/b.sts"}) {
+    CAPTURE(path);
+    r = f.client->Get(path, f.auth);
+    REQUIRE(r);
+    CHECK(r->status == 404);
+    CHECK(r->body.find("data_base64") == std::string::npos);
+    r = f.client->Delete(path, f.auth);
+    CHECK(r->status == 404);
+  }
+  CHECK(f.get("/api/stereotool")["presets"].size() == 2);
+
+  // a preset a station uses (here a disabled one) cannot be deleted; the list says who uses it
+  json cfg = f.get("/api/config");
+  cfg["stations"] = json::array({processing_station("Radio Preset", false, "fm rock.sts", kStationKey)});
+  r = f.put("/api/config", cfg);
+  REQUIRE_MESSAGE(r->status == 200, r->body);
+  st = f.get("/api/stereotool");
+  CHECK(st["presets"][0]["name"] == "Duzy.sts");  // sorted without regard to case
+  CHECK(st["presets"][1]["used_by"] == json::array({{{"id", "s1"}, {"name", "Radio Preset"}}}));
+  r = f.client->Delete(url_path("FM Rock.sts"), f.auth);
+  CHECK(r->status == 409);
+  CHECK(json::parse(r->body)["code"] == "in_use");
+  CHECK_MESSAGE(json::parse(r->body)["error"].get<std::string>().find("„Radio Preset”") != std::string::npos, r->body);
+  CHECK(f.get(url_path("FM Rock.sts"))["bytes"] == fake_sts(0.5, 128).size());
+  r = f.put("/api/stations/s1", processing_station("Radio Preset", false, "Duzy.sts", ""));
+  REQUIRE_MESSAGE(r->status == 200, r->body);
+  r = f.client->Delete(url_path("fm rock.sts"), f.auth);
+  REQUIRE_MESSAGE(r->status == 200, r->body);
+  out = json::parse(r->body);
+  CHECK(out["ok"] == true);
+  REQUIRE(out["presets"].size() == 1);
+  CHECK(out["presets"][0]["name"] == "Duzy.sts");
+  CHECK(f.client->Delete(url_path("FM Rock.sts"), f.auth)->status == 404);
+  CHECK_FALSE(has_key(f.get("/api/stereotool").dump()));
+}
+
+TEST_CASE("encoder HTTP: processing through the API: settings, status, save as preset, restart; the licence key never leaves") {
+  fake_st::UseFake use;
+  StFolder dir("processing");
+  Fixture f(dir.path);
+  f.setup_and_login();
+  std::vector<std::string> bodies;  // every answer, scanned for the keys at the end
+  auto keep = [&](httplib::Result res) {
+    REQUIRE(res);
+    bodies.push_back(res->body);
+    return res;
+  };
+  REQUIRE(keep(f.post("/api/stereotool/presets", upload_body("Start.sts", fake_sts(0.5, 128))))->status == 200);
+
+  // a preset that is not uploaded is refused for an enabled station, allowed for a disabled one
+  json cfg = f.get("/api/config");
+  cfg["stations"] = json::array({processing_station("Radio Brak", true, "Nie ma.sts", kStationKey)});
+  auto r = keep(f.put("/api/config", cfg));
+  CHECK(r->status == 400);
+  json out = json::parse(r->body);
+  CHECK(out["issues"][0]["field"] == "stations[0].processing.preset");
+  CHECK_MESSAGE(out["error"].get<std::string>().find("nie jest wgrany") != std::string::npos, r->body);
+  CHECK(out["warnings"].empty());
+  CHECK(f.engine.config().stations.empty());
+  cfg["stations"][0]["enabled"] = false;
+  REQUIRE_MESSAGE(keep(f.put("/api/config", cfg))->status == 200, bodies.back());
+  cfg = f.get("/api/config");
+  cfg["stations"][0]["enabled"] = true;  // switching that station on needs the preset
+  CHECK(keep(f.put("/api/config", cfg))->status == 400);
+
+  // three stations with processing (one own key, two on the default key), one without
+  cfg = f.get("/api/config");
+  cfg["stereotool_default_key"] = kDefaultKey;
+  cfg["stations"] = json::array({processing_station("Radio Jeden", true, "start.STS", kStationKey),
+                                 processing_station("Radio Dwa", true, "Start.sts", ""),
+                                 processing_station("Radio Trzy", true, "Start.sts", ""),
+                                 {{"name", "Radio Bez"}, {"enabled", true}}});
+  r = keep(f.put("/api/config", cfg));
+  REQUIRE_MESSAGE(r->status == 200, r->body);
+  out = json::parse(r->body);
+  CHECK(out["config"]["stereotool_default_key"] == "");
+  CHECK(out["config"]["stereotool_default_key_set"] == true);
+  CHECK(out["config"]["stations"][0]["processing"]["license_key"] == "");
+  CHECK(out["config"]["stations"][0]["processing"]["license_key_set"] == true);
+  CHECK(out["config"]["stations"][1]["processing"]["license_key_set"] == false);
+  const std::vector<int> slots = {out["config"]["stations"][0]["processing"]["web_port_slot"].get<int>(),
+                                  out["config"]["stations"][1]["processing"]["web_port_slot"].get<int>()};
+  // the same default key on two stations: a warning naming both, never the key
+  REQUIRE(out["warnings"].size() == 1);
+  CHECK(out["warnings"][0]["field"] == "stations[2].processing.license_key");
+  CHECK_MESSAGE(out["warnings"][0]["message"].get<std::string>().find("Radio Dwa") != std::string::npos, r->body);
+  const std::string s1 = out["config"]["stations"][0]["id"], s4 = out["config"]["stations"][3]["id"];
+  CHECK(f.file()["stations"][0]["processing"]["license_key"] == kStationKey);  // only the file holds it
+
+  // the status: per station and the library
+  const bool running = wait_for(
+      [&] {
+        const json s = f.get("/api/status");
+        for (const json& station : s["stations"])
+          if (station["processing"]["state"] != "running" && station["processing"]["enabled"] == true) return false;
+        return true;
+      },
+      10000);
+  REQUIRE(running);
+  json status = f.get("/api/status");
+  bodies.push_back(status.dump());
+  const json& p = status["stations"][0]["processing"];
+  CHECK(p["enabled"] == true);
+  CHECK(p["preset"] == "start.STS");
+  CHECK(p["reason_code"] == "");
+  CHECK(p["reason"] == "");
+  CHECK(p["latency_ms"] == doctest::Approx((128 + 240) / 48.0).epsilon(0.01));
+  CHECK(p["license_valid"] == true);
+  CHECK(p["unlicensed_features"] == "");
+  CHECK(p["web_port"] == 8100 + slots[0]);
+  CHECK(p["web_url"] == "http://127.0.0.1:" + std::to_string(8100 + slots[0]) + "/");
+  CHECK(p["retries"] == 0);
+  CHECK(p["retry_in_s"] == -1);
+  CHECK(p.contains("cpu_pct"));
+  CHECK(p.contains("queue_dropped_frames"));
+  CHECK(status["stations"][3]["processing"]["state"] == "off");
+  CHECK(status["stations"][3]["processing"]["enabled"] == false);
+  CHECK(status["stations"][3]["processing"]["web_port"] == 0);
+  CHECK(status["stereotool"]["available"] == true);
+  CHECK(status["stereotool"]["version_text"] == "11.07");
+  CHECK_FALSE(status["stereotool"].contains("path"));
+  json st = f.get("/api/stereotool");
+  bodies.push_back(st.dump());
+  CHECK(st["default_key_set"] == true);
+  CHECK(st["stations"][0]["license_key_set"] == true);
+  CHECK(st["stations"][0]["web_port_slot"] == slots[0]);
+  CHECK(st["stations"][0]["web_port"] == 8100 + slots[0]);
+  CHECK(st["stations"][0]["web_port_active"] == 8100 + slots[0]);
+  CHECK(st["stations"][1]["web_url"] == "http://127.0.0.1:" + std::to_string(8100 + slots[1]) + "/");
+  CHECK(st["stations"][3]["processing_enabled"] == false);
+  CHECK(st["stations"][3]["web_port_active"] == 0);
+  CHECK(st["warnings"].size() == 1);
+  CHECK(st["presets"][0]["used_by"].size() == 3);
+  CHECK(fake_st::fake().text("create_key").has_value());  // the keys did reach Stereo Tool
+
+  // save the running settings as a preset
+  r = keep(f.post("/api/stations/" + s1 + "/processing/save-preset", {{"name", "Strojony.sts"}}));
+  REQUIRE_MESSAGE(r->status == 200, r->body);
+  out = json::parse(r->body);
+  CHECK(out["ok"] == true);
+  CHECK(out["preset"] == json{{"name", "Strojony.sts"}, {"bytes", fake_sts(0.5, 128).size()}});
+  CHECK(out["presets"].size() == 2);
+  CHECK(f.get(url_path("Strojony.sts"))["data_base64"] == be::testing::base64(fake_sts(0.5, 128)));
+  auto refused = [&](httplib::Result res, int status, const std::string& code) {
+    REQUIRE(res);
+    bodies.push_back(res->body);
+    CHECK_MESSAGE(res->status == status, res->body);
+    CHECK_MESSAGE(json::parse(res->body)["code"] == code, res->body);
+  };
+  refused(f.post("/api/stations/" + s1 + "/processing/save-preset", {{"name", "STROJONY.sts"}}), 409, "exists");
+  refused(f.post("/api/stations/" + s1 + "/processing/save-preset", {{"name", "../x.sts"}}), 400, "bad_name");
+  refused(f.post("/api/stations/" + s1 + "/processing/save-preset", json::object()), 400, "bad_name");
+  refused(f.post("/api/stations/" + s1 + "/processing/save-preset", json::array()), 400, "bad_request");
+  refused(f.post("/api/stations/s99/processing/save-preset", {{"name", "Inny.sts"}}), 404, "no_station");
+  refused(f.post("/api/stations/" + s4 + "/processing/save-preset", {{"name", "Inny.sts"}}), 409, "not_running");
+  fake_st::fake().set("save_fails", 1);
+  refused(f.post("/api/stations/" + s1 + "/processing/save-preset", {{"name", "Nieudany.sts"}}), 500, "failed");
+  fake_st::fake().set("save_fails", 0);
+
+  // restart
+  r = keep(f.client->Post("/api/stations/" + s1 + "/processing/restart", f.auth, "", "application/json"));
+  REQUIRE_MESSAGE(r->status == 200, r->body);
+  CHECK(json::parse(r->body)["ok"] == true);
+  refused(f.client->Post("/api/stations/s99/processing/restart", f.auth, "", "application/json"), 404, "no_station");
+  refused(f.client->Post("/api/stations/" + s4 + "/processing/restart", f.auth, "", "application/json"), 409, "not_running");
+
+  // an update without "processing" keeps it; a partial one changes only what it has
+  r = keep(f.put("/api/stations/" + s1, {{"name", "Radio Jeden Nowe"}, {"enabled", true}}));
+  REQUIRE_MESSAGE(r->status == 200, r->body);
+  be::EncoderConfig c = f.engine.config();
+  CHECK(c.stations[0].name == "Radio Jeden Nowe");
+  CHECK(c.stations[0].processing.enabled);
+  CHECK(c.stations[0].processing.preset == "start.STS");
+  CHECK(c.stations[0].processing.license_key == kStationKey);
+  CHECK(c.stations[0].processing.web_port_slot == slots[0]);
+  cfg = f.get("/api/config");
+  for (json& station : cfg["stations"]) station.erase("processing");
+  r = keep(f.put("/api/config", cfg));
+  REQUIRE_MESSAGE(r->status == 200, r->body);
+  c = f.engine.config();
+  for (size_t i = 0; i < 3; ++i) CHECK(c.stations[i].processing.enabled);
+  CHECK(c.stations[1].processing.web_port_slot == slots[1]);
+  r = keep(f.put("/api/stations/" + s1, {{"name", "Radio Jeden Nowe"}, {"enabled", true}, {"processing", {{"enabled", false}}}}));
+  REQUIRE_MESSAGE(r->status == 200, r->body);
+  c = f.engine.config();
+  CHECK_FALSE(c.stations[0].processing.enabled);
+  CHECK(c.stations[0].processing.preset == "start.STS");
+  CHECK(c.stations[0].processing.license_key == kStationKey);
+  CHECK(c.stations[0].processing.web_port_slot == slots[0]);
+  r = keep(f.put("/api/stations/" + s1, {{"processing", "wlaczony"}}));
+  CHECK(r->status == 400);
+  // the key goes only on request
+  r = keep(f.put("/api/stations/" + s1, {{"name", "Radio Jeden Nowe"}, {"processing", {{"license_key_clear", true}}}}));
+  REQUIRE_MESSAGE(r->status == 200, r->body);
+  CHECK(json::parse(r->body)["config"]["stations"][0]["processing"]["license_key_set"] == false);
+  CHECK(f.engine.config().stations[0].processing.license_key.empty());
+
+  // nothing the server says carries a key: answers, the status, the live feed, the logs
+  bodies.push_back(f.get("/api/config").dump());
+  bodies.push_back(f.get("/api/status").dump());
+  bodies.push_back(f.get("/api/logs").dump());
+  {
+    httplib::Client live(kLoopback, f.server->port());
+    std::string first;
+    live.Get("/api/live", f.auth, [&](const char* data, size_t n) {
+      first.append(data, n);
+      return first.find("\n\n") == std::string::npos;  // one event
+    });
+    CHECK(first.find("\"processing\"") != std::string::npos);
+    bodies.push_back(first);
+  }
+  for (const auto& e : bam::Logger::instance().recent()) bodies.push_back(e.message);
+  for (const std::string& b : bodies) CHECK_MESSAGE(!has_key(b), b.substr(0, 400));
+}
+
+#endif  // BAM_FAKE_STEREOTOOL_PATH
+
+TEST_CASE("encoder HTTP: only the preset upload takes up to 6 MB, and only with a session; one request per connection holds for it") {
+  StFolder dir("limits");
+  Fixture f(dir.path);
+  f.setup_and_login();
+  const uint16_t port = f.server->port();
+  const size_t big = 2'000'000;  // over the 1 MB of every other request
+  auto head = [&](const std::string& method, const std::string& path, size_t n, const std::string& cookie, const std::string& type = "application/json") {
+    return head_with_length(method, path, type, n, cookie);
+  };
+  auto ptp_domain = [&] { return f.engine.config().ptp_domain; };
+
+  // with a session: a body over 1 MB is read and answered
+  {
+    const std::string data(1'200'000, 'd');
+    auto r = f.post("/api/stereotool/presets", upload_body("Ponad 1 MB.sts", data));
+    REQUIRE(r);
+    REQUIRE_MESSAGE(r->status == 200, r->body.substr(0, 300));
+  }
+  // over 6 MB: refused on its headers
+  CHECK(raw_status(port, head("POST", "/api/stereotool/presets", be::kMaxPresetUploadBytes + 1, f.cookie())) == 413);
+  {
+    const RawExchange x = raw_exchange(port, head("POST", "/api/stereotool/presets", be::kMaxPresetUploadBytes + 1, f.cookie()));
+    CHECK(x.closed);
+    CHECK(x.statuses == std::vector<int>{413});
+    CHECK(x.text.find("najwyżej 6 MB") != std::string::npos);
+  }
+  // without a session (none, forged, logged out), or on any other route or method: 1 MB, refused on the headers
+  for (const std::string& cookie : {std::string(), std::string("bounce_encoder_session=podrobiona")}) {
+    CAPTURE(cookie);
+    const RawExchange x = raw_exchange(port, head("POST", "/api/stereotool/presets", big, cookie));
+    CHECK(x.closed);
+    CHECK(statuses_or_reset(x.statuses, 413));
+  }
+  for (const auto& [method, path] : std::vector<std::pair<std::string, std::string>>{{"PUT", "/api/config"},
+                                                                                       {"POST", "/api/stations"},
+                                                                                       {"POST", "/api/stereotool/presets/"},
+                                                                                       {"POST", "/api/stereotool/presets/x.sts"},
+                                                                                       {"POST", "/api/stereotool/presets/../presets"},
+                                                                                       {"POST", "/API/stereotool/presets"},
+                                                                                       {"PUT", "/api/stereotool/presets"},
+                                                                                       {"DELETE", "/api/stereotool/presets"},
+                                                                                       {"POST", "/api/stations/s1/processing/save-preset"},
+                                                                                       {"POST", "/api/login"}}) {
+    CAPTURE(method);
+    CAPTURE(path);
+    CHECK(status_or_reset(raw_status(port, head(method, path, big, f.cookie())), 413));
+  }
+  // a small upload without a session: read, then 401
+  CHECK(raw_status(port, head("POST", "/api/stereotool/presets", 2, "") + "{}") == 401);
+  // the session is checked when the headers come: an upload over 1 MB after logout is refused
+  {
+    Fixture g(dir.path + "-2");
+    g.setup_and_login();
+    const std::string cookie = g.cookie();
+    REQUIRE(g.client->Post("/api/logout", g.auth, "", "application/json")->status == 200);
+    const RawExchange x = raw_exchange(g.server->port(), head("POST", "/api/stereotool/presets", big, cookie));
+    CHECK(statuses_or_reset(x.statuses, 413));
+    std::error_code ec;
+    fs::remove_all(dir.path + "-2", ec);
+  }
+
+  // requests hidden in an upload body, beyond the old 1 MB mark too, are never executed (each copy
+  // an authenticated change that would set the PTP domain to 99)
+  const std::string cookie = f.cookie();
+  auto smuggled = [&](int) {
+    const std::string body = R"({"ptp_domain":99})";
+    return "PUT /api/config HTTP/1.0\r\nHost: 127.0.0.1\r\nCookie: " + cookie + "\r\nContent-Type: application/json\r\nContent-Length: " +
+           std::to_string(body.size()) + "\r\n\r\n" + body + "\r\n";
+  };
+  const std::vector<size_t> offsets = {4096, 1024 * 1024, 1024 * 1024 + 4096, 3 * 1024 * 1024};
+  for (size_t offset : offsets) {
+    CAPTURE(offset);
+    // (a) a body that is not JSON (text/plain): read, 415, closed
+    RawExchange x = raw_exchange(port,
+                                 hiding_request_with([&](size_t n) { return head("POST", "/api/stereotool/presets", n, cookie, "text/plain"); },
+                                                     offset, smuggled, kLastRequest),
+                                 10000);
+    CHECK(x.closed);
+    CHECK(statuses_or_reset(x.statuses, 415));  // the request after it is left unread (one per connection)
+    // (b) JSON type, not JSON: read, 400, closed
+    x = raw_exchange(port, hiding_request_with([&](size_t n) { return head("POST", "/api/stereotool/presets", n, cookie); }, offset, smuggled,
+                                               kLastRequest),
+                     10000);
+    CHECK(x.closed);
+    CHECK(statuses_or_reset(x.statuses, 400));
+    // (c) without a session: over 1 MB refused unread (413), under it read (401); closed either way
+    x = raw_exchange(port, hiding_request_with([&](size_t n) { return head("POST", "/api/stereotool/presets", n, ""); }, offset, smuggled,
+                                               kLastRequest),
+                     10000);
+    CHECK(x.closed);
+    CHECK(statuses_or_reset(x.statuses, offset >= 1024 * 1024 ? 413 : 401));
+    // (d) chunked, (e) two lengths, (f) an encoding, (g) multipart: refused on the headers
+    const auto with = [&](const std::string& extra, const std::string& type = "application/json") {
+      return [&, extra, type](size_t n) {
+        return "POST /api/stereotool/presets HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: " + cookie + "\r\nContent-Type: " + type + "\r\n" +
+               extra + "Content-Length: " + std::to_string(n) + "\r\n\r\n";
+      };
+    };
+    x = raw_exchange(port, hiding_request_with(with("Transfer-Encoding: chunked\r\n"), offset, smuggled, kLastRequest), 10000);
+    CHECK(x.closed);
+    CHECK(statuses_or_reset(x.statuses, 411));
+    x = raw_exchange(port, hiding_request_with(with("Content-Length: 5\r\n"), offset, smuggled, kLastRequest), 10000);
+    CHECK(x.closed);
+    CHECK(statuses_or_reset(x.statuses, 400));
+    x = raw_exchange(port, hiding_request_with(with("Content-Encoding: gzip\r\n"), offset, smuggled, kLastRequest), 10000);
+    CHECK(x.closed);
+    CHECK(statuses_or_reset(x.statuses, 415));
+    x = raw_exchange(port, hiding_request_with(with("", "multipart/form-data; boundary=xyz"), offset, smuggled, kLastRequest), 10000);
+    CHECK(x.closed);
+    CHECK(statuses_or_reset(x.statuses, 415));
+    CHECK(ptp_domain() == 0);
+  }
+  // (h) pipelining after an accepted upload: only the first request is answered
+  {
+    const std::string body = upload_body("Pierwszy.sts", "dane").dump();
+    const std::string second = upload_body("Drugi.sts", "dane").dump();
+    const RawExchange x = raw_exchange(port, head("POST", "/api/stereotool/presets", body.size(), cookie) + body +
+                                                 head("POST", "/api/stereotool/presets", second.size(), cookie) + second + smuggled(0));
+    CHECK(x.closed);
+    CHECK(statuses_or_reset(x.statuses, 200));
+    const json presets = f.get("/api/stereotool/presets")["presets"];
+    CHECK(presets.dump().find("Pierwszy.sts") != std::string::npos);
+    CHECK(presets.dump().find("Drugi.sts") == std::string::npos);
+  }
+  CHECK(ptp_domain() == 0);
+  f.get("/api/config");  // still answering
+}
+
 #endif  // BAM_WITH_CODECS

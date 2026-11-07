@@ -43,9 +43,15 @@ bool refuse(const httplib::Request& req, httplib::Response& res, size_t max_body
 // A body that is not JSON (and /api/setup always needs a JSON body). Checked after the body was read.
 bool wrong_body_type(const httplib::Request& req);
 
+// The body size limit of one request, decided on its headers (method, path, cookie) before any
+// body is read; at most the max_body_bytes given to install_request_guard.
+using BodyLimit = std::function<size_t(const httplib::Request&)>;
+
 // Sets up `server`: one request per connection, the body size limit, JSON answers for httplib's
-// own refusals, and a pre-routing handler with the security headers and refuse().
-void install_request_guard(httplib::Server& server, size_t max_body_bytes = kMaxBodyBytes);
+// own refusals, and a pre-routing handler with the security headers and refuse(). With `limit`,
+// each request gets the smaller of limit(req) and `max_body_bytes` (e.g. one upload route
+// allowed more than the rest); without it, `max_body_bytes` for every request.
+void install_request_guard(httplib::Server& server, size_t max_body_bytes = kMaxBodyBytes, BodyLimit limit = {});
 
 enum class Access { Public, Session };
 

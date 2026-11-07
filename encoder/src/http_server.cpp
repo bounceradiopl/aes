@@ -4,6 +4,7 @@
 
 #include <httplib.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -14,6 +15,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <set>
+#include <string_view>
 #include <thread>
 
 #include "bam/auth.hpp"
@@ -96,6 +98,98 @@ const char* icecast_state_code(IcecastState s) {
   return "idle";
 }
 
+// RFC 4648 base64 with padding (the preset files travel inside JSON).
+constexpr char kBase64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+std::string base64_encode(std::string_view in) {
+  std::string out;
+  out.reserve((in.size() + 2) / 3 * 4);
+  size_t i = 0;
+  for (; i + 2 < in.size(); i += 3) {
+    const uint32_t v = uint32_t(uint8_t(in[i])) << 16 | uint32_t(uint8_t(in[i + 1])) << 8 | uint8_t(in[i + 2]);
+    for (int k = 18; k >= 0; k -= 6) out += kBase64[(v >> k) & 63];
+  }
+  if (i < in.size()) {
+    uint32_t v = uint32_t(uint8_t(in[i])) << 16;
+    if (i + 1 < in.size()) v |= uint32_t(uint8_t(in[i + 1])) << 8;
+    out += kBase64[(v >> 18) & 63];
+    out += kBase64[(v >> 12) & 63];
+    out += i + 1 < in.size() ? kBase64[(v >> 6) & 63] : '=';
+    out += '=';
+  }
+  return out;
+}
+
+// Strict: the standard alphabet, padded to a multiple of 4, '=' only at the end (no spaces, no
+// line breaks, no "data:" prefix). nullopt when it is not such a text.
+std::optional<std::string> base64_decode(std::string_view in) {
+  if (in.size() % 4 != 0) return std::nullopt;
+  int8_t value[256];
+  std::fill(std::begin(value), std::end(value), int8_t(-1));
+  for (int k = 0; k < 64; ++k) value[uint8_t(kBase64[k])] = int8_t(k);
+  size_t pad = 0;
+  if (!in.empty() && in.back() == '=') pad = in.size() >= 2 && in[in.size() - 2] == '=' ? 2 : 1;
+  std::string out;
+  out.reserve(in.size() / 4 * 3);
+  for (size_t i = 0; i < in.size(); i += 4) {
+    uint32_t v = 0;
+    const bool last = i + 4 == in.size();
+    for (size_t k = 0; k < 4; ++k) {
+      const char ch = in[i + k];
+      if (last && ch == '=' && k >= 4 - pad) {
+        v <<= 6;
+        continue;
+      }
+      const int8_t d = value[uint8_t(ch)];
+      if (d < 0) return std::nullopt;
+      v = v << 6 | uint32_t(d);
+    }
+    out += char((v >> 16) & 0xFF);
+    if (!last || pad < 2) out += char((v >> 8) & 0xFF);
+    if (!last || pad < 1) out += char(v & 0xFF);
+  }
+  return out;
+}
+
+// "11.07" for 11070
+std::string stereotool_version_text(int version) {
+  if (version <= 0) return {};
+  char buf[32];
+  std::snprintf(buf, sizeof buf, "%d.%02d", version / 1000, (version % 1000) / 10);
+  return buf;
+}
+
+json stereotool_library_json(const StereoToolInfo& i, bool with_path) {
+  json j = {{"checked", i.checked},
+            {"loading", i.loading},
+            {"available", i.available},
+            {"version", i.version},
+            {"version_text", stereotool_version_text(i.version)},
+            {"error", i.error},
+            {"abandoned", i.abandoned}};
+  if (with_path) j["path"] = i.path;
+  return j;
+}
+
+std::string web_url(int port) { return port > 0 ? "http://127.0.0.1:" + std::to_string(port) + "/" : std::string(); }
+
+json processing_json(const ProcessingStatus& p) {
+  return {{"enabled", p.enabled},
+          {"preset", p.preset},
+          {"state", processing_state_name(p.state)},
+          {"reason_code", processing_reason_name(p.reason_code)},
+          {"reason", p.reason},
+          {"latency_ms", round1(p.latency_ms)},
+          {"cpu_pct", round1(p.cpu_pct)},
+          {"license_valid", p.license_valid},
+          {"unlicensed_features", p.unlicensed_features},
+          {"web_port", p.web_port},
+          {"web_url", web_url(p.web_port)},
+          {"retries", p.retries},
+          {"retry_in_s", p.retry_in_s},
+          {"queue_dropped_frames", p.queue_dropped_frames}};
+}
+
 json ptp_json(const EncoderStatus& s) {
   return {{"enabled", s.ptp_enabled},
           {"state", ptp_state_code(s)},
@@ -175,7 +269,8 @@ json status_json(const EncoderStatus& s) {
                         {"peak_db", peaks(st.peak_db)},
                         {"skipped_frames", st.skipped_frames},
                         {"inputs", std::move(inputs)},
-                        {"streams", std::move(streams)}});
+                        {"streams", std::move(streams)},
+                        {"processing", processing_json(st.processing)}});
   }
   return {{"product", kEncoderProductName},
           {"version", kEncoderVersion},
@@ -183,6 +278,7 @@ json status_json(const EncoderStatus& s) {
           {"uptime_s", s.uptime_s},
           {"interface_ip", s.interface_ip},
           {"ptp", ptp_json(s)},
+          {"stereotool", stereotool_library_json(s.stereotool, false)},
           {"stations", std::move(stations)}};
 }
 
@@ -299,6 +395,89 @@ json issues_json(const std::vector<EncoderConfigIssue>& issues) {
 
 json api_config(const EncoderConfig& c) { return json::parse(config_to_api_json(c)); }
 
+const char* preset_error_code(PresetError e) {
+  switch (e) {
+    case PresetError::BadName: return "bad_name";
+    case PresetError::Empty: return "empty";
+    case PresetError::TooLarge: return "too_large";
+    case PresetError::TooMany: return "too_many";
+    case PresetError::Exists: return "exists";
+    case PresetError::NotFound: return "not_found";
+    case PresetError::InUse: return "in_use";
+    case PresetError::NotRunning: return "not_running";
+    case PresetError::Failed: return "failed";
+    case PresetError::None: break;
+  }
+  return "";
+}
+
+int preset_error_status(PresetError e) {
+  switch (e) {
+    case PresetError::BadName:
+    case PresetError::Empty: return 400;
+    case PresetError::TooLarge: return 413;
+    case PresetError::TooMany:
+    case PresetError::Exists:
+    case PresetError::InUse:
+    case PresetError::NotRunning: return 409;
+    case PresetError::NotFound: return 404;
+    case PresetError::Failed:
+    case PresetError::None: break;
+  }
+  return 500;
+}
+
+// {"ok": false, "error": "<Polish>", "code": "<preset_error_code or another>", "field": "<body key>"}
+void send_refusal(httplib::Response& res, int status, const std::string& code, const std::string& message,
+                  const std::string& field = "") {
+  send_json(res, {{"ok", false}, {"error", message}, {"code", code}, {"field", field}}, status);
+}
+
+void send_preset_error(httplib::Response& res, const PresetResult& r, const std::string& field) {
+  const bool about_name = r.error == PresetError::BadName || r.error == PresetError::Exists;
+  const bool about_data = r.error == PresetError::Empty || r.error == PresetError::TooLarge;
+  send_refusal(res, preset_error_status(r.error), preset_error_code(r.error), r.message,
+               about_name ? field : about_data ? std::string("data_base64") : std::string());
+}
+
+// Every stored preset with the stations that use it (any case), sorted as the store lists them.
+json presets_json(const std::vector<PresetInfo>& presets, const EncoderConfig& c) {
+  json out = json::array();
+  for (const PresetInfo& p : presets) {
+    json users = json::array();
+    for (const StationConfig& st : c.stations)
+      if (same_preset_name(st.processing.preset, p.name)) users.push_back({{"id", st.id}, {"name", st.name}});
+    out.push_back({{"name", p.name}, {"bytes", p.bytes}, {"used_by", std::move(users)}});
+  }
+  return out;
+}
+
+json preset_info_json(const std::vector<PresetInfo>& presets, std::string_view name) {
+  for (const PresetInfo& p : presets)
+    if (same_preset_name(p.name, name)) return {{"name", p.name}, {"bytes", p.bytes}};
+  return nullptr;
+}
+
+std::string station_label(const StationConfig& st, size_t i) {  // "Stacja „Radio X”" / "Stacja 2"
+  return st.name.empty() ? "Stacja " + std::to_string(i + 1) : "Stacja „" + st.name + "”";
+}
+
+// A station update without "processing" keeps the stored block; a partial one changes only the
+// keys it has (e.g. {"enabled": false} keeps the preset, the slot and the key). `stored` is the
+// station's object of the API form.
+void keep_processing(json& station, const json& stored) {
+  if (!stored.is_object() || !stored.contains("processing")) return;
+  if (!station.contains("processing")) {
+    station["processing"] = stored["processing"];
+    return;
+  }
+  json& p = station["processing"];
+  if (!p.is_object()) return;  // config_from_json names the field
+  json merged = stored["processing"];
+  for (const auto& [key, value] : p.items()) merged[key] = value;
+  p = std::move(merged);
+}
+
 std::string station_path(size_t i) { return "stations[" + std::to_string(i) + "]"; }
 
 // Ruling E7: a stored password is not carried to another server. When an enabled stream lost its
@@ -350,8 +529,12 @@ struct EncoderHttpServer::Impl {
     server_used = false;
     server->new_task_queue = [] { return new httplib::ThreadPool(kHttpThreads); };
     // Ruling E11: one request per connection, the request allowlist before any body is read, JSON
-    // answers for httplib's own refusals (bam/http/guard.hpp).
-    http::install_request_guard(*server, kMaxApiBodyBytes);
+    // answers for httplib's own refusals (bam/http/guard.hpp). The body limit is 1 MB for every
+    // request except a preset upload with a valid session (6 MB: base64 of a 4 MB preset); an
+    // upload without one stays at 1 MB, so nobody can make the server read more before logging in.
+    http::install_request_guard(*server, kMaxPresetUploadBytes, [this](const httplib::Request& req) {
+      return req.method == "POST" && req.path == kPresetUploadPath && authorized(req) ? kMaxPresetUploadBytes : kMaxApiBodyBytes;
+    });
     routes(*server);
   }
 
@@ -414,28 +597,74 @@ struct EncoderHttpServer::Impl {
     std::string err;
     auto next = config_from_json(doc.dump(), &err);
     if (!next) {
-      send_json(res, {{"ok", false}, {"error", err}, {"issues", json::array({{{"field", ""}, {"message", err}}})}, {"notices", json::array()}}, 400);
+      send_json(res,
+                {{"ok", false},
+                 {"error", err},
+                 {"issues", json::array({{{"field", ""}, {"message", err}}})},
+                 {"notices", json::array()},
+                 {"warnings", json::array()}},
+                400);
       return;
     }
     merge_passwords(*next, prev);
     std::vector<std::string> notices = normalize_config(*next);
     std::vector<EncoderConfigIssue> issues = validate_config(*next);
+    if (issues.empty()) issues = missing_presets(*next, prev);
     if (!issues.empty()) {
       explain_dropped_passwords(issues, *next, prev);
-      send_json(res, {{"ok", false}, {"error", issues.front().message}, {"issues", issues_json(issues)}, {"notices", notices}}, 400);
+      send_json(res,
+                {{"ok", false}, {"error", issues.front().message}, {"issues", issues_json(issues)}, {"notices", notices}, {"warnings", json::array()}},
+                400);
       return;
     }
     if (!store(*next, &err)) {
       log_error("Nie można zapisać konfiguracji: " + err);
-      send_json(res, {{"ok", false}, {"error", "nie można zapisać konfiguracji: " + err}, {"issues", json::array()}, {"notices", notices}}, 500);
+      send_json(res,
+                {{"ok", false},
+                 {"error", "nie można zapisać konfiguracji: " + err},
+                 {"issues", json::array()},
+                 {"notices", notices},
+                 {"warnings", json::array()}},
+                500);
       return;
     }
     if (next->http_bind != prev.http_bind || next->http_port != prev.http_port)
       notices.push_back("Nowy adres panelu (" + next->http_bind + ":" + std::to_string(next->http_port) +
                         ") zadziała po ponownym uruchomieniu usługi");
-    json out = {{"ok", true}, {"issues", json::array()}, {"notices", notices}, {"config", api_config(*next)}};
+    json out = {{"ok", true},
+                {"issues", json::array()},
+                {"notices", notices},
+                {"warnings", issues_json(config_warnings(*next))},  // never quote a key
+                {"config", api_config(*next)}};
     if (done) done(out, *next);
     send_json(res, out);
+  }
+
+  // Processing switched on (or onto another preset) on an enabled station with a preset that is not
+  // uploaded: refused, as Stereo Tool could not load it (the station would run unprocessed). A
+  // station that already ran with it keeps it (a preset removed from the folder by hand does not
+  // block other changes); a disabled station may name one still to be uploaded.
+  std::vector<EncoderConfigIssue> missing_presets(const EncoderConfig& next, const EncoderConfig& prev) const {
+    std::vector<EncoderConfigIssue> issues;
+    std::vector<PresetInfo> stored;
+    bool listed = false;
+    for (size_t i = 0; i < next.stations.size(); ++i) {
+      const StationConfig& st = next.stations[i];
+      const ProcessingConfig& p = st.processing;
+      if (!st.enabled || !p.enabled || p.preset.empty()) continue;
+      bool had = false;
+      for (const StationConfig& o : prev.stations)
+        had |= o.id == st.id && o.enabled && o.processing.enabled && same_preset_name(o.processing.preset, p.preset);
+      if (had) continue;
+      if (!listed) {
+        stored = engine.list_presets();
+        listed = true;
+      }
+      if (std::any_of(stored.begin(), stored.end(), [&](const PresetInfo& s) { return same_preset_name(s.name, p.preset); })) continue;
+      issues.push_back({station_path(i) + ".processing.preset", station_label(st, i) + ": preset Stereo Tool „" + p.preset +
+                                                                     "” nie jest wgrany: wgraj go w oknie presetów albo wybierz inny"});
+    }
+    return issues;
   }
 
   enum class PasswordResult { Saved, AlreadySet, SaveFailed };
@@ -462,6 +691,11 @@ struct EncoderHttpServer::Impl {
   // handler runs only when both pass (bam/http/guard.hpp).
   httplib::Server::Handler guard(Access access, httplib::Server::Handler handler) {
     return http::guard(access, [this](const httplib::Request& req) { return authorized(req); }, std::move(handler));
+  }
+
+  bool has_station(const std::string& id) const {
+    const EncoderConfig c = engine.config();
+    return std::any_of(c.stations.begin(), c.stations.end(), [&](const StationConfig& st) { return st.id == id; });
   }
 
   static std::optional<size_t> find_station(const json& doc, const std::string& id) {
@@ -575,8 +809,16 @@ struct EncoderHttpServer::Impl {
       if (!body) return;
       if (!body->is_object()) return send_error(res, 400, "oczekiwano obiektu JSON");
       change(res, [&](json& doc) {
+        const json stored = doc["stations"];
         for (const auto& [key, value] : body->items())
           if (key != "password_hash") doc[key] = value;  // the panel password changes only through /api/password
+        // a station (matched by id) sent without its "processing" keeps the stored one
+        if (doc["stations"].is_array())
+          for (json& st : doc["stations"]) {
+            if (!st.is_object() || text(st, "id").empty()) continue;
+            for (const json& old : stored)
+              if (text(old, "id") == text(st, "id")) keep_processing(st, old);
+          }
         return true;
       });
     });
@@ -611,6 +853,7 @@ struct EncoderHttpServer::Impl {
               send_error(res, 404, "brak stacji „" + id + "”");
               return false;
             }
+            keep_processing(*body, doc["stations"][*i]);
             doc["stations"][*i] = *body;
             return true;
           },
@@ -633,6 +876,116 @@ struct EncoderHttpServer::Impl {
     get("/api/status", kSession, [this](const httplib::Request&, httplib::Response& res) { send_json(res, status_json(engine.status())); });
 
     get("/api/codecs", kSession, [](const httplib::Request&, httplib::Response& res) { send_json(res, codecs_json()); });
+
+    // ---- Stereo Tool processing (Bounce Encoder 1.1) ----
+
+    // The library (looked for and loaded here when nothing has asked for it yet: the panel asks
+    // only when it shows Stereo Tool; /api/status never loads it), the presets with the stations
+    // using them, each station's web interface and the configuration's warnings. No key.
+    get("/api/stereotool", kSession, [this](const httplib::Request&, httplib::Response& res) {
+      const StereoToolInfo library = stereotool_info();
+      const EncoderConfig c = engine.config();
+      const EncoderStatus status = engine.status();
+      json stations = json::array();
+      for (const StationConfig& sc : c.stations) {
+        const int slot = sc.processing.web_port_slot;
+        int active = 0;
+        for (const StationStatus& ss : status.stations)
+          if (ss.id == sc.id) active = ss.processing.web_port;
+        stations.push_back({{"id", sc.id},
+                            {"name", sc.name},
+                            {"enabled", sc.enabled},
+                            {"processing_enabled", sc.processing.enabled},
+                            {"preset", sc.processing.preset},
+                            {"license_key_set", !sc.processing.license_key.empty()},
+                            {"web_port_slot", slot},
+                            {"web_port", slot >= 0 && slot < kMaxStations ? c.stereotool_web_port_base + slot : 0},
+                            {"web_port_active", active},
+                            {"web_url", web_url(active)}});
+      }
+      send_json(res, {{"library", stereotool_library_json(library, true)},
+                      {"presets", presets_json(engine.list_presets(), c)},
+                      {"limits",
+                       {{"max_preset_bytes", kMaxPresetBytes},
+                        {"max_presets", kMaxPresets},
+                        {"max_name_chars", kMaxPresetNameChars},
+                        {"max_upload_bytes", kMaxPresetUploadBytes}}},
+                      {"web_port_base", c.stereotool_web_port_base},
+                      {"default_key_set", !c.stereotool_default_key.empty()},
+                      {"stations", std::move(stations)},
+                      {"warnings", issues_json(config_warnings(c))}});
+    });
+
+    get("/api/stereotool/presets", kSession, [this](const httplib::Request&, httplib::Response& res) {
+      send_json(res, {{"presets", presets_json(engine.list_presets(), engine.config())}});
+    });
+
+    // An upload: {"name": "FM Rock.sts", "data_base64": "<the file, RFC 4648 base64>"}. This route
+    // alone takes a body of up to 6 MB (with a session; see make_server).
+    post(kPresetUploadPath, kSession, [this](const httplib::Request& req, httplib::Response& res) {
+      auto body = parse_body(req, res);
+      if (!body) return;
+      if (!body->is_object()) return send_refusal(res, 400, "bad_request", "oczekiwano obiektu JSON z polami name i data_base64");
+      const auto name = body->find("name");
+      if (name == body->end() || !name->is_string() || name->get_ref<const std::string&>().empty())
+        return send_refusal(res, 400, "bad_name", "podaj nazwę presetu (plik .sts)", "name");
+      const auto data = body->find("data_base64");
+      if (data == body->end() || !data->is_string())
+        return send_refusal(res, 400, "bad_data", "brak treści presetu (pole data_base64)", "data_base64");
+      const std::string& encoded = data->get_ref<const std::string&>();
+      if (encoded.size() > (kMaxPresetBytes + 2) / 3 * 4)
+        return send_refusal(res, 413, "too_large", "preset większy niż " + std::to_string(kMaxPresetBytes / (1024 * 1024)) + " MB",
+                            "data_base64");
+      const auto bytes = base64_decode(encoded);
+      if (!bytes) return send_refusal(res, 400, "bad_data", "treść presetu nie jest poprawnym tekstem base64", "data_base64");
+      const std::string preset = name->get<std::string>();
+      const PresetResult r = engine.put_preset(preset, *bytes);
+      if (!r.ok()) return send_preset_error(res, r, "name");
+      const auto presets = engine.list_presets();
+      send_json(res, {{"ok", true}, {"preset", preset_info_json(presets, preset)}, {"presets", presets_json(presets, engine.config())}});
+    });
+
+    // A download, as JSON like the upload: {"name", "bytes", "data_base64"}.
+    get(R"(/api/stereotool/presets/(.+))", kSession, [this](const httplib::Request& req, httplib::Response& res) {
+      const std::string name = req.matches[1];
+      std::string data;
+      const PresetResult r = engine.get_preset(name, &data);
+      if (!r.ok()) return send_preset_error(res, r, "");
+      const json info = preset_info_json(engine.list_presets(), name);
+      send_json(res, {{"name", info.is_object() ? info["name"] : json(name)}, {"bytes", data.size()}, {"data_base64", base64_encode(data)}});
+    });
+
+    // Refused (409, naming the stations) while a station of the configuration uses it.
+    del(R"(/api/stereotool/presets/(.+))", kSession, [this](const httplib::Request& req, httplib::Response& res) {
+      const PresetResult r = engine.remove_preset(std::string(req.matches[1]));
+      if (!r.ok()) return send_preset_error(res, r, "");
+      send_json(res, {{"ok", true}, {"presets", presets_json(engine.list_presets(), engine.config())}});
+    });
+
+    // The station's current Stereo Tool settings (e.g. tuned in its web interface) as a new preset
+    // {"name": "..."}; waits for Stereo Tool up to 10 s.
+    post(R"(/api/stations/([A-Za-z0-9_-]+)/processing/save-preset)", kSession, [this](const httplib::Request& req, httplib::Response& res) {
+      const std::string id = req.matches[1];
+      auto body = parse_body(req, res);
+      if (!body) return;
+      if (!body->is_object()) return send_refusal(res, 400, "bad_request", "oczekiwano obiektu JSON z polem name");
+      const std::string name = text(*body, "name");
+      if (name.empty()) return send_refusal(res, 400, "bad_name", "podaj nazwę presetu (plik .sts)", "name");
+      if (!has_station(id)) return send_refusal(res, 404, "no_station", "brak stacji „" + id + "”");
+      const PresetResult r = engine.save_processing_preset(id, name);
+      if (!r.ok()) return send_preset_error(res, r, "name");
+      const auto presets = engine.list_presets();
+      send_json(res, {{"ok", true}, {"preset", preset_info_json(presets, name)}, {"presets", presets_json(presets, engine.config())}});
+    });
+
+    // The manual "Uruchom ponownie processing" (no body needed).
+    post(R"(/api/stations/([A-Za-z0-9_-]+)/processing/restart)", kSession, [this](const httplib::Request& req, httplib::Response& res) {
+      const std::string id = req.matches[1];
+      if (!has_station(id)) return send_refusal(res, 404, "no_station", "brak stacji „" + id + "”");
+      std::string err;
+      if (!engine.restart_processing(id, &err)) return send_refusal(res, 409, "not_running", err);
+      send_json(res, {{"ok", true}});
+    });
 
     get("/api/logs", kSession, [](const httplib::Request&, httplib::Response& res) {
       json out = json::array();
