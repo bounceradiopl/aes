@@ -15,6 +15,7 @@
 //   version_crashes 0 / bind_crashes 0 (Windows: an access violation in GetSoftwareVersion /
 //   global_setBindIp), save_fails 0, sts_rejects -1 (the .sts index SetStsValue refuses),
 //   save_sleep_us 0 (inside SavePreset), version_sleep_us 0 (inside GetSoftwareVersion: a slow load).
+// A manual run can set options through the environment (BAM_FAKE_STEREOTOOL_OPTIONS, see State).
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -76,7 +77,20 @@ struct State {
     values.clear();
     texts.clear();
   }
-  State() { defaults(); }
+  // BAM_FAKE_STEREOTOOL_OPTIONS="license_valid=0;process_sleep_us=30000" sets options when the
+  // library is loaded, for a manual run of the service with the fake (the panel's browser check);
+  // the tests never set it, and fake_stereotool_reset() goes back to the defaults.
+  State() {
+    defaults();
+    const char* env = std::getenv("BAM_FAKE_STEREOTOOL_OPTIONS");
+    for (std::string rest = env ? env : ""; !rest.empty();) {
+      const size_t end = rest.find(';');
+      const std::string item = rest.substr(0, end);
+      rest = end == std::string::npos ? std::string() : rest.substr(end + 1);
+      const size_t eq = item.find('=');
+      if (eq != std::string::npos && options.count(item.substr(0, eq))) options[item.substr(0, eq)] = std::atof(item.c_str() + eq + 1);
+    }
+  }
   double opt(const char* name) {
     auto it = options.find(name);
     return it == options.end() ? 0.0 : it->second;

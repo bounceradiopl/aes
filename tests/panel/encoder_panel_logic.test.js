@@ -296,3 +296,121 @@ test("renaming a running station warns that its streams reconnect", () => {
   assert.equal(L.renameRestartsStreams(saved, { ...saved, name: "X", enabled: false }), false);  // stops anyway
   assert.equal(L.renameRestartsStreams(saved, { ...saved, name: "X", streams: [{ id: "str1", enabled: false }] }), false);
 });
+
+// ---------------------------------------------------------------- Stereo Tool processing (1.1)
+const TEST_KEY = "<TESTKEY1234>";
+
+test("licence key shape: the server's rule, and the message never quotes the key", () => {
+  assert.equal(L.keyShapeError(""), "");
+  assert.equal(L.keyShapeError("   "), "");  // blank = no change
+  assert.equal(L.keyShapeError(TEST_KEY), "");
+  assert.equal(L.keyShapeError(`  ${TEST_KEY} `), "");  // the server trims blanks
+  assert.match(L.keyShapeError("TESTKEY1234"), /„<” .* „>”/);
+  assert.match(L.keyShapeError("<TESTKEY1234"), /„<” .* „>”/);
+  assert.match(L.keyShapeError("<TESTKĘY1234>"), /ASCII/);
+  assert.match(L.keyShapeError("<TEST\tKEY>"), /ASCII/);
+  assert.match(L.keyShapeError(`<${"A".repeat(255)}>`), /256/);
+  assert.equal(L.keyShapeError(`<${"A".repeat(254)}>`), "");
+  for (const bad of ["TESTKEY1234", "<TESTKĘY1234>", `<${"A".repeat(255)}>`]) assert.equal(L.keyShapeError(bad).includes("TESTK"), false);
+});
+
+test("preset names: the server's rule (valid_preset_name)", () => {
+  for (const ok of ["FM Rock.sts", "a.sts", "Radio_1-b.STS", "x.y.sts", "COM10.sts", "console.sts"]) assert.equal(L.presetNameError(ok), "", ok);
+  for (const bad of ["", ".sts", "FM.txt", " FM.sts", "Mój.sts", "a/b.sts", "a\\b.sts", "..sts", "-.sts", " .sts",
+    "CON.sts", "nul.sts", "com1.sts", "LPT9.sts", "con .sts", `${"a".repeat(61)}.sts`, "<TESTKEY1234>.sts"])
+    assert.notEqual(L.presetNameError(bad), "", bad);
+  assert.equal(L.presetNameError(`${"a".repeat(60)}.sts`), "");
+});
+
+test("a file name becomes a preset name the server accepts", () => {
+  assert.equal(L.presetUploadName("FM Rock.sts"), "FM Rock.sts");
+  assert.equal(L.presetUploadName("Mój Łódź preset.sts"), "Moj Lodz preset.sts");
+  assert.equal(L.presetUploadName("radio (2).STS"), "radio _2_.STS");
+  assert.equal(L.presetUploadName("  ustawienia"), "ustawienia.sts");
+  assert.equal(L.presetUploadName("C:\\presety\\x.sts"), "x.sts");
+  assert.equal(L.presetUploadName("con.sts"), "con_.sts");
+  assert.equal(L.presetUploadName("ąę.sts"), "ae.sts");
+  assert.equal(L.presetUploadName("ж.sts"), "preset.sts");
+  const long = L.presetUploadName(`${"b".repeat(100)}.sts`);
+  assert.equal(long.length, 64);
+  assert.equal(L.presetNameError(long), "");
+  for (const f of ["Mój Łódź preset.sts", "radio (2).STS", "con.sts", "ж.sts", "  .sts", "....", "<x>"]) assert.equal(L.presetNameError(L.presetUploadName(f)), "", f);
+  assert.equal(L.withSts("Strojony"), "Strojony.sts");
+  assert.equal(L.withSts(" Strojony.STS "), "Strojony.STS");
+  assert.equal(L.withSts(""), "");
+});
+
+test("the station body never carries license_key_set; a typed key and the clear flag go through", () => {
+  const st = { id: "s1", name: "R", enabled: true, inputs: [], streams: [],
+    processing: { enabled: true, license_key: "", preset: "FM.sts", web_port_slot: 2, license_key_set: true } };
+  assert.deepEqual(L.stationBody(st).processing, { enabled: true, license_key: "", preset: "FM.sts", web_port_slot: 2 });
+  st.processing.license_key_clear = true;
+  assert.equal(L.stationBody(st).processing.license_key_clear, true);
+  assert.deepEqual(L.newStation().processing, { enabled: false, license_key: "", preset: "", web_port_slot: -1 });
+});
+
+test("processing states in Polish", () => {
+  const p = (x) => ({ enabled: true, preset: "FM.sts", state: "running", reason_code: "", reason: "", latency_ms: 7.7, cpu_pct: 12.34,
+    license_valid: true, unlicensed_features: "", web_port: 8100, web_url: "http://127.0.0.1:8100/", retries: 0, retry_in_s: -1, ...x });
+  assert.deepEqual(L.processingState(null, true), { kind: "", text: "wyłączony" });
+  assert.equal(L.processingState(p({ enabled: false, state: "off" }), true).text, "wyłączony");
+  assert.equal(L.processingState(p({}), false).text, "stacja wyłączona");
+  assert.equal(L.processingState(p({}), true).kind, "on");
+  assert.equal(L.processingState(p({}), true).text, "działa · CPU 12,3 %");
+  assert.equal(L.processingState(p({ state: "bypass", reason_code: "starting", reason: "uruchamianie Stereo Tool" }), true).kind, "warn");
+  const slow = L.processingState(p({ state: "bypass", reason_code: "too_slow", reason: "Stereo Tool nie nadąża (…) — sygnał bez processingu", retry_in_s: 25 }), true);
+  assert.equal(slow.kind, "warn");
+  assert.equal(slow.text, "nie nadąża · ponowna próba za 25 s");
+  assert.match(slow.title, /sygnał bez processingu/);
+  assert.equal(L.processingState(p({ state: "bypass", reason_code: "too_slow", retry_in_s: 125 }), true).text, "nie nadąża · ponowna próba za 2 min 5 s");
+  assert.equal(L.processingState(p({ state: "bypass", reason_code: "too_slow", retry_in_s: -1 }), true).text, "nie nadąża");
+  const lic = L.processingState(p({ state: "bypass", reason_code: "licence", license_valid: false, unlicensed_features: "Fake: Declipper" }), true);
+  assert.equal(lic.kind, "err");
+  assert.equal(lic.text, "licencja: brak Fake: Declipper");
+  assert.equal(L.processingState(p({ state: "bypass", reason_code: "crash" }), true).text, "awaria: uruchom ponownie usługę");
+  assert.equal(L.processingState(p({ state: "error", reason_code: "setup", reason: "nie można wczytać presetu" }), true).text, "nie można wczytać presetu");
+  assert.equal(L.processingState(p({ state: "bypass", reason_code: "saving" }), true).text, "zapis presetu…");
+  assert.equal(L.processingState(p({ state: "off", web_port: 0 }), true).kind, "err");
+  assert.equal(L.fmtPct(12.34), "12,3 %");
+  assert.equal(L.fmtMs(7.66), "7,7 ms");
+});
+
+test("licence warning, Stereo Tool web interface and its note", () => {
+  const p = { enabled: true, state: "running", reason_code: "", license_valid: true, unlicensed_features: "", web_port: 8100, web_url: "http://127.0.0.1:8100/" };
+  assert.equal(L.licenceWarning(p), "");
+  assert.equal(L.licenceWarning({ ...p, license_valid: false }), "");  // not checked yet
+  assert.match(L.licenceWarning({ ...p, state: "bypass", reason_code: "licence", license_valid: false, unlicensed_features: "Fake: Declipper, Fake: Multiband" }),
+    /nie obejmuje funkcji: Fake: Declipper, Fake: Multiband/);
+  assert.match(L.licenceWarning({ ...p, state: "bypass", reason_code: "licence", license_valid: false }), /nie obejmuje funkcji/);
+  assert.equal(L.webUiUrl(p), "http://127.0.0.1:8100/");
+  assert.equal(L.webUiUrl({ ...p, state: "bypass" }), "http://127.0.0.1:8100/");  // up, bypassed: still tunable
+  assert.equal(L.webUiUrl({ ...p, web_port: 0, web_url: "" }), "");
+  assert.equal(L.webUiUrl({ ...p, state: "off" }), "");
+  assert.equal(L.webUiUrl({ ...p, state: "error" }), "");
+  assert.equal(L.webUiUrl({ ...p, web_port: 70000 }), "");
+  assert.equal(L.webUiUrl({ ...p, web_url: "http://evil.example/" }), "http://127.0.0.1:8100/");  // only ever 127.0.0.1
+  assert.equal(L.webUiUrl(null), "");
+  assert.equal(L.isLocalHost("127.0.0.1"), true);
+  assert.equal(L.isLocalHost("localhost"), true);
+  assert.equal(L.isLocalHost("[::1]"), true);
+  assert.equal(L.isLocalHost("192.168.1.20"), false);
+});
+
+test("preset choices keep a preset that is not uploaded", () => {
+  const presets = [{ name: "A.sts" }, { name: "b.sts" }];
+  assert.deepEqual(L.presetChoices(presets, "a.STS").map((o) => o.value), ["", "A.sts", "b.sts"]);
+  assert.equal(L.presetChoices(presets, "a.STS").find((o) => o.selected).value, "A.sts");  // any case
+  const missing = L.presetChoices(presets, "Gone.sts");
+  assert.deepEqual(missing.at(-1), { value: "Gone.sts", label: "Gone.sts (nie ma go w folderze presetów)", selected: true, missing: true });
+  assert.equal(L.presetChoices(presets, "")[0].selected, true);
+  assert.equal(L.presetChoices([], "")[0].label, "— wybierz preset —");
+});
+
+test("the station shape includes processing (switch and preset)", () => {
+  const cfg = [{ id: "s1", name: "R", enabled: true, inputs: [], streams: [], processing: { enabled: true, preset: "A.sts", license_key: "", web_port_slot: 0 } }];
+  const live = [{ id: "s1", name: "R", enabled: true, running: true, inputs: [], streams: [], processing: { enabled: true, preset: "A.sts", state: "running" } }];
+  assert.equal(L.stationsShape(cfg), L.stationsShape(live));
+  live[0].processing.preset = "B.sts";
+  assert.notEqual(L.stationsShape(cfg), L.stationsShape(live));
+  assert.equal(L.stationsShape([{ id: "s1", inputs: [], streams: [] }]), L.stationsShape([{ id: "s1", inputs: [], streams: [], processing: { enabled: false, preset: "" } }]));
+});

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Bounce Encoder web panel: pure helpers without the DOM (formatting, the codec choices from
-// /api/codecs, the bitrate hint of spec §8, SDP summary, validation issues, rule E7). Loaded by the
-// panel before app.js (window.EncoderLogic) and by the node tests in tests/panel/ (module.exports).
+// /api/codecs, the bitrate hint of spec §8, SDP summary, validation issues, rule E7, Stereo Tool
+// processing: key and preset name rules, states). Loaded by the panel before app.js
+// (window.EncoderLogic) and by the node tests in tests/panel/ (module.exports).
 "use strict";
 
 (function (L) {
@@ -11,6 +12,10 @@
     delayMax: 60, delayStep: 0.1,
     latencyMinMs: 1, latencyMaxMs: 1000,
     sdpMaxBytes: 64 * 1024,
+    keyMaxChars: 256,           // kMaxStereoToolKeyChars
+    presetNameMaxChars: 64,     // kMaxPresetNameChars
+    presetMaxBytes: 4 * 1024 * 1024,
+    webPortBaseMin: 1024, webPortBaseMax: 65000,
   };
 
   // ---------------------------------------------------------------- formatting (Polish)
@@ -35,6 +40,17 @@
   L.fmtRate = (hz) => `${(Number(hz) / 1000).toLocaleString("pl-PL", { maximumFractionDigits: 2 })} kHz`;
 
   L.fmtKbps = (v) => `${L.fmtNum(v, 1)} kb/s`;
+
+  L.fmtPct = (v) => `${L.fmtNum(v, 1)} %`;
+
+  L.fmtMs = (v) => `${L.fmtNum(v, 1)} ms`;
+
+  // A wait in whole seconds: "25 s", "2 min 5 s", "10 min".
+  L.fmtWait = (s) => {
+    const t = Math.max(0, Math.round(Number(s || 0)));
+    if (t < 60) return `${t} s`;
+    return t % 60 ? `${Math.floor(t / 60)} min ${t % 60} s` : `${t / 60} min`;
+  };
 
   L.fmtBytes = (n) => {
     const v = Number(n || 0);
@@ -223,7 +239,9 @@
     saved.name !== draft.name && (draft.streams || []).some((s) => s.enabled);
 
   // The station as the API takes it: panel-only keys (leading "_") and password_set left out.
-  L.stationBody = (station) => JSON.parse(JSON.stringify(station, (k, v) => (k.startsWith("_") || k === "password_set" ? undefined : v)));
+  // license_key_set is the server's answer only; a typed key ("" = keep) and license_key_clear go through.
+  L.stationBody = (station) => JSON.parse(JSON.stringify(station, (k, v) =>
+    (k.startsWith("_") || k === "password_set" || k === "license_key_set" ? undefined : v)));
 
   // ---------------------------------------------------------------- new items
   L.newInput = () => ({ enabled: true, name: "", sdp: "", gain_db: 0, delay_s: 0, latency_us: 5000 });
@@ -237,7 +255,10 @@
     });
   };
 
-  L.newStation = () => ({ name: "", enabled: true, inputs: [L.newInput()], streams: [] });
+  // web_port_slot -1: the server gives a new station the lowest free slot.
+  L.newProcessing = () => ({ enabled: false, license_key: "", preset: "", web_port_slot: -1 });
+
+  L.newStation = () => ({ name: "", enabled: true, inputs: [L.newInput()], streams: [], processing: L.newProcessing() });
 
   // ---------------------------------------------------------------- live states (/api/live)
   // { kind: "" | "on" | "warn" | "err", text }: the dot colour and the Polish state (a stream on air
@@ -275,5 +296,122 @@
   // What the station list is built from, the same for /api/config stations and /api/live
   // stations: when they differ (a change from another tab or computer) the panel reloads.
   L.stationsShape = (stations) => JSON.stringify((stations || []).map((s) =>
-    [s.id, s.name, s.enabled, (s.inputs || []).length, (s.streams || []).map((x) => [x.id, x.enabled, x.codec, x.host, x.port, x.mount])]));
+    [s.id, s.name, s.enabled, (s.inputs || []).length, (s.streams || []).map((x) => [x.id, x.enabled, x.codec, x.host, x.port, x.mount]),
+      !!s.processing?.enabled, s.processing?.preset || ""]));
+
+  // ---------------------------------------------------------------- Stereo Tool processing
+  const BLANKS = /^[ \t\r\n]+|[ \t\r\n]+$/g;  // the server's trim_blanks
+
+  // Why a typed licence key has the wrong shape (key_shape_error of the server), "" when it is fine
+  // or blank (blank = keep the stored key). Never quotes the key.
+  L.keyShapeError = (text) => {
+    const key = String(text ?? "").replace(BLANKS, "");
+    if (!key) return "";
+    if (key.length > L.LIMITS.keyMaxChars) return `może mieć najwyżej ${L.LIMITS.keyMaxChars} znaków`;
+    if (!/^[\x20-\x7e]*$/.test(key)) return "może zawierać tylko drukowalne znaki ASCII (bez polskich liter i znaków sterujących)";
+    if (key.length < 2 || key[0] !== "<" || key.at(-1) !== ">") return "musi zaczynać się znakiem „<” i kończyć znakiem „>” (wklej cały klucz z nawiasami)";
+    return "";
+  };
+
+  const DEVICE = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;
+  const deviceStem = (name) => DEVICE.test(name.slice(0, (name.indexOf(".") + 1 || name.length + 1) - 1).replace(BLANKS, ""));
+
+  // valid_preset_name of the server: letters, digits, space, "-", "_", ".", no leading space, ".sts",
+  // at most 64 characters, a letter or digit before the extension, no Windows device name.
+  L.presetNameError = (name) => {
+    const n = String(name ?? "");
+    const rule = `litery, cyfry, spacja, „-”, „_” i „.”, bez spacji na początku, z rozszerzeniem .sts, najwyżej ${L.LIMITS.presetNameMaxChars} znaki`;
+    if (n.length <= 4 || n.length > L.LIMITS.presetNameMaxChars || n[0] === " " || !/^[A-Za-z0-9 _.-]+$/.test(n) ||
+      n.slice(-4).toLowerCase() !== ".sts" || !/[A-Za-z0-9]/.test(n.slice(0, -4))) return `nieprawidłowa nazwa presetu (${rule})`;
+    if (deviceStem(n)) return "nazwa presetu zarezerwowana przez Windows (CON, PRN, AUX, NUL, COM0–9, LPT0–9)";
+    return "";
+  };
+
+  // A preset name typed without the extension gets ".sts".
+  L.withSts = (name) => {
+    const n = String(name ?? "").replace(BLANKS, "");
+    return !n || n.toLowerCase().endsWith(".sts") ? n : `${n}.sts`;
+  };
+
+  // The name an uploaded file is stored under: its base name with Polish (and other Latin) letters
+  // plain, every other character the server refuses as "_", ".sts" added, cut to 64 characters.
+  L.presetUploadName = (fileName) => {
+    let n = String(fileName ?? "").split(/[\\/]/).pop()
+      .replace(/ł/g, "l").replace(/Ł/g, "L").normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^A-Za-z0-9 _.-]/g, "_").replace(/^ +/, "");
+    let base = n.toLowerCase().endsWith(".sts") ? n.slice(0, -4) : n;
+    const ext = n.toLowerCase().endsWith(".sts") ? n.slice(-4) : ".sts";
+    if (deviceStem(base + ext)) {
+      const dot = base.indexOf(".");
+      base = dot < 0 ? `${base}_` : `${base.slice(0, dot)}_${base.slice(dot)}`;
+    }
+    base = base.slice(0, L.LIMITS.presetNameMaxChars - ext.length);
+    if (!/[A-Za-z0-9]/.test(base)) base = "preset";
+    return base + ext;
+  };
+
+  // The preset select: "" first, every uploaded preset, and the station's preset when it is not
+  // uploaded (kept selectable, so opening the editor never changes the station).
+  L.presetChoices = (presets, current) => {
+    const cur = String(current || "");
+    const found = (presets || []).find((p) => p.name.toLowerCase() === cur.toLowerCase());
+    const out = [{ value: "", label: "— wybierz preset —", selected: !cur }];
+    for (const p of presets || []) out.push({ value: p.name, label: p.name, selected: !!cur && p === found });
+    if (cur && !found) out.push({ value: cur, label: `${cur} (nie ma go w folderze presetów)`, selected: true, missing: true });
+    return out;
+  };
+
+  // The processing of a station (/api/live stations[].processing) as { kind, text, title }: a short
+  // text for the rows, the full reason of the service in the title.
+  L.processingState = (p, stationOn) => {
+    if (!p || !p.enabled) return { kind: "", text: "wyłączony" };
+    if (!stationOn) return { kind: "", text: "stacja wyłączona" };
+    const title = p.reason || "";
+    if (p.state === "running")
+      return { kind: "on", text: `działa · CPU ${L.fmtPct(p.cpu_pct)}`, title: `działa · procesor ${L.fmtPct(p.cpu_pct)} · opóźnienie ${L.fmtMs(p.latency_ms)}` };
+    if (p.state === "bypass" || p.state === "error") {
+      const warn = (text) => ({ kind: "warn", text, title: title || text });
+      const err = (text) => ({ kind: "err", text, title: title || text });
+      switch (p.reason_code) {
+        case "starting": return warn("uruchamianie…");
+        case "licence_check": return warn("sprawdzanie licencji…");
+        case "saving": return warn("zapis presetu…");
+        case "restart_waits": return warn("czeka na Stereo Tool…");
+        case "too_slow": return warn(p.retry_in_s >= 0 ? `nie nadąża · ponowna próba za ${L.fmtWait(p.retry_in_s)}` : "nie nadąża");
+        case "licence": {
+          const s = err(p.unlicensed_features ? `licencja: brak ${p.unlicensed_features}` : "licencja nie obejmuje ustawień");
+          if (p.unlicensed_features) s.title = `${s.title}: ${p.unlicensed_features}`;
+          return s;
+        }
+        case "crash": return err("awaria: uruchom ponownie usługę");
+        case "process": return err("błąd Stereo Tool");
+        case "setup": return err(p.reason || "błąd uruchomienia Stereo Tool");
+        default: return err(p.reason || "bez processingu");
+      }
+    }
+    return { kind: "err", text: p.reason || "nie działa", title };
+  };
+
+  // The licence warning of a station whose licence does not cover its settings, "" otherwise
+  // (also while the licence has not been checked yet).
+  L.licenceWarning = (p) => {
+    if (!p?.enabled || !(p.reason_code === "licence" || (p.license_valid === false && p.unlicensed_features))) return "";
+    const what = p.unlicensed_features ? `nie obejmuje funkcji: ${p.unlicensed_features}` : "nie obejmuje funkcji używanych w ustawieniach";
+    return `Licencja Stereo Tool ${what}. Stacja nadaje sygnał bez processingu: wyłącz te funkcje w presecie (interfejs WWW) albo użyj klucza z odpowiednią licencją.`;
+  };
+
+  // The Stereo Tool web interface of a station while its instance is up, "" otherwise. Built from
+  // the port only: it is always on 127.0.0.1 (the service binds it there).
+  L.webUiUrl = (p) => {
+    const port = Number(p?.web_port);
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) return "";
+    if (p.state !== "running" && p.state !== "bypass") return "";
+    return `http://127.0.0.1:${port}/`;
+  };
+
+  // The panel is open on the encoder computer itself (127.0.0.1 then reaches Stereo Tool).
+  L.isLocalHost = (hostname) => {
+    const h = String(hostname || "").toLowerCase();
+    return h === "localhost" || h === "[::1]" || h === "::1" || /^127\.\d+\.\d+\.\d+$/.test(h);
+  };
 })(typeof module !== "undefined" && module.exports ? module.exports : (window.EncoderLogic = {}));
