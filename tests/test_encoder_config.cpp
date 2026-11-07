@@ -1297,15 +1297,56 @@ TEST_CASE("encoder config: a station id is never given twice, even after its sta
   CHECK(loaded->next_station_number == 9);
 
   // a counter edited by hand far out of range is brought back (no overflow)
-  for (int64_t bad : {int64_t(-5), int64_t(0), int64_t(2147483647), int64_t(9'000'000'000'000'000'000)}) {
+  for (int64_t bad : {int64_t(-5), int64_t(0), int64_t(2147483647)}) {
     file["next_station_number"] = bad;
     loaded = be::config_from_json(file.dump(), &err);
     REQUIRE_MESSAGE(loaded, err);
     be::normalize_config(*loaded);
     CHECK(loaded->next_station_number >= 9);
-    CHECK(loaded->next_station_number <= 100'000'000'000'000'001LL);  // 10^17 + 1 at most: no overflow
     CHECK(be::validate_config(*loaded).empty());
   }
+  // a counter past the last number ids may have: no overflow, and the id it would give is refused
+  file["next_station_number"] = int64_t(9'000'000'000'000'000'000);
+  loaded = be::config_from_json(file.dump(), &err);
+  REQUIRE_MESSAGE(loaded, err);
+  be::normalize_config(*loaded);
+  CHECK(loaded->next_station_number <= 100'000'000'000'000'001LL);
+  CHECK(find_issue(be::validate_config(*loaded), "stations[2].id"));
+}
+
+TEST_CASE("encoder config: station numbers never wrap: ids past 17 digits are refused, the counter never goes back (ruling S4)") {
+  auto c = be::default_encoder_config();
+  be::StationConfig st;
+  for (const char* id : {"s100000000000000000", "S100000000000000000", "s1234567890123456789", "s99999999999999999999999999999"}) {
+    CAPTURE(id);
+    c.stations = {st};
+    c.stations[0].id = id;
+    const auto issues = be::validate_config(c);
+    const auto* i = find_issue(issues, "stations[0].id");
+    REQUIRE_MESSAGE(i, dump(issues));
+    CHECK_MESSAGE(contains(i->message, "za duży numer"), i->message);
+  }
+  // the largest number is fine; the next new station would pass it and is refused, never wrapped
+  c.stations = {st};
+  c.stations[0].id = "s99999999999999999";
+  CHECK(be::validate_config(c).empty());
+  be::normalize_config(c);
+  CHECK(c.next_station_number == 100'000'000'000'000'000LL);
+  const be::EncoderConfig prev = c;
+  be::EncoderConfig next = c;
+  next.stations = {be::StationConfig{}};  // that station deleted, a new one added in the same update
+  be::retire_reused_ids(next, prev);
+  be::merge_passwords(next, prev);
+  be::normalize_config(next);
+  CHECK(next.stations[0].id != "s99999999999999999");
+  CHECK(find_issue(be::validate_config(next), "stations[0].id"));
+  CHECK(next.next_station_number >= prev.next_station_number);
+  // leading zeros count as the number they are
+  c = be::default_encoder_config();
+  c.stations = {st, st};
+  c.stations[0].id = "s0000000000000000000000000000005";
+  be::normalize_config(c);
+  CHECK(c.stations[1].id == "s6");
 }
 
 #endif  // BAM_WITH_CODECS

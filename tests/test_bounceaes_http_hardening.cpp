@@ -17,6 +17,7 @@
 
 #include "bam/auth.hpp"
 #include "bam/engine.hpp"
+#include "bam/http/guard.hpp"
 #include "bam/http_server.hpp"
 #include "bam/platform/event.hpp"
 #include "bam/platform/process.hpp"
@@ -616,6 +617,19 @@ TEST_CASE("BounceAES HTTP: deeply nested or container-heavy JSON is refused befo
   r = f.client->Post("/api/login", flat, "application/json");
   CHECK(r->status == 400);
   CHECK_MESSAGE(json::parse(r->body)["error"].get<std::string>().find("zbyt wiele") != std::string::npos, r->body);
+  std::string numbers = "[0";
+  while (numbers.size() < 1'000'000) numbers += ",0";
+  numbers += "]";
+  r = f.client->Post("/api/login", numbers, "application/json");
+  CHECK(r->status == 400);
+  CHECK_MESSAGE(json::parse(r->body)["error"].get<std::string>().find("zbyt wiele wartości") != std::string::npos, r->body);
+  std::string keys = "{";
+  for (int i = 0; i < 90'000; ++i) keys += (i ? ",\"k" : "\"k") + std::to_string(i) + "\":0";
+  keys += "}";
+  const int64_t t1 = bp::monotonic_ns();
+  r = f.client->Post("/api/login", keys, "application/json");
+  CHECK(r->status == 400);
+  CHECK(bp::monotonic_ns() - t1 < 1'000'000'000);
   CHECK(bp::monotonic_ns() - t0 < 5'000'000'000);
   r = f.client->Post("/api/login", json{{"password", std::string(100'000, '{')}}.dump(), "application/json");
   REQUIRE_MESSAGE(r, httplib::to_string(r.error()));
@@ -627,4 +641,19 @@ TEST_CASE("BounceAES HTTP: deeply nested or container-heavy JSON is refused befo
   auto put = f.client->Put("/api/config", f.auth, cfg->body, "application/json");
   REQUIRE(put);
   CHECK_MESSAGE(put->status == 200, put->body);
+  // the largest configuration there can be (every mix with every source, every name long) stays
+  // far under the caps
+  bam::Config big = bam::default_config();
+  for (int m = 0; m < bam::kMaxMixes; ++m) {
+    bam::MixConfig mix;
+    for (int i = 0; i < bam::kMaxMixSources; ++i) mix.sources.push_back({"net-in:" + std::to_string(i + 1), -6.0, false});
+    big.mixes["mix-destination:" + std::to_string(m + 1)] = mix;
+  }
+  for (int d = 0; d < 256; ++d) big.routes["destination:" + std::to_string(d + 1)] = "source:" + std::to_string(d + 1);  // more than there are
+  const std::string text = bam::config_to_json(big);
+  CHECK_MESSAGE(bam::http::json_shape_error(text).empty(), bam::http::json_shape_error(text));
+  size_t values = 0;
+  for (char ch : text) values += ch == ',' || ch == ':';  // an upper bound (also counts inside strings)
+  CAPTURE(values);
+  CHECK(values * 3 < bam::http::kMaxJsonValues);
 }

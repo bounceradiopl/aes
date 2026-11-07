@@ -19,11 +19,17 @@
 namespace bam::http {
 
 inline constexpr size_t kMaxBodyBytes = 1024 * 1024;  // larger request bodies get 413
-// A request body nests objects and arrays at most this deep and holds at most this many of them
-// (parse_json_body): a parsed 1 MB of "[[[[…" takes ~72 MB, and code walking it recursively runs
-// out of stack. The panels' bodies nest 5 levels at most and hold a few hundred containers.
+// A request body nests objects and arrays at most this deep, holds at most this many of them, at
+// most kMaxJsonValues values (counted by their ',' and ':') and at most kMaxJsonMembers members in
+// one object (parse_json_body): a parsed 1 MB of "[[[[…" takes ~72 MB and code walking it
+// recursively runs out of stack, a flat 1 MB list ~6 MB, and an object of 90 000 keys takes
+// seconds (ordered_json looks every key up). The panels' bodies nest 5 levels at most; the largest
+// configuration of either program has a few thousand values (tests keep it under a third of the
+// cap); a preset upload is one string.
 inline constexpr size_t kMaxJsonDepth = 16;
 inline constexpr size_t kMaxJsonContainers = 10'000;
+inline constexpr size_t kMaxJsonValues = 20'000;
+inline constexpr size_t kMaxJsonMembers = 2'000;
 
 void send_json(httplib::Response& res, const nlohmann::ordered_json& j, int status = 200);
 void send_error(httplib::Response& res, int status, const std::string& message);
@@ -44,8 +50,8 @@ inline bool is_local(const httplib::Request& req) { return is_local_address(req)
 // The JSON media type, exactly: "application/json", optionally with a charset parameter.
 bool is_json_type(const std::string& value);
 
-// Why `text` may not be parsed as a request body, "" when it may: deeper than kMaxJsonDepth or more
-// than kMaxJsonContainers objects and arrays. A scan of the bytes (strings skipped): nothing is
+// Why `text` may not be parsed as a request body, "" when it may: over one of the caps above.
+// A scan of the bytes (strings skipped): nothing is
 // built for a body refused here.
 std::string json_shape_error(std::string_view text);
 // The request body as JSON (nlohmann ordered_json); otherwise answered with 400 {"error"} and

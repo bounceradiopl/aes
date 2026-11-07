@@ -26,6 +26,7 @@
 #include "bam/encoder/http_server.hpp"
 #include "bam/encoder/icecast.hpp"  // testing::base64
 #include "bam/encoder/paths.hpp"
+#include "bam/http/guard.hpp"
 #include "bam/log.hpp"
 #include "bam/platform/process.hpp"
 #include "bam/platform/tcp.hpp"
@@ -2049,6 +2050,15 @@ TEST_CASE("encoder HTTP: only the preset upload takes up to 6 MB, and only with 
     x = raw_exchange(port, expect(cookie, body.size()) + body);
     CHECK(x.closed);
     CHECK(x.statuses == std::vector<int>{100, 200});
+    // screened twice (before the 100 and at routing), its security headers are sent once
+    auto count = [&](const std::string& what) {
+      size_t n = 0;
+      for (size_t at = x.text.find(what); at != std::string::npos; at = x.text.find(what, at + 1)) ++n;
+      return n;
+    };
+    CHECK(count("X-Frame-Options: DENY") == 1);
+    CHECK(count("X-Content-Type-Options: nosniff") == 1);
+    CHECK(count("Cache-Control: no-store") == 1);
   }
   // (k) the path spelled with %2F is the same route and the same limit; a different path is not
   {
@@ -2111,6 +2121,27 @@ TEST_CASE("encoder HTTP: an id the client gives never reuses a deleted id or an 
   REQUIRE(f.put("/api/config", cfg)->status == 200);
   REQUIRE(f.post("/api/stations", station_json("Za nia", false, "haslo-h", "/h.mp3"))->status == 200);
   CHECK(ids() == std::vector<std::string>{"s99999999999", "s100000000000"});
+  // the largest number: what would come after it is refused, never wrapped back to a given id
+  cfg = f.get("/api/config");
+  json largest = station_json("Najwieksza", false, "haslo-i", "/i.mp3");
+  largest["id"] = "s99999999999999999";
+  cfg["stations"] = json::array({largest});
+  REQUIRE(f.put("/api/config", cfg)->status == 200);
+  r = f.post("/api/stations", station_json("Za nia", false, "haslo-j", "/j.mp3"));
+  CHECK(r->status == 400);
+  CHECK_MESSAGE(r->body.find("za duży numer") != std::string::npos, r->body);
+  cfg = f.get("/api/config");
+  cfg["stations"] = json::array({station_json("Zamiast", false, "haslo-k", "/k.mp3")});  // drops it, adds one
+  r = f.put("/api/config", cfg);
+  CHECK(r->status == 400);
+  CHECK(ids() == std::vector<std::string>{"s99999999999999999"});
+  for (const char* id : {"s100000000000000000", "s1234567890123456789"}) {
+    json too_big = station_json("Za duza", false, "haslo-l", "/l.mp3");
+    too_big["id"] = id;
+    cfg = f.get("/api/config");
+    cfg["stations"].push_back(too_big);
+    CHECK(f.put("/api/config", cfg)->status == 400);
+  }
 }
 
 TEST_CASE("encoder HTTP: deeply nested or container-heavy JSON is refused before it is parsed, even without a session") {
@@ -2141,6 +2172,26 @@ TEST_CASE("encoder HTTP: deeply nested or container-heavy JSON is refused before
   r = login(flat);
   CHECK(r->status == 400);
   CHECK_MESSAGE(json::parse(r->body)["error"].get<std::string>().find("zbyt wiele") != std::string::npos, r->body);
+  // a flat list of 1 MB of numbers, and an object of 90 000 keys (parsed in quadratic time)
+  std::string numbers = "[0";
+  while (numbers.size() < 1'000'000) numbers += ",0";
+  numbers += "]";
+  r = login(numbers);
+  CHECK(r->status == 400);
+  CHECK_MESSAGE(json::parse(r->body)["error"].get<std::string>().find("zbyt wiele wartości") != std::string::npos, r->body);
+  std::string keys = "{";
+  for (int i = 0; i < 90'000; ++i) keys += (i ? ",\"k" : "\"k") + std::to_string(i) + "\":0";
+  keys += "}";
+  const int64_t t1 = bp::monotonic_ns();
+  r = login(keys);
+  CHECK(r->status == 400);
+  CHECK(bp::monotonic_ns() - t1 < 1'000'000'000);
+  std::string wide = "{";  // under the value cap, over the members of one object
+  for (int i = 0; i < 2'500; ++i) wide += (i ? ",\"k" : "\"k") + std::to_string(i) + "\":0";
+  wide += "}";
+  r = login(wide);
+  CHECK(r->status == 400);
+  CHECK_MESSAGE(json::parse(r->body)["error"].get<std::string>().find("zbyt wiele pól") != std::string::npos, r->body);
   CHECK(bp::monotonic_ns() - t0 < 5'000'000'000);  // refused quickly: nothing was built
   // 16 levels are fine, 17 are not
   auto deep = [](int levels) {  // the object counts as one level
@@ -2148,10 +2199,47 @@ TEST_CASE("encoder HTTP: deeply nested or container-heavy JSON is refused before
   };
   CHECK(login(deep(16))->status == 401);
   CHECK(login(deep(17))->status == 400);
-  // the configuration (5 levels: stations, a station, its inputs, an input) still goes through
+  // the largest configuration there can be (16 stations, 3 inputs with SDP and 8 streams each)
+  // still goes through, with room to spare under every cap
   auto cfg = f.get("/api/config");
-  cfg["stations"] = json::array({station_json("Radio Gleboka", false, "haslo123")});
-  REQUIRE_MESSAGE(f.put("/api/config", cfg)->status == 200, "config");
+  cfg["stations"] = json::array();
+  for (int st = 0; st < be::kMaxStations; ++st) {
+    json station = station_json("Radio " + std::to_string(st), false, "haslo123", "/r" + std::to_string(st) + "-0.mp3");
+    station["inputs"] = json::array();
+    for (int i = 0; i < be::kMaxInputsPerStation; ++i)
+      station["inputs"].push_back({{"enabled", true},
+                                   {"name", "Wejscie " + std::to_string(i)},
+                                   {"sdp", loopback_sdp("Wejscie", "239.69.231." + std::to_string(st * 3 + i + 1), 15230)},
+                                   {"gain_db", 0},
+                                   {"delay_s", 0},
+                                   {"latency_us", 20000}});
+    const json stream = station["streams"][0];
+    station["streams"] = json::array();
+    for (int k = 0; k < be::kMaxStreamsPerStation; ++k) {
+      json s2 = stream;
+      s2["mount"] = "/r" + std::to_string(st) + "-" + std::to_string(k) + ".mp3";
+      station["streams"].push_back(s2);
+    }
+    station["processing"] = {{"enabled", false}, {"preset", "Jakis preset.sts"}, {"license_key", ""}, {"web_port_slot", st}};
+    cfg["stations"].push_back(station);
+  }
+  const std::string body = cfg.dump();
+  size_t values = 0;
+  bool in_string = false, escaped = false;
+  for (char ch : body) {
+    if (in_string) {
+      escaped = !escaped && ch == '\\';
+      if (!escaped && ch == '"') in_string = false;
+      continue;
+    }
+    in_string = ch == '"';
+    values += ch == ',' || ch == ':';
+  }
+  CAPTURE(values);
+  CHECK(values * 3 < bam::http::kMaxJsonValues);  // three times the largest configuration fits
+  r = f.put("/api/config", cfg);
+  REQUIRE(r);
+  CHECK_MESSAGE(r->status == 200, r->body.substr(0, 400));
 }
 
 #endif  // BAM_WITH_CODECS

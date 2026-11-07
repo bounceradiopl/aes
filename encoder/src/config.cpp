@@ -40,13 +40,23 @@ constexpr size_t kMaxSdpBytes = 64 * 1024;
 // normalize_config work through thousands of entries); validate_config explains smaller overshoots.
 constexpr size_t kParseLimitFactor = 4;
 constexpr const char* kStationIdPrefix = "s";
-// next_station_number is kept at most here: a counter edited by hand cannot overflow the numbering
-// (more than 16 stations are never given ids in one configuration anyway). Every number up to it
-// (and the few given past it) has at most kMaxStationDigits digits, all of which station_number
-// reads, so no id the numbering gives is ever overlooked.
+// Station numbers ("s<n>") stay below this: validate_config refuses an id past it (given by hand,
+// or the one numbering would give after the largest), so the counter, kept at most here, never
+// has to come back below a number it gave (ruling S4) and cannot overflow.
 constexpr int64_t kMaxStationNumber = 100'000'000'000'000'000LL;  // 10^17
-constexpr size_t kMaxStationDigits = 18;
 constexpr const char* kStreamIdPrefix = "str";
+
+// n of a station id "s<n>" (any case, leading zeros allowed); kMaxStationNumber when n is at least
+// that; 0 when the id is not of that form.
+int64_t station_number(std::string_view id) {
+  if (id.size() < 2 || (id[0] != 's' && id[0] != 'S')) return 0;
+  int64_t n = 0;
+  for (char ch : id.substr(1)) {
+    if (ch < '0' || ch > '9') return 0;
+    if (n < kMaxStationNumber) n = n * 10 + (ch - '0');  // past it the digits only need checking
+  }
+  return std::min(n, kMaxStationNumber);
+}
 
 // ---- labels for the messages ----
 
@@ -438,6 +448,9 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
       add(sp + ".id", label + "brak identyfikatora");
     } else if (!valid_id(st.id)) {
       add(sp + ".id", label + "nieprawidłowy identyfikator „" + st.id + "” (dozwolone litery, cyfry, „-” i „_”, najwyżej 32 znaki)");
+    } else if (station_number(st.id) >= kMaxStationNumber) {
+      add(sp + ".id", label + "identyfikator „" + st.id + "” ma za duży numer (najwyżej " +
+                          std::to_string(kMaxStationNumber - 1) + "; nadaj stacji inny identyfikator)");
     } else if (auto [it, inserted] = station_ids.emplace(ascii_lower(st.id), i); !inserted) {
       const bool other_case = c.stations[it->second].id != st.id;
       add(sp + ".id", label + "identyfikator „" + st.id + "” jest już używany przez " + station_ref(c.stations[it->second], it->second) +
@@ -598,16 +611,6 @@ std::vector<EncoderConfigIssue> config_warnings(const EncoderConfig& c) {
   return warnings;
 }
 
-// n of a station id "s<n>" (any case, n of at most kMaxStationDigits digits), else 0.
-int64_t station_number(std::string_view id) {
-  if (id.size() < 2 || id.size() > 1 + kMaxStationDigits || (id[0] != 's' && id[0] != 'S')) return 0;
-  int64_t n = 0;
-  for (char ch : id.substr(1)) {
-    if (ch < '0' || ch > '9') return 0;
-    n = n * 10 + (ch - '0');
-  }
-  return n;
-}
 
 std::vector<std::string> normalize_config(EncoderConfig& c) {
   std::vector<std::string> notices;
@@ -619,7 +622,8 @@ std::vector<std::string> normalize_config(EncoderConfig& c) {
   // ruling S4: new ids continue past every number given so far (the counter) and every "s<n>" in
   // the configuration (a 1.0 file has no counter); a gap may be a deleted station's id
   int64_t next_station = std::clamp<int64_t>(c.next_station_number, 1, kMaxStationNumber);
-  for (const auto& st : c.stations) next_station = std::max(next_station, station_number(st.id) + 1);
+  for (const auto& st : c.stations)
+    if (const int64_t n = station_number(st.id); n < kMaxStationNumber) next_station = std::max(next_station, n + 1);
   // web port slots: a station without one gets the lowest free slot; given ones are never moved
   std::set<int> slots;
   for (const auto& st : c.stations)

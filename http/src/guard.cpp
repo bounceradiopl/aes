@@ -2,6 +2,7 @@
 #include "bam/http/guard.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstring>
@@ -70,7 +71,8 @@ bool is_json_type(const std::string& value) {
 }
 
 std::string json_shape_error(std::string_view text) {
-  size_t depth = 0, containers = 0;
+  size_t depth = 0, containers = 0, values = 0;
+  std::array<size_t, kMaxJsonDepth + 1> members{};  // members of the open object at each depth
   bool in_string = false, escaped = false;
   for (const char ch : text) {
     if (in_string) {
@@ -86,8 +88,16 @@ std::string json_shape_error(std::string_view text) {
         return "JSON w treści żądania jest zbyt zagnieżdżony (najwyżej " + std::to_string(kMaxJsonDepth) + " poziomów)";
       if (++containers > kMaxJsonContainers)
         return "JSON w treści żądania ma zbyt wiele obiektów i tablic (najwyżej " + std::to_string(kMaxJsonContainers) + ")";
+      members[depth] = 0;
     } else if ((ch == ']' || ch == '}') && depth > 0) {
       --depth;  // a malformed body may close more than it opened: the parser refuses it
+    } else if (ch == ',' || ch == ':') {
+      // each separates or names a value: a flat list or a wide object costs memory, and an object
+      // with many keys is parsed in quadratic time (nlohmann::ordered_json looks every key up)
+      if (++values > kMaxJsonValues)
+        return "JSON w treści żądania ma zbyt wiele wartości (najwyżej " + std::to_string(kMaxJsonValues) + ")";
+      if (ch == ':' && ++members[depth] > kMaxJsonMembers)
+        return "obiekt w treści żądania ma zbyt wiele pól (najwyżej " + std::to_string(kMaxJsonMembers) + ")";
     }
   }
   return {};
@@ -175,9 +185,11 @@ void install_request_guard(httplib::Server& server, size_t max_body_bytes, BodyL
   };
   // On the headers, before any body is read: true when answered.
   const auto screen = [limit_of, check = std::move(check)](const httplib::Request& req, httplib::Response& res) {
-    res.set_header("X-Frame-Options", "DENY");
-    res.set_header("X-Content-Type-Options", "nosniff");
-    res.set_header("Cache-Control", "no-store");
+    // once: a request with "Expect: 100-continue" is screened twice (before the 100 and at routing)
+    for (const auto& [name, value] : {std::pair<const char*, const char*>{"X-Frame-Options", "DENY"},
+                                      {"X-Content-Type-Options", "nosniff"},
+                                      {"Cache-Control", "no-store"}})
+      if (!res.has_header(name)) res.set_header(name, value);
     return refuse(req, res, limit_of(req)) || (check && check(req, res));
   };
   // One request per connection. With a keep-alive count of 1, httplib serves exactly one request,
