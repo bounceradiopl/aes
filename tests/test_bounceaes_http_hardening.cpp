@@ -16,7 +16,9 @@
 #include <vector>
 
 #include "bam/auth.hpp"
+#include "bam/config.hpp"
 #include "bam/engine.hpp"
+#include "bam/http/guard.hpp"
 #include "bam/http_server.hpp"
 #include "bam/platform/event.hpp"
 #include "bam/platform/process.hpp"
@@ -595,4 +597,107 @@ TEST_CASE("BounceAES HTTP: a server stopped right after it started does not hang
     bam::HttpServer server(*e.engine);
     REQUIRE(server.start(kLoopback, 0, &err));
   }  // the destructor stops it as well
+}
+
+TEST_CASE("BounceAES HTTP: deeply nested, container-heavy or very wide JSON is refused before it is parsed, even without a session") {
+  Fixture f;
+  const auto error_of = [](const httplib::Result& r) { return json::parse(r->body)["error"].get<std::string>(); };
+  // a 1 MB "[[[[…" used to crash the service (stack overflow destroying the parsed value)
+  const std::string nested = std::string(500'000, '[') + std::string(500'000, ']');  // valid JSON, 1 MB
+  const int64_t t0 = bp::monotonic_ns();
+  auto r = f.client->Post("/api/setup", nested, "application/json");
+  REQUIRE(r);
+  CHECK(r->status == 400);
+  CHECK_MESSAGE(error_of(r).find("zagnieżdż") != std::string::npos, r->body);
+  CHECK_FALSE(f.password_set());
+  f.setup_and_login();
+  // from here on, /api/login without a session
+  const auto login = [&](const std::string& body) { return f.client->Post("/api/login", body, "application/json"); };
+  r = login(nested);
+  REQUIRE(r);
+  CHECK(r->status == 400);
+  CHECK_MESSAGE(error_of(r).find("zagnieżdż") != std::string::npos, r->body);
+  std::string objects;
+  for (int i = 0; i < 40; ++i) objects += "{\"a\":";
+  objects += "1" + std::string(40, '}');
+  r = login(objects);
+  REQUIRE(r);
+  CHECK(r->status == 400);
+  // many small containers
+  std::string flat = "[";
+  for (int i = 0; i < 200'000; ++i) flat += i ? ",{}" : "{}";
+  flat += "]";
+  r = login(flat);
+  REQUIRE(r);
+  CHECK(r->status == 400);
+  CHECK_MESSAGE(error_of(r).find("zbyt wiele") != std::string::npos, r->body);
+  // a flat list of 1 MB of numbers
+  std::string numbers = "[0";
+  while (numbers.size() < 1'000'000) numbers += ",0";
+  numbers += "]";
+  r = login(numbers);
+  REQUIRE(r);
+  CHECK(r->status == 400);
+  CHECK_MESSAGE(error_of(r).find("zbyt wiele wartości") != std::string::npos, r->body);
+  // an object of 90 000 keys (ordered_json parses it in quadratic time: seconds of CPU)
+  std::string keys = "{";
+  for (int i = 0; i < 90'000; ++i) keys += (i ? ",\"k" : "\"k") + std::to_string(i) + "\":0";
+  keys += "}";
+  const int64_t t1 = bp::monotonic_ns();
+  r = login(keys);
+  REQUIRE(r);
+  CHECK(r->status == 400);
+  CHECK(bp::monotonic_ns() - t1 < 1'000'000'000);
+  // under the value cap, over the members of one object
+  std::string wide = "{";
+  for (int i = 0; i < 2'500; ++i) wide += (i ? ",\"k" : "\"k") + std::to_string(i) + "\":0";
+  wide += "}";
+  r = login(wide);
+  REQUIRE(r);
+  CHECK(r->status == 400);
+  CHECK_MESSAGE(error_of(r).find("zbyt wiele pól") != std::string::npos, r->body);
+  CHECK(bp::monotonic_ns() - t0 < 5'000'000'000);  // refused quickly: nothing was built
+  // brackets, braces, commas and colons inside a string are not structure
+  r = login(json{{"password", std::string(100'000, '{') + std::string(50'000, ',') + std::string(50'000, ':')}}.dump());
+  REQUIRE_MESSAGE(r, httplib::to_string(r.error()));
+  CHECK(r->status == 401);
+  // 16 levels are fine, 17 are not
+  const auto deep = [](int levels) {  // the object counts as one level
+    return R"({"password":"zlehaslo123","x":)" + std::string(size_t(levels - 1), '[') + std::string(size_t(levels - 1), ']') + "}";
+  };
+  CHECK(login(deep(16))->status == 401);
+  CHECK(login(deep(17))->status == 400);
+  // the panel's own requests still parse: the whole configuration back as it came
+  auto cfg = f.client->Get("/api/config", f.auth);
+  REQUIRE(cfg);
+  REQUIRE(cfg->status == 200);
+  auto put = f.client->Put("/api/config", f.auth, cfg->body, "application/json");
+  REQUIRE(put);
+  CHECK_MESSAGE(put->status == 200, put->body);
+  // a large configuration (32 mixes of 16 sources, 256 routes, more than there can be) is read and
+  // judged on its content, never refused for its shape, and stays under a third of the value cap
+  bam::Config big = bam::default_config();
+  for (int m = 0; m < bam::kMaxMixes; ++m) {
+    bam::MixConfig mix;
+    for (int i = 0; i < bam::kMaxMixSources; ++i) mix.sources.push_back({"net-in:" + std::to_string(i + 1), -6.0, false});
+    big.mixes["mix-destination:" + std::to_string(m + 1)] = mix;
+  }
+  for (int d = 0; d < 256; ++d) big.routes["destination:" + std::to_string(d + 1)] = "source:" + std::to_string(d + 1);
+  const std::string text = bam::config_to_json(big);
+  CHECK_MESSAGE(bam::http::json_shape_error(text).empty(), bam::http::json_shape_error(text));
+  CAPTURE(json_value_separators(text));
+  CHECK(json_value_separators(text) * 3 < bam::http::kMaxJsonValues);
+  put = f.client->Put("/api/config", f.auth, text, "application/json");
+  REQUIRE(put);
+  CHECK_MESSAGE(put->body.find("w treści żądania") == std::string::npos, put->body.substr(0, 400));
+}
+
+TEST_CASE("BounceAES HTTP: a login with a 100 KB password is answered within a second") {
+  Fixture f;
+  f.setup_and_login();
+  const int64_t t0 = bp::monotonic_ns();
+  auto r = f.client->Post("/api/login", json{{"password", std::string(100'000, 'x')}}.dump(), "application/json");
+  REQUIRE(r);
+  CHECK(r->status == 401);
+  CHECK(bp::monotonic_ns() - t0 < 1'000'000'000);
 }

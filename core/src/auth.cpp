@@ -144,7 +144,15 @@ std::array<uint8_t, 32> hmac_sha256(std::span<const uint8_t> key, std::span<cons
 
 std::vector<uint8_t> pbkdf2_sha256(std::string_view password, std::span<const uint8_t> salt, uint32_t iterations, size_t len) {
   std::vector<uint8_t> out;
-  const auto key = as_bytes(password);
+  // HMAC uses a key longer than its 64-byte block as its SHA-256 (RFC 2104): done once here, not
+  // in each of the 2 x iterations HMACs (a 1 MB password would otherwise cost 200 GB of hashing
+  // per login attempt, before any session). The result is the same.
+  std::span<const uint8_t> key = as_bytes(password);
+  std::array<uint8_t, 32> hashed_key{};
+  if (key.size() > 64) {
+    hashed_key = sha256(key);
+    key = hashed_key;
+  }
   for (uint32_t block = 1; out.size() < len; ++block) {
     std::vector<uint8_t> msg(salt.begin(), salt.end());
     for (int i = 3; i >= 0; --i) msg.push_back(static_cast<uint8_t>(block >> (8 * i)));

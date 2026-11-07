@@ -31,14 +31,8 @@ using http::send_json;
 
 std::string session_cookie(const httplib::Request& req) { return http::session_cookie(req, kCookie); }
 
-std::optional<json> parse_body(const httplib::Request& req, httplib::Response& res) {
-  try {
-    return json::parse(req.body);
-  } catch (const std::exception&) {
-    send_error(res, 400, "nieprawidłowy JSON w treści żądania");
-    return std::nullopt;
-  }
-}
+// Every request body: depth- and size-checked before it is parsed (bam/http/guard.hpp).
+std::optional<json> parse_body(const httplib::Request& req, httplib::Response& res) { return http::parse_json_body(req, res); }
 
 // The number a route's (\d+) matched; 0 when it is too large for any output or subscription
 // (std::stoi would throw, and httplib would answer 500): the handlers answer 404.

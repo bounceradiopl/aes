@@ -30,7 +30,7 @@ constexpr int kRetryResetMs = 10000;       // streaming this long starts the ret
 constexpr int kSendStallMs = 10000;        // no byte accepted by the socket: the server is dead
 constexpr int kSliceMs = 50;               // longest wait before stopping_ is checked again
 constexpr size_t kMaxResponseHead = 8192;
-constexpr const char* kUserAgent = "Bounce Encoder/1.0.3";
+constexpr const char* kUserAgent = "Bounce Encoder/1.0.4";
 
 constexpr const char* kErrNoName = "nie można znaleźć serwera ";  // + host
 constexpr const char* kErrNoAnswer = "serwer nie odpowiada";
