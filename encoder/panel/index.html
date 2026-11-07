@@ -227,7 +227,7 @@
   </dialog>
 
   <dialog id="dlg-settings">
-    <form method="dialog" id="settings-form">
+    <form method="dialog" id="settings-form" autocomplete="off">
       <h3>Ustawienia <small>wspólne dla wszystkich stacji</small></h3>
       <div class="settings-grid">
         <label class="wide">Karta sieciowa AoIP
@@ -246,13 +246,14 @@
         </label>
         <label class="wide">Domyślny klucz licencji Stereo Tool
           <span class="field-row">
-            <input type="password" id="set-st-key" autocomplete="new-password" spellcheck="false" maxlength="512">
+            <input type="password" id="set-st-key" name="stereotool-default-licence" autocomplete="off" spellcheck="false" maxlength="512"
+              aria-label="Domyślny klucz licencji Stereo Tool" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other">
             <button type="button" class="mini danger" id="set-st-key-clear" data-icon="trash">Usuń klucz</button>
           </span>
           <small id="set-st-key-hint"></small>
         </label>
         <label>Port bazowy interfejsu WWW Stereo Tool
-          <input type="number" id="set-st-port" min="1024" max="65000" step="1">
+          <input type="number" id="set-st-port" step="1">
           <small>Stacja z processingiem dostaje port bazowy + swój numer (0–15), zawsze tylko na 127.0.0.1.</small>
         </label>
       </div>

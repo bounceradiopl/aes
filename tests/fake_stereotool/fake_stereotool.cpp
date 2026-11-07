@@ -87,8 +87,21 @@ struct State {
       const size_t end = rest.find(';');
       const std::string item = rest.substr(0, end);
       rest = end == std::string::npos ? std::string() : rest.substr(end + 1);
+      if (item.empty()) continue;
       const size_t eq = item.find('=');
-      if (eq != std::string::npos && options.count(item.substr(0, eq))) options[item.substr(0, eq)] = std::atof(item.c_str() + eq + 1);
+      const std::string name = item.substr(0, eq);
+      if (eq == std::string::npos || !options.count(name)) {
+        std::fprintf(stderr, "fake Stereo Tool: unknown option \"%s\" in BAM_FAKE_STEREOTOOL_OPTIONS (ignored)\n", name.c_str());
+        continue;
+      }
+      const char* text = item.c_str() + eq + 1;
+      char* stop = nullptr;
+      const double value = std::strtod(text, &stop);
+      if (stop == text || *stop != '\0') {
+        std::fprintf(stderr, "fake Stereo Tool: bad value \"%s\" for option \"%s\" (ignored)\n", text, name.c_str());
+        continue;
+      }
+      options[name] = value;
     }
   }
   double opt(const char* name) {

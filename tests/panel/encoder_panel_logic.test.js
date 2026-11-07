@@ -414,3 +414,13 @@ test("the station shape includes processing (switch and preset)", () => {
   assert.notEqual(L.stationsShape(cfg), L.stationsShape(live));
   assert.equal(L.stationsShape([{ id: "s1", inputs: [], streams: [] }]), L.stationsShape([{ id: "s1", inputs: [], streams: [], processing: { enabled: false, preset: "" } }]));
 });
+
+test("the Stereo Tool library line, also after a crash", () => {
+  assert.deepEqual(L.libraryText(null), { text: "Stereo Tool", warn: false });
+  assert.deepEqual(L.libraryText({ checked: false, loading: true }), { text: "Stereo Tool: wczytywanie biblioteki…", warn: false });
+  assert.deepEqual(L.libraryText({ checked: true, loading: false, available: true, version_text: "11.07", abandoned: 0 }), { text: "Stereo Tool 11.07", warn: false });
+  assert.deepEqual(L.libraryText({ checked: true, available: false, error: "brak biblioteki", abandoned: 0 }), { text: "Stereo Tool niedostępny: brak biblioteki", warn: true });
+  assert.deepEqual(L.libraryText({ checked: true, available: true, version_text: "11.07", abandoned: 1 }),
+    { text: "Stereo Tool 11.07: awaria Stereo Tool — uruchom ponownie usługę Bounce Encoder", warn: true });
+  assert.equal(L.plural(64, "preset", "presety", "presetów"), "presety");
+});

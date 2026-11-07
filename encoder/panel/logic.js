@@ -409,6 +409,16 @@
     return `http://127.0.0.1:${port}/`;
   };
 
+  // The library line (/api/live stereotool or GET /api/stereotool library): { text, warn }. An
+  // abandoned instance (a crash inside Stereo Tool) needs a restart of the service.
+  L.libraryText = (lib) => {
+    if (!lib || (!lib.checked && !lib.loading)) return { text: "Stereo Tool", warn: false };
+    if (lib.loading) return { text: "Stereo Tool: wczytywanie biblioteki…", warn: false };
+    if (!lib.available) return { text: `Stereo Tool niedostępny: ${lib.error}`, warn: true };
+    if (lib.abandoned > 0) return { text: `Stereo Tool ${lib.version_text}: awaria Stereo Tool — uruchom ponownie usługę Bounce Encoder`, warn: true };
+    return { text: `Stereo Tool ${lib.version_text}`, warn: false };
+  };
+
   // The panel is open on the encoder computer itself (127.0.0.1 then reaches Stereo Tool).
   L.isLocalHost = (hostname) => {
     const h = String(hostname || "").toLowerCase();
