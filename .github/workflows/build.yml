@@ -24,6 +24,9 @@ jobs:
         with:
           path: codec-cache
           key: codecs-${{ runner.os }}-${{ hashFiles('cmake/codecs.cmake') }}
+          # an earlier entry after an edit of codecs.cmake: the tarballs are checked against their
+          # SHA-256 anyway, and a changed pin downloads the new one next to them
+          restore-keys: codecs-${{ runner.os }}-
       # the Stereo Tool SDK zip (cmake/stereotool.cmake, about 360 MB) in a cache entry of its own.
       # The download URL carries no version: once Thimeo publishes a newer Stereo Tool under the
       # same name, a fresh download fails the pinned SHA-256 and the configure says what to do, while
@@ -62,8 +65,16 @@ jobs:
         # from build/: the tests write their temporary files to the working directory
         working-directory: build
         run: |
-          ./bam_tests
+          set -o pipefail
+          ./bam_tests 2>&1 | tee bam_tests.log
           ctest --output-on-failure -E '^bam_tests$'
+      - name: Tests skipped on this runner (as warnings)
+        # timing tests that cannot judge a starved runner say "skipped: …" instead of failing; each
+        # one becomes an annotation of the run, so it is seen without opening the log
+        if: always()
+        working-directory: build
+        run: |
+          grep -h 'MESSAGE: skipped:' bam_tests.log | sed 's/^.*MESSAGE: /::warning title=Test skipped on this runner::/' || true
       - name: Loopback test (32 pairs, PTP simulator, 20 s)
         run: |
           mkdir run && cd run
@@ -117,6 +128,7 @@ jobs:
         with:
           path: codec-cache
           key: codecs-${{ runner.os }}-${{ hashFiles('cmake/codecs.cmake') }}
+          restore-keys: codecs-${{ runner.os }}-
       # the Stereo Tool SDK zip in a cache entry of its own (see the linux job)
       - name: Restore the Stereo Tool SDK
         id: stsdk
@@ -146,7 +158,14 @@ jobs:
         env:
           BAM_TEST_PROGRESS: 1
         working-directory: build
-        run: ./bam_tests '--test-case=stereotool:*,processing:*,encoder engine:*,encoder HTTP:*,encoder config:*'
+        run: |
+          set -o pipefail
+          ./bam_tests '--test-case=stereotool:*,processing:*,encoder engine:*,encoder HTTP:*,encoder config:*' 2>&1 | tee bam_tests.log
+      - name: Tests skipped on this runner (as warnings)
+        if: always()
+        working-directory: build
+        run: |
+          grep -h 'MESSAGE: skipped:' bam_tests.log | sed 's/^.*MESSAGE: /::warning title=Test skipped on this runner::/' || true
 
   windows:
     runs-on: windows-latest
@@ -158,6 +177,7 @@ jobs:
         with:
           path: codec-cache
           key: codecs-${{ runner.os }}-${{ hashFiles('cmake/codecs.cmake') }}
+          restore-keys: codecs-${{ runner.os }}-
       # the Stereo Tool SDK zip in a cache entry of its own (see the linux job)
       - name: Restore the Stereo Tool SDK
         id: stsdk
@@ -191,10 +211,17 @@ jobs:
         # from build\: the tests write their temporary files to the working directory
         working-directory: build
         run: |
-          & Release\bam_tests.exe
+          & Release\bam_tests.exe | Tee-Object -FilePath bam_tests.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ctest -C Release --output-on-failure -E '^bam_tests$'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Tests skipped on this runner (as warnings)
+        if: always()
+        working-directory: build
+        run: |
+          if (Test-Path bam_tests.log) {
+            Select-String -Path bam_tests.log -SimpleMatch 'MESSAGE: skipped:' | ForEach-Object { '::warning title=Test skipped on this runner::' + ($_.Line -replace '^.*MESSAGE: ', '') }
+          }
       - name: Stereo Tool - the real DLL without a licence key (load, preset, process, timing, network)
         # in a run of its own (the library stays loaded in the process): version 11.07, Create3
         # without a key, a preset saved by the DLL under the preset store's temporary name and
@@ -304,15 +331,24 @@ jobs:
           Set-Location installer\nsis
           & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /V2 "/DPAYLOAD=$payload" "/DPAYLOAD32=$payload32" BounceAES-setup.nsi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build Bounce Encoder installer
+      - name: Build Bounce Encoder installer (without Stereo Tool)
+        # The repository and its artifacts are public: nothing of Thimeo goes into them. The
+        # installer is built without the library (processing says "brak biblioteki Stereo Tool");
+        # the full one is built locally from these binaries and the SDK's DLL (INSTRUKCJA.md,
+        # "Budowanie ze źródeł"). The full script is built here as well, as a check, and deleted.
         shell: pwsh
         run: |
           $payload = Join-Path $PWD 'build\Release'
           Set-Location installer\nsis
           & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /V2 "/DPAYLOAD=$payload" BounceEncoder-setup.nsi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # with Stereo Tool (117 MB) inside: about 30 MB more than 1.0
-          "BounceEncoder-setup.exe: {0:N1} MB" -f ((Get-Item BounceEncoder-setup.exe).Length / 1MB) | Write-Host
+          $size = (Get-Item BounceEncoder-setup.exe).Length / 1MB
+          "BounceEncoder-setup.exe (without Stereo Tool): {0:N1} MB" -f $size | Write-Host
+          if ($size -gt 20) { throw 'BounceEncoder-setup.exe is too large for an installer without Stereo Tool' }
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /V2 "/DPAYLOAD=$payload" "/DWITH_STEREOTOOL=$payload\libStereoTool_64.dll" /DOUTFILE=full-check.exe BounceEncoder-setup.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "full installer (check only, not kept): {0:N1} MB" -f ((Get-Item full-check.exe).Length / 1MB) | Write-Host
+          Remove-Item full-check.exe
       - name: Collect binaries
         shell: pwsh
         run: |
@@ -325,9 +361,13 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory dist-encoder | Out-Null
-          Copy-Item build\Release\BounceEncoder.exe, build\Release\BounceEncoderTray.exe, build\Release\libmp3lame.dll, build\Release\libfdk-aac-2.dll, build\Release\libStereoTool_64.dll dist-encoder\
+          # no Stereo Tool library and no Thimeo notice: the artifact is public (see the installer step);
+          # this folder is a PAYLOAD for the full installer as it is (licencje\ is found there)
+          Copy-Item build\Release\BounceEncoder.exe, build\Release\BounceEncoderTray.exe, build\Release\libmp3lame.dll, build\Release\libfdk-aac-2.dll dist-encoder\
           Copy-Item -Recurse build\Release\encoder-licenses dist-encoder\licencje
-          if (-not (Test-Path dist-encoder\licencje\StereoTool-NOTICE.txt)) { throw 'the Stereo Tool notice is missing' }
+          Remove-Item dist-encoder\licencje\StereoTool-NOTICE.txt
+          $thimeo = @(Get-ChildItem -Recurse dist-encoder | Where-Object { $_.Name -like '*StereoTool*' })
+          if ($thimeo.Count -gt 0) { throw "Thimeo files in the artifact: $($thimeo.Name -join ', ')" }
           # under the installer's names, which the docs and the Stereo Tool notice use
           Copy-Item LICENSE dist-encoder\LICENSE.txt
           Copy-Item LICENSING.md dist-encoder\LICENCJE.md

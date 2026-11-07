@@ -3,13 +3,19 @@
 ; układzie i z tym samym brandingiem co BounceAES-setup.nsi. makensis działa natywnie na
 ; macOS/Linux/Windows.
 ;
-; Build (z katalogu installer/nsis):  makensis [-DPAYLOAD=<bezwzględna ścieżka do plików>] BounceEncoder-setup.nsi
+; Build (z katalogu installer/nsis):
+;   makensis [-DPAYLOAD=<bezwzględna ścieżka do plików>] [-DWITH_STEREOTOOL=<ścieżka do libStereoTool_64.dll>] BounceEncoder-setup.nsi
 ;         ->  BounceEncoder-setup.exe obok skryptu
 ;         PAYLOAD = katalog 64-bitowego buildu z kodekami (MinGW: build-win, MSVC: build\Release):
-;                   BounceEncoder.exe, BounceEncoderTray.exe, libmp3lame.dll, libfdk-aac-2.dll,
-;                   libStereoTool_64.dll (Thimeo Stereo Tool 11.07, cmake/stereotool.cmake)
-;                   i encoder-licenses\ (teksty licencji kodeków z cmake/codecs.cmake i nota
-;                   Stereo Tool z cmake/stereotool/StereoTool-NOTICE.txt).
+;                   BounceEncoder.exe, BounceEncoderTray.exe, libmp3lame.dll, libfdk-aac-2.dll
+;                   i encoder-licenses\ (teksty licencji kodeków z cmake/codecs.cmake).
+;         WITH_STEREOTOOL = pełny instalator: ta biblioteka (Thimeo Stereo Tool 11.07, SHA-256
+;                   48cbdc06…8c4e, cmake/stereotool.cmake) jako libStereoTool_64.dll i nota Thimeo
+;                   (cmake/stereotool/StereoTool-NOTICE.txt). Bez niego instalator nie zawiera
+;                   niczego od Thimeo (tak buduje go CI: artefakty repozytorium są publiczne):
+;                   processing pokazuje „brak biblioteki Stereo Tool”, a instalacja na miejscu
+;                   wcześniejszej pełnej zostawia jej bibliotekę i notę (INSTRUKCJA.md, rozdz. 10).
+;                   Polecenie dla pełnego instalatora: INSTRUKCJA.md, „Budowanie ze źródeł”.
 ;
 ; Kreator: Welcome -> Licencja (GPLv3) -> folder -> Instalacja -> Finish.
 ; Instalacja: pliki (kodeki i Stereo Tool obok programu: ładowane są tylko z jego folderu), usługa Windows
@@ -33,6 +39,23 @@ Unicode true
   !define PAYLOAD "${__FILEDIR__}\..\..\build-win"
 !endif
 !define ROOT "${__FILEDIR__}\..\.."  ; paths are relative to this script, not to the working directory
+; the licence texts: encoder-licenses\ of a build folder, or licencje\ of the CI artifact
+; BounceEncoder-binaries (the installed layout), so that artifact is a PAYLOAD too
+!if /FileExists "${PAYLOAD}\encoder-licenses\LAME-COPYING.txt"
+  !define LICENSES "${PAYLOAD}\encoder-licenses"
+!else
+  !define LICENSES "${PAYLOAD}\licencje"
+!endif
+!ifndef OUTFILE
+  !define OUTFILE "BounceEncoder-setup.exe"
+!endif
+!ifdef WITH_STEREOTOOL
+  !define STEREOTOOL_TEXT_PL "Processing: Stereo Tool (Thimeo, biblioteka komercyjna, osobna licencja na każdą stację z processingiem)."
+  !define STEREOTOOL_TEXT_EN "Processing: Stereo Tool (Thimeo, a commercial library, a licence of its own for every station with processing)."
+!else
+  !define STEREOTOOL_TEXT_PL "Processing: ten instalator nie zawiera biblioteki Stereo Tool (Thimeo) — processing działa po umieszczeniu libStereoTool_64.dll 11.07 w folderze programu albo z pełnym instalatorem (INSTRUKCJA.md, rozdział 10)."
+  !define STEREOTOOL_TEXT_EN "Processing: this installer does not contain the Stereo Tool library (Thimeo) — processing works once libStereoTool_64.dll 11.07 is in the program folder, or with the full installer (INSTRUKCJA.md, chapter 10)."
+!endif
 
 !define APP "Bounce Encoder"
 !define PUBLISHER "BOUNCE SP. Z O.O."
@@ -53,7 +76,7 @@ Unicode true
 !define PROGRAM_SDDL "D:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;FRFX;;;BU)"
 
 Name "${APP}"
-OutFile "BounceEncoder-setup.exe"
+OutFile "${OUTFILE}"
 InstallDir "$PROGRAMFILES64\Bounce Encoder"
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
@@ -100,8 +123,8 @@ VIAddVersionKey "LegalCopyright" "GPL-3.0-or-later"
 
 LangString WelcomeTitle ${LANG_POLISH} "Instalacja Bounce Encoder"
 LangString WelcomeTitle ${LANG_ENGLISH} "Bounce Encoder Setup"
-LangString WelcomeText ${LANG_POLISH} "Kreator zainstaluje Bounce Encoder: usługę, która odbiera strumienie AES67, miksuje je w sygnał stacji i wysyła do serwerów Icecast (MP3, AAC, HE-AAC, FLAC), ikonę w zasobniku oraz panel WWW.$\r$\n$\r$\nKodeki: LAME (LGPL) i Fraunhofer FDK AAC. Processing: Stereo Tool (Thimeo, biblioteka komercyjna, osobna licencja na każdą stację z processingiem). Bounce Encoder jest na GPLv3 z dodatkowym uprawnieniem na połączenie z FDK AAC i Stereo Tool. Przed przekazaniem instalatora poza Bounce sprawdź licencję patentową AAC i uzyskaj zgodę Thimeo (LICENCJE.md).$\r$\n$\r$\nPo instalacji otwórz panel (${PANEL_URL}) i ustaw hasło.$\r$\n$\r$\nKliknij Dalej, aby kontynuować."
-LangString WelcomeText ${LANG_ENGLISH} "This wizard installs Bounce Encoder: the service that receives AES67 streams, mixes them into a station signal and sends it to Icecast servers (MP3, AAC, HE-AAC, FLAC), the tray icon and the web panel.$\r$\n$\r$\nCodecs: LAME (LGPL) and Fraunhofer FDK AAC. Processing: Stereo Tool (Thimeo, a commercial library, a licence of its own for every station with processing). Bounce Encoder is GPLv3 with an additional permission to combine it with FDK AAC and Stereo Tool. Before passing the installer on outside Bounce, check AAC patent licensing and get Thimeo's consent (LICENCJE.md).$\r$\n$\r$\nAfter installation open the panel (${PANEL_URL}) and set a password.$\r$\n$\r$\nClick Next to continue."
+LangString WelcomeText ${LANG_POLISH} "Kreator zainstaluje Bounce Encoder: usługę, która odbiera strumienie AES67, miksuje je w sygnał stacji i wysyła do serwerów Icecast (MP3, AAC, HE-AAC, FLAC), ikonę w zasobniku oraz panel WWW.$\r$\n$\r$\nKodeki: LAME (LGPL) i Fraunhofer FDK AAC. ${STEREOTOOL_TEXT_PL} Bounce Encoder jest na GPLv3 z dodatkowym uprawnieniem na połączenie z FDK AAC i Stereo Tool. Przed przekazaniem instalatora poza Bounce sprawdź licencję patentową AAC i uzyskaj zgodę Thimeo (LICENCJE.md).$\r$\n$\r$\nPo instalacji otwórz panel (${PANEL_URL}) i ustaw hasło.$\r$\n$\r$\nKliknij Dalej, aby kontynuować."
+LangString WelcomeText ${LANG_ENGLISH} "This wizard installs Bounce Encoder: the service that receives AES67 streams, mixes them into a station signal and sends it to Icecast servers (MP3, AAC, HE-AAC, FLAC), the tray icon and the web panel.$\r$\n$\r$\nCodecs: LAME (LGPL) and Fraunhofer FDK AAC. ${STEREOTOOL_TEXT_EN} Bounce Encoder is GPLv3 with an additional permission to combine it with FDK AAC and Stereo Tool. Before passing the installer on outside Bounce, check AAC patent licensing and get Thimeo's consent (LICENCJE.md).$\r$\n$\r$\nAfter installation open the panel (${PANEL_URL}) and set a password.$\r$\n$\r$\nClick Next to continue."
 LangString LicCheck ${LANG_POLISH} "Zapoznałem się z licencją GPLv3 i akceptuję jej warunki."
 LangString LicCheck ${LANG_ENGLISH} "I have read and accept the GPLv3 license."
 LangString RunTray ${LANG_POLISH} "Uruchom ikonę Bounce Encoder w zasobniku"
@@ -277,8 +300,11 @@ Section "Bounce Encoder" SecMain
   ; run-time loaded codecs: only ever loaded from the program's own folder
   File "${PAYLOAD}\libmp3lame.dll"
   File "${PAYLOAD}\libfdk-aac-2.dll"
-  ; Stereo Tool (Thimeo, commercial, about 117 MB): loaded from this folder only, like the codecs
-  File "${PAYLOAD}\libStereoTool_64.dll"
+!ifdef WITH_STEREOTOOL
+  ; Stereo Tool (Thimeo, commercial, about 117 MB): loaded from this folder only, like the codecs.
+  ; Without it (CI) an earlier full installation's library stays where it is.
+  File "/oname=libStereoTool_64.dll" "${WITH_STEREOTOOL}"
+!endif
   File "/oname=LICENSE.txt" "${ROOT}\LICENSE"
   File "/oname=LICENCJE.md" "${ROOT}\LICENSING.md"
   File "/oname=INSTRUKCJA.md" "${ROOT}\docs\ENCODER-INSTALL.md"
@@ -291,12 +317,14 @@ Section "Bounce Encoder" SecMain
     Delete "$INSTDIR\bounce.ico"
   ${EndIf}
   SetOutPath "$INSTDIR\licencje"
-  File "${PAYLOAD}\encoder-licenses\LAME-COPYING.txt"
-  File "${PAYLOAD}\encoder-licenses\fdk-aac-NOTICE.txt"
-  File "${PAYLOAD}\encoder-licenses\libogg-COPYING.txt"
-  File "${PAYLOAD}\encoder-licenses\flac-COPYING.Xiph.txt"
-  File "${PAYLOAD}\encoder-licenses\libsamplerate-COPYING.txt"
-  File "${PAYLOAD}\encoder-licenses\StereoTool-NOTICE.txt"
+  File "${LICENSES}\LAME-COPYING.txt"
+  File "${LICENSES}\fdk-aac-NOTICE.txt"
+  File "${LICENSES}\libogg-COPYING.txt"
+  File "${LICENSES}\flac-COPYING.Xiph.txt"
+  File "${LICENSES}\libsamplerate-COPYING.txt"
+!ifdef WITH_STEREOTOOL
+  File "${ROOT}\cmake\stereotool\StereoTool-NOTICE.txt"  ; only with the library
+!endif
   SetOutPath "$INSTDIR"
 
   ; --- %ProgramData%\Bounce Encoder: administrators and SYSTEM only (config.json holds the stream
@@ -408,7 +436,11 @@ Section "Bounce Encoder" SecMain
   WriteRegStr HKLM "${UNINST_KEY}" "QuietUninstallString" '"$INSTDIR\uninstall.exe" /S'
   WriteRegDWORD HKLM "${UNINST_KEY}" "NoModify" 1
   WriteRegDWORD HKLM "${UNINST_KEY}" "NoRepair" 1
+!ifdef WITH_STEREOTOOL
   WriteRegDWORD HKLM "${UNINST_KEY}" "EstimatedSize" 122000  ; KB, about 115 MB of it Stereo Tool
+!else
+  WriteRegDWORD HKLM "${UNINST_KEY}" "EstimatedSize" 8000  ; KB
+!endif
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   ; --- klient PTP Windows zająłby porty 319/320 ---
