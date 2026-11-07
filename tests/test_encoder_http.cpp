@@ -25,6 +25,7 @@
 #include "bam/encoder/engine.hpp"
 #include "bam/encoder/http_server.hpp"
 #include "bam/encoder/paths.hpp"
+#include "bam/log.hpp"
 #include "bam/platform/process.hpp"
 #include "bam/platform/tcp.hpp"
 #include "bam/platform/time.hpp"
@@ -671,6 +672,52 @@ TEST_CASE("encoder service: startup configuration") {
     CHECK(json::parse(read_file(path))["stations"].size() == 2);
     std::remove(path.c_str());
     std::remove((path + ".bad").c_str());
+  }
+  SUBCASE("a bad processing block: the station runs without processing, the bad value is dropped, no key logged") {
+    const std::string path = unique_path("start");
+    json j = json::parse(be::config_to_json(be::default_encoder_config()));
+    j["stereotool_default_key"] = "SEKRETD-bez-nawiasow";  // a bad global key: dropped (as a default)
+    j["stereotool_web_port_base"] = 8065;                  // 8065–8080 holds the panel port 8070
+    j["stations"] = json::array({station_json("Jeden", true, "haslo1", "/a.mp3"), station_json("Dwa", true, "haslo2", "/b.mp3"),
+                                 station_json("Trzy", true, "haslo3", "/c.mp3")});
+    j["stations"][0]["processing"] = {{"enabled", true}, {"license_key", "SEKRETA-bez-nawiasow"}, {"preset", "../zly.sts"}};
+    j["stations"][1]["processing"] = {{"enabled", true}, {"license_key", "<SEKRETB-dobry>"}, {"preset", ""}};
+    j["stations"][2]["processing"] = {{"enabled", true}, {"license_key", ""}, {"preset", "FM.sts"}};  // needed the default key
+    std::ofstream(path) << j.dump();
+    const be::EncoderConfig c = be::load_startup_config(path);
+    CHECK(be::validate_config(c).empty());
+    CHECK(c.stereotool_default_key.empty());
+    CHECK(c.stereotool_web_port_base == 8100);
+    REQUIRE(c.stations.size() == 3);
+    for (const auto& st : c.stations) {
+      CHECK_MESSAGE(st.enabled, st.name);  // never silence because of processing
+      CHECK_FALSE(st.processing.enabled);
+      CHECK(st.streams[0].enabled);
+    }
+    CHECK(c.stations[0].processing.license_key.empty());
+    CHECK(c.stations[0].processing.preset.empty());
+    CHECK(c.stations[1].processing.license_key == "<SEKRETB-dobry>");  // valid: kept
+    CHECK(c.stations[2].processing.preset == "FM.sts");
+    CHECK_FALSE(exists(path + ".bad"));
+    bool told = false;
+    for (const auto& e : bam::Logger::instance().recent()) {
+      CHECK_MESSAGE(e.message.find("SEKRET") == std::string::npos, e.message);
+      told |= e.message.find("„Trzy”") != std::string::npos && e.message.find("processing") != std::string::npos;
+    }
+    CHECK(told);
+    std::remove(path.c_str());
+  }
+  SUBCASE("a bad web port base next to a panel on 8100: a base that does not hold the panel port") {
+    const std::string path = unique_path("start");
+    json j = json::parse(be::config_to_json(be::default_encoder_config()));
+    j["http_port"] = 8105;
+    j["stereotool_web_port_base"] = 80;
+    std::ofstream(path) << j.dump();
+    const be::EncoderConfig c = be::load_startup_config(path);
+    CHECK(be::validate_config(c).empty());
+    CHECK(c.http_port == 8105);
+    CHECK(c.stereotool_web_port_base == 8200);
+    std::remove(path.c_str());
   }
 }
 

@@ -727,10 +727,11 @@ uint16_t EncoderHttpServer::port() const { return impl_->port; }
 // ---- startup configuration ----
 
 namespace {
-// Where an issue is: "stations[3].streams[1].mount" -> station 3, streams, 1.
+// Where an issue is: "stations[3].streams[1].mount" -> station 3, streams, 1;
+// "stations[2].processing.preset" -> station 2, processing.
 struct IssuePlace {
   size_t station;
-  std::string list;  // "inputs", "streams" or "" (the station itself)
+  std::string list;  // "inputs", "streams", "processing" or "" (the station itself)
   size_t item = 0;
 };
 std::optional<IssuePlace> issue_place(const std::string& field) {
@@ -746,10 +747,15 @@ std::optional<IssuePlace> issue_place(const std::string& field) {
         p.item = static_cast<size_t>(std::stoul(rest.substr(prefix.size())));
       }
     }
+    if (rest.rfind("].processing.", 0) == 0) p.list = "processing";
     return p;
   } catch (const std::exception&) {
     return std::nullopt;
   }
+}
+
+std::string station_name(const StationConfig& st, size_t i) {
+  return st.name.empty() ? "nr " + std::to_string(i + 1) : "„" + st.name + "”";
 }
 
 void reset_global(EncoderConfig& c, const std::string& field) {
@@ -763,14 +769,31 @@ void reset_global(EncoderConfig& c, const std::string& field) {
   }
   if (field == "http_port") c.http_port = d.http_port;
   if (field == "stations" && c.stations.size() > static_cast<size_t>(kMaxStations)) c.stations.resize(kMaxStations);
+  if (field == "stereotool_default_key") c.stereotool_default_key.clear();  // a bad key is no key (never logged)
+  if (field == "stereotool_web_port_base") {
+    // the default, or the next hundred when the panel port is among the default's ports
+    c.stereotool_web_port_base = d.stereotool_web_port_base;
+    if (c.http_port >= c.stereotool_web_port_base && c.http_port < c.stereotool_web_port_base + kMaxStations)
+      c.stereotool_web_port_base += 100;
+  }
 }
 
-std::string station_name(const StationConfig& st, size_t i) {
-  return st.name.empty() ? "nr " + std::to_string(i + 1) : "„" + st.name + "”";
+// Never silence because of processing: a station whose processing settings are wrong keeps
+// running without processing. The value the issue is about is dropped (a preset name or a key of
+// the wrong shape; for a missing preset or key the field is empty already); the rest is kept.
+void disable_processing(EncoderConfig& c, size_t station, const std::string& field) {
+  if (station >= c.stations.size()) return;
+  StationConfig& st = c.stations[station];
+  if (field.ends_with(".processing.preset")) st.processing.preset.clear();
+  if (field.ends_with(".processing.license_key")) st.processing.license_key.clear();
+  if (!st.processing.enabled) return;
+  st.processing.enabled = false;
+  log_warning("Stacja " + station_name(st, station) +
+              ": processing Stereo Tool wyłączony, stacja działa bez niego: popraw ustawienia processingu w panelu");
 }
-}  // namespace
 
-EncoderConfig load_startup_config(const std::string& path) {
+// load_startup_config without the warnings.
+EncoderConfig startup_config(const std::string& path) {
   std::string err;
   bool missing = false;
   EncoderConfig cfg = default_encoder_config();
@@ -799,6 +822,11 @@ EncoderConfig load_startup_config(const std::string& path) {
         reset_global(cfg, i.field);
         continue;
       }
+      if (place->list == "processing") {  // also in pass 1: a default key dropped in pass 0 shows here
+        if (pass == 1) log_warning("Konfiguracja: " + i.message);
+        disable_processing(cfg, place->station, i.field);
+        continue;
+      }
       bad.insert(place->station);
       // the input or stream with the error stays, disabled (disabled ones are checked less)
       if (pass == 0 && place->station < cfg.stations.size()) {
@@ -815,7 +843,7 @@ EncoderConfig load_startup_config(const std::string& path) {
         log_warning("Stacja " + station_name(cfg.stations[i], i) + " nie została uruchomiona: popraw jej ustawienia w panelu");
       }
     } else {
-      if (!backed_up) backed_up = platform::copy_file(path, path + ".bad");
+      if (!backed_up && !bad.empty()) backed_up = platform::copy_file(path, path + ".bad");  // stations are left out
       for (auto it = bad.rbegin(); it != bad.rend(); ++it) {
         if (*it >= cfg.stations.size()) continue;
         log_error("Stacja " + station_name(cfg.stations[*it], *it) + " pominięta: jej ustawienia są nieprawidłowe (kopia pliku: " +
@@ -831,6 +859,13 @@ EncoderConfig load_startup_config(const std::string& path) {
   fallback.http_bind = "127.0.0.1";  // fail closed: the panel only on this computer
   fallback.password_hash = cfg.password_hash;
   return fallback;
+}
+}  // namespace
+
+EncoderConfig load_startup_config(const std::string& path) {
+  EncoderConfig cfg = startup_config(path);
+  for (const auto& w : config_warnings(cfg)) log_warning("Konfiguracja: " + w.message);  // never quote a key
+  return cfg;
 }
 
 namespace testing {
