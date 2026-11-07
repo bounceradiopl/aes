@@ -11,7 +11,11 @@
 //    "now - receive latency", feeds the input's delay line, mixes, and copies the mix into the
 //    bounded queue (5 s, oldest dropped and counted) of each of its streams;
 //  - each enabled stream runs a worker thread (stream gain + resampling, encoder) feeding its
-//    IcecastClient, which has a thread of its own for the network.
+//    IcecastClient, which has a thread of its own for the network;
+//  - a station with Stereo Tool processing (Bounce Encoder 1.1) copies its mix into the queue of
+//    its processing worker instead (two threads: output and Stereo Tool), which hands the result
+//    to the station's streams. A station without processing has no worker: its path is the 1.0
+//    one, bit for bit.
 //  Configuration changes are built on the calling thread (sockets, rings, 23 MB delay lines,
 //  encoders) and handed to the station thread as an immutable plan; only what changed is
 //  rebuilt, so editing one stream leaves the station and its other streams running.
@@ -27,6 +31,8 @@
 #include "bam/clock.hpp"
 #include "bam/encoder/config.hpp"
 #include "bam/encoder/icecast.hpp"
+#include "bam/encoder/preset_store.hpp"
+#include "bam/encoder/stereotool.hpp"
 #include "bam/ptp_slave.hpp"
 #include "bam/rx_stream.hpp"
 
@@ -36,6 +42,11 @@ struct EncoderEngineOptions {
   bool enable_ptp = true;  // false: no PTP sockets, the media clock free-runs (tests)
   // Tests: shifts the free-running media clock off the local time (a PTP lock must move it back).
   int64_t free_run_offset_ns = 0;
+  // Stereo Tool's folder (preset_store.hpp): presets\ with the uploaded .sts files and a home folder per
+  // station. The service uses "<config folder>\stereotool"; empty: no presets (a station with
+  // processing then reports an error and runs unprocessed).
+  std::string stereotool_dir;
+  bool protect_stereotool_dir = false;  // create its folders with the admin-only ACL (data_dir.hpp)
 };
 
 struct InputStatus {
@@ -90,14 +101,51 @@ inline const char* processing_state_name(ProcessingState s) {
   return "off";
 }
 
+// Why processing is not Running (ProcessingStatus::reason_code).
+enum class ProcessingReason {
+  None,          // running, or off
+  Starting,      // Stereo Tool is being set up (also after a restart or a preset change)
+  LicenceCheck,  // set up; the first licence check is still to come
+  Setup,         // the library, the instance or the preset failed
+  Licence,       // the licence does not cover the features the settings use
+  TooSlow,       // Stereo Tool fell behind (retried automatically by the engine)
+  Process,       // Stereo Tool failed while processing
+  Crash,         // a crash in the library: nothing until the service restarts
+  RestartWaits,  // a restart waits for a Stereo Tool call to return
+};
+inline const char* processing_reason_name(ProcessingReason r) {
+  switch (r) {
+    case ProcessingReason::Starting: return "starting";
+    case ProcessingReason::LicenceCheck: return "licence_check";
+    case ProcessingReason::Setup: return "setup";
+    case ProcessingReason::Licence: return "licence";
+    case ProcessingReason::TooSlow: return "too_slow";
+    case ProcessingReason::Process: return "process";
+    case ProcessingReason::Crash: return "crash";
+    case ProcessingReason::RestartWaits: return "restart_waits";
+    case ProcessingReason::None: break;
+  }
+  return "";
+}
+
 struct ProcessingStatus {
   ProcessingState state = ProcessingState::Off;
+  ProcessingReason reason_code = ProcessingReason::None;
   std::string reason;     // Polish, why not Running; empty while running
   double latency_ms = 0;  // delay of the processed path (Stereo Tool latency + 5 ms crossfade margin)
   double cpu_pct = 0;     // Stereo Tool time / audio time over the last second processed; 0 when not processing
   bool license_valid = false;        // the licence covers the features the settings use (last check)
   std::string unlicensed_features;   // Stereo Tool's list when the licence check failed
   uint64_t queue_dropped_frames = 0; // 48 kHz frames lost: the worker fell more than 2 s behind the station
+  // The Stereo Tool web interface of the station's instance, on 127.0.0.1 only, while the instance
+  // is up with it (also in the bypass, to fix the settings); 0: none. An instance abandoned after a
+  // crash keeps its port until the service restarts: then 0 and the crash reason.
+  int web_port = 0;
+  // engine
+  bool enabled = false;  // processing is switched on for the station (configuration)
+  std::string preset;    // the preset configured
+  int retries = 0;       // automatic retries after "too slow" since the last good 10 minutes
+  int64_t retry_in_s = -1;  // seconds to the next automatic retry; -1 when none is due
 };
 
 struct StationStatus {
@@ -110,6 +158,7 @@ struct StationStatus {
   uint64_t skipped_frames = 0;      // frames the station could not process (stall over 1 s, clock step)
   std::vector<InputStatus> inputs;
   std::vector<StreamStatus> streams;
+  ProcessingStatus processing;  // state Off when the station has no processing running
 };
 
 struct EncoderStatus {
@@ -123,6 +172,8 @@ struct EncoderStatus {
   PtpStatus ptp;
   int64_t uptime_s = 0;
   std::vector<StationStatus> stations;  // in configuration order
+  // The Stereo Tool library (stereotool_peek: not looked for while no station used processing).
+  StereoToolInfo stereotool;
 };
 
 class EncoderEngine {
@@ -147,7 +198,36 @@ class EncoderEngine {
   // it moves, through gain, delay and receive latency edits; an input that goes (or gets another
   // SDP) fades out over 5 ms and the new one fades in with an empty delay line. Gain and delay
   // changes are applied live, ramped. Before start() it only stores the configuration.
+  //
+  // Processing (spec §3): a running station with processing switched on gets a processing worker
+  // with the effective key (the station's or the default one), the preset from the presets
+  // folder, its home folder and the web interface port stereotool_web_port_base + the station's
+  // position in the configuration (0-based, disabled stations counted: a station keeps its port
+  // as long as the stations before it stay). Switching processing on is seamless (the worker
+  // starts unprocessed with no delay; when Stereo Tool is ready the output pauses once for its
+  // latency and crossfades in). A new preset is loaded into the running instance (crossfade to
+  // the unprocessed signal and back, aligned). A new key, port or home folder builds a new
+  // instance; switching processing off or a new instance fades the old worker's output out over
+  // 5 ms and the station's output (direct, or into the new worker) in over 5 ms, like a delay
+  // change. A Stereo Tool too slow is retried automatically after 30 s, 2, 5 and 10 minutes (then
+  // every 10 minutes; the count starts again after 10 minutes of processing); every retry and its
+  // outcome is logged, like every change of the processing state.
   void apply_config(const EncoderConfig& config);
+
+  // Stereo Tool presets (preset_store.hpp) in EncoderEngineOptions::stereotool_dir. Names compare
+  // without regard to case everywhere.
+  std::vector<PresetInfo> list_presets() const;
+  PresetResult put_preset(std::string_view name, std::string_view data);
+  PresetResult get_preset(std::string_view name, std::string* data) const;
+  // Refused (InUse) while a station of the configuration refers to it, running or not.
+  PresetResult remove_preset(std::string_view name);
+  // Saves the station's current Stereo Tool settings (e.g. tuned in its web interface) as a new
+  // preset `name`; done by the station's Stereo Tool thread, waited for up to 10 s.
+  PresetResult save_processing_preset(const std::string& station_id, std::string_view name);
+  // The manual "Uruchom ponownie processing": leaves the bypass and tries again (a failed instance
+  // is built anew; after a crash only a service restart helps). false with a Polish *error when
+  // the station runs no processing.
+  bool restart_processing(const std::string& station_id, std::string* error);
 
   EncoderConfig config() const;
   EncoderStatus status() const;

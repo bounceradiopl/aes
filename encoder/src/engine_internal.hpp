@@ -219,6 +219,7 @@ struct ProcessingSettings {
   std::string preset_path;  // the .sts to load; empty: Stereo Tool's own defaults
   std::string home_dir;     // the instance's home folder; empty: the library's default
   int web_port = 0;         // the instance's web interface (127.0.0.1 only); 0: off
+  std::string setup_error;  // Polish: why processing cannot be set up at all (nothing is created)
   // Tests: sees every block handed to the streams, on the output thread (must not allocate).
   std::function<void(const float* stereo, size_t frames)> output_tap;
   // Tests: called on the Stereo Tool thread after each block it processed.
@@ -228,6 +229,10 @@ struct ProcessingSettings {
 namespace testing {
 // How long stop() waits for the Stereo Tool thread before leaving it (0: the default 5 s).
 void set_processing_stop_timeout_ms(int ms);
+// The engine's automatic retries after "too slow" (ruling S1): the waits before retry 1, 2, 3 and
+// every later one, and how long processing must run to start the count again (empty / 0: the
+// defaults 30 s, 2, 5, 10 min and 10 min).
+void set_processing_retry_ms(std::vector<int> waits_ms, int reset_ms);
 }  // namespace testing
 
 // The last kSlots values one thread wrote, numbered 1, 2, ... (their seq), read by any thread
@@ -252,6 +257,7 @@ class EventRing {
 struct ProcessingEvent {
   uint64_t seq = 0;  // 1, 2, ... per worker
   ProcessingState state = ProcessingState::Off;
+  ProcessingReason reason_code = ProcessingReason::None;
   std::string reason;  // Polish, as in ProcessingStatus (empty when running)
 };
 
@@ -320,6 +326,19 @@ class ProcessingWorker {
   // a working one is kept with its settings). After a crash nothing is created until the
   // service restarts; while Stereo Tool is stuck in a call, the restart waits for it to return.
   void restart();
+  // Any thread: loads another preset into the running instance (a restart that loads it first:
+  // crossfade to the unprocessed signal, the preset, the latency, the licence check, crossfade
+  // back). A missing or failed instance is built with it.
+  void set_preset(std::string sts_path);
+  // Any thread (not the audio threads): saves the instance's current settings to `sts_path` on the
+  // Stereo Tool thread, between two blocks, and waits up to timeout_ms for it. Meanwhile the
+  // output waits too (no bypass unless the queue nears its limit). false with a Polish *error.
+  bool save_preset(const std::string& sts_path, int timeout_ms, std::string* error);
+  // Any thread: fades the output out over kRampFrames of the next frames emitted, then hands
+  // nothing more to the streams (faded_out()). For a switch away from this worker: the station's
+  // new path fades in once faded_out() (the engine waits for it, bounded).
+  void fade_out() { fade_wanted_.store(true, std::memory_order_relaxed); }
+  bool faded_out() const { return faded_out_.load(std::memory_order_acquire); }
   ProcessingStatus status() const;
   // Any thread: the state changes after event `since` (0: all kept), oldest first; returns the
   // seq to pass next time. Only the last kEventSlots - 1 are kept: the caller sees the gap in seq.
@@ -333,7 +352,7 @@ class ProcessingWorker {
 
  private:
   enum class Mode { Dry, Probation, Processed };
-  enum class Reason { None, Starting, LicenceCheck, Setup, Licence, TooSlow, Process, Crash, RestartWaits };
+  using Reason = ProcessingReason;
   enum class Pending { None, Setup, Job };
   void run();
   void take_streams();
@@ -373,6 +392,10 @@ class ProcessingWorker {
   bool licence_ok_ = false;    // the current session's licence check passed
   Pending pending_ = Pending::None;
   bool restart_wanted_ = false;
+  bool reload_wanted_ = false;  // the restart wanted loads a new preset (set_preset)
+  GainRamp fade_{1.0};          // fade_out(): the output level
+  bool fading_ = false;
+  bool faded_ = false;
   int64_t job_posted_ns_ = 0;  // when the block at the Stereo Tool thread was handed over
   int64_t window_ns_ = 0;      // start of the backlog window (0: backlog under kBehindFrames)
   size_t window_backlog_ = 0;  // the backlog at window_ns_
@@ -387,6 +410,9 @@ class ProcessingWorker {
   std::atomic<uint64_t> status_{0};
   EventRing events_;  // status_ values
   std::atomic<bool> restart_{false};
+  std::atomic<bool> preset_change_{false};
+  std::atomic<bool> fade_wanted_{false};
+  std::atomic<bool> faded_out_{false};
   std::atomic<bool> running_{true};
   std::atomic<bool> stopped_{false};
   std::thread out_thread_;
@@ -405,12 +431,18 @@ struct StationPlan {
   };
   // The enabled inputs in any order; an input's identity is its delay line (see Station).
   std::array<std::shared_ptr<const Input>, kStationInputs> inputs;
+  // Where the mix goes: the processing worker when there is one (it feeds the streams), else
+  // straight to the streams (the 1.0 path, bit for bit).
+  std::shared_ptr<ProcessingWorker> processing;
   std::vector<std::shared_ptr<StreamWorker>> streams;
   uint32_t latency_frames = 0;  // the station reads every input this far behind "now"
+  // A value other than the last plan's fades the station's output in over kRampFrames: the
+  // engine's switch away from a processing worker that faded out (ProcessingWorker::fade_out).
+  uint64_t fade_in = 0;
 };
 
 // The station thread: every 10 ms reads each input ring up to "now - latency", feeds the delay
-// lines, mixes and hands the mix to every stream worker.
+// lines, mixes and hands the mix to every stream worker (or to the processing worker).
 class Station {
  public:
   static constexpr int64_t kTickNs = 10'000'000;
@@ -462,6 +494,8 @@ class Station {
   std::array<std::vector<int32_t>, 2> pcm_;                 // kPassFrames per side
   std::array<std::vector<float>, kStationInputs> in_;      // kPassFrames stereo per input
   std::vector<float> mix_;                                  // kPassFrames stereo
+  GainRamp out_{1.0};       // the output level (StationPlan::fade_in); 1 except while fading in
+  uint64_t fade_in_ = 0;    // the plan value it last faded in for
   uint64_t pos_ = 0;  // next timeline sample to mix
   bool positioned_ = false;
   uint64_t step_generation_ = 0;

@@ -50,6 +50,14 @@ std::string without_key(std::string text, const std::string& key) {
   return text;
 }
 
+// A save_preset() call waiting for the Stereo Tool thread (shared: the caller may give up first).
+struct SaveRequest {
+  std::string path;
+  bool done = false;  // under Core::m
+  bool ok = false;
+  std::string error;
+};
+
 }  // namespace
 
 namespace testing {
@@ -58,7 +66,7 @@ void set_processing_stop_timeout_ms(int ms) { g_stop_timeout_ms.store(ms); }
 
 struct ProcessingWorker::Core {
   // fixed
-  std::string key, preset, home, name, station_id;
+  std::string key, preset, home, name, station_id, setup_error;
   int web_port = 0;
   std::function<void()> block_tap;
 
@@ -75,10 +83,15 @@ struct ProcessingWorker::Core {
   Verdict verdict = Verdict::None;   // Processed: a licence check came with this block
   bool crashed = false;              // ProcessFailed: a crash (nothing more until a service restart)
   uint64_t failure_id = 0;           // SetupFailed / ProcessFailed: the failure's text (failures)
+  std::string requested_preset;      // set_preset(): loaded by the next (re)start
+  bool preset_change = false;
+  std::shared_ptr<SaveRequest> save;  // save_preset(): done before the next command
 
   // published for status()
   std::atomic<double> cpu_pct{0};
   std::atomic<int> licence{-1};  // the last check: -1 none yet, 0 invalid, 1 valid
+  std::atomic<int> web_port_active{0};  // the instance is up with its web interface on this port
+  std::atomic<bool> side_busy{false};   // a save is under way (the output thread waits without bypassing)
   mutable std::mutex text_m;
   // Polish, the last kFailureTexts failures (no key), by id (1, 2, ...): failure id f is
   // failures[(f - 1) % kFailureTexts] while f > failure_count - kFailureTexts
@@ -98,10 +111,10 @@ namespace {
 
 using Core = ProcessingWorker::Core;
 
-// Records the failure text; returns its id (the output thread puts it into the state it sets).
+// Records the failure text; returns its id (the output thread puts it into the state it sets,
+// whose event the engine logs with it).
 uint64_t set_failure(Core& c, std::string text) {
   text = without_key(std::move(text), c.key);
-  log_warning("Processing stacji " + c.station_id + ": " + text);
   std::lock_guard lock(c.text_m);
   c.failures[c.failure_count % kFailureTexts] = std::move(text);
   return ++c.failure_count;
@@ -112,8 +125,28 @@ uint64_t last_failure(const Core& c) {
   return c.failure_count;
 }
 
-// Builds the instance (or keeps a working one on restart), loads the preset, measures the latency.
+// Lets go of the instance (deleted, or left behind when it crashed) and its web interface.
+void drop_instance(Core& c) {
+  c.web_port_active.store(0);
+  c.st.reset();
+}
+
+// Builds the instance (or keeps a working one on restart, loading a new preset into it when one
+// was set), loads the preset, measures the latency.
 Done setup(Core& c, bool restart, uint32_t* latency) {
+  bool reload = false;
+  {
+    std::lock_guard lock(c.m);
+    if (c.preset_change) {
+      c.preset = std::move(c.requested_preset);
+      c.preset_change = false;
+      reload = true;
+    }
+  }
+  if (!c.setup_error.empty()) {
+    set_failure(c, c.setup_error);
+    return Done::SetupFailed;
+  }
   c.licence.store(-1);
   c.cpu_pct.store(0);
   c.cpu_ns = 0;
@@ -123,7 +156,7 @@ Done setup(Core& c, bool restart, uint32_t* latency) {
     c.unlicensed.clear();
   }
   if (!restart || !c.st || c.st->failed()) {
-    c.st.reset();  // a failed one goes first: its memory and web interface port
+    drop_instance(c);  // a failed one goes first: its memory and web interface port
     if (restart) stereotool_reload();  // a library put in place since (nothing after a crash)
     std::string err;
     auto st = StereoToolInstance::create(c.key, c.name, c.home, &err);
@@ -131,9 +164,13 @@ Done setup(Core& c, bool restart, uint32_t* latency) {
       set_failure(c, err);
       return Done::SetupFailed;
     }
-    if (c.web_port > 0 && !st->set_web_interface(true, c.web_port) && !st->failed())
-      log_warning("Processing stacji " + c.station_id + ": Stereo Tool nie przyjął portu interfejsu WWW " +
-                  std::to_string(c.web_port) + " (interfejs WWW wyłączony)");
+    bool web = false;
+    if (c.web_port > 0) {
+      web = st->set_web_interface(true, c.web_port);
+      if (!web && !st->failed())
+        log_warning("Processing stacji " + c.station_id + ": Stereo Tool nie przyjął portu interfejsu WWW " +
+                    std::to_string(c.web_port) + " (interfejs WWW wyłączony)");
+    }
     if (!st->failed() && !c.preset.empty() && !st->load_preset(c.preset, &err)) {
       set_failure(c, err);
       return Done::SetupFailed;  // the instance is deleted here: no ~600 MB kept for nothing
@@ -143,12 +180,20 @@ Done setup(Core& c, bool restart, uint32_t* latency) {
       return Done::SetupFailed;
     }
     c.st = std::move(st);
+    c.web_port_active.store(web ? c.web_port : 0);
+  } else if (reload) {
+    std::string err;
+    if (!c.st->load_preset(c.preset, &err)) {
+      set_failure(c, err);
+      drop_instance(c);  // as on a first load: a new one is built by the next restart
+      return Done::SetupFailed;
+    }
   }
   // feeds silence through the chain: only here, never on live audio
   const int frames = c.st->latency_frames();
   if (c.st->failed()) {
     set_failure(c, c.st->failure());
-    c.st.reset();
+    drop_instance(c);
     return Done::SetupFailed;
   }
   if (frames > int(PW::kMaxLatencyFrames)) {
@@ -156,7 +201,7 @@ Done setup(Core& c, bool restart, uint32_t* latency) {
     std::snprintf(ms, sizeof ms, "%.0f", frames * 1000.0 / kStationRate);
     set_failure(c, std::string("opóźnienie Stereo Tool ") + ms + " ms jest większe niż dopuszczalne " +
                        std::to_string(PW::kMaxLatencyFrames * 1000 / kStationRate) + " ms");
-    c.st.reset();
+    drop_instance(c);
     return Done::SetupFailed;
   }
   c.session_frames = 0;
@@ -168,7 +213,7 @@ Done setup(Core& c, bool restart, uint32_t* latency) {
 Done process_failed(Core& c, bool* crashed) {
   *crashed = c.st->abandoned();  // this instance crashed (not another station's)
   set_failure(c, c.st->failure());
-  c.st.reset();  // after a C++ exception deleted now (memory, web port); after a crash abandoned
+  drop_instance(c);  // after a C++ exception deleted now (memory, web port); after a crash abandoned
   c.cpu_pct.store(0);
   return Done::ProcessFailed;
 }
@@ -207,16 +252,42 @@ Done process_block(Core& c, Verdict* verdict, bool* crashed) {
   return Done::Processed;
 }
 
+// save_preset(): the instance's settings to the requested file, between two commands.
+void save(Core& c, SaveRequest& r) {
+  c.side_busy.store(true);
+  std::string err;
+  bool ok = false;
+  if (!c.st || c.st->failed()) {
+    err = "Stereo Tool nie działa na tej stacji (brak instancji)";
+  } else {
+    ok = c.st->save_preset(r.path, &err);
+    // the binding names the temporary file; an exception's text is kept (without the key)
+    err = ok ? std::string() : c.st->failed() ? without_key(c.st->failure(), c.key) : "Stereo Tool nie zapisał presetu";
+  }
+  c.side_busy.store(false);
+  {
+    std::lock_guard lock(c.m);
+    r.ok = ok;
+    r.error = std::move(err);
+    r.done = true;
+  }
+  c.cv.notify_all();
+}
+
 void st_main(std::shared_ptr<Core> c) {
   for (;;) {
     Cmd cmd;
+    std::shared_ptr<SaveRequest> save_request;
     {
       std::unique_lock lock(c->m);
-      c->cv.wait(lock, [&] { return c->quit || c->cmd != Cmd::None; });
+      c->cv.wait(lock, [&] { return c->quit || c->cmd != Cmd::None || c->save; });
       if (c->quit) break;
       cmd = c->cmd;
       c->cmd = Cmd::None;
+      save_request = std::move(c->save);
     }
+    if (save_request) save(*c, *save_request);
+    if (cmd == Cmd::None) continue;
     Done done;
     uint32_t latency = 0;
     Verdict verdict = Verdict::None;
@@ -239,7 +310,7 @@ void st_main(std::shared_ptr<Core> c) {
     }
     c->cv.notify_all();
   }
-  c->st.reset();  // stereoTool_Delete on this thread (it may hang after a crash: stop() does not wait for ever)
+  drop_instance(*c);  // stereoTool_Delete on this thread (it may hang after a crash: stop() does not wait for ever)
   {
     std::lock_guard lock(c->m);
     c->finished = true;
@@ -261,6 +332,7 @@ ProcessingWorker::ProcessingWorker(const ProcessingSettings& s, std::string stat
   c.preset = s.preset_path;
   c.home = s.home_dir;
   c.web_port = s.web_port;
+  c.setup_error = s.setup_error;
   c.station_id = station_id_;
   c.name = "station-" + station_id_;
   c.block_tap = s.st_block_tap;
@@ -295,6 +367,40 @@ void ProcessingWorker::set_streams(std::vector<std::shared_ptr<StreamWorker>> st
 }
 
 void ProcessingWorker::restart() { restart_.store(true); }
+
+void ProcessingWorker::set_preset(std::string sts_path) {
+  {
+    std::lock_guard lock(core_->m);
+    core_->requested_preset = std::move(sts_path);
+    core_->preset_change = true;
+  }
+  preset_change_.store(true);
+}
+
+bool ProcessingWorker::save_preset(const std::string& sts_path, int timeout_ms, std::string* error) {
+  auto request = std::make_shared<SaveRequest>();
+  request->path = sts_path;
+  std::unique_lock lock(core_->m);
+  std::string why;
+  if (core_->quit || core_->finished) {
+    why = "processing tej stacji jest zatrzymany";
+  } else if (core_->save) {
+    why = "zapis presetu tej stacji już trwa";
+  } else {
+    core_->save = request;
+    core_->cv.notify_all();
+    core_->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] { return request->done || core_->finished; });
+    if (request->done) {
+      if (request->ok) return true;
+      why = request->error;
+    } else {
+      if (core_->save == request) core_->save.reset();  // not taken yet: it never will be
+      why = "Stereo Tool nie odpowiada — preset nie został zapisany";
+    }
+  }
+  if (error) *error = why;
+  return false;
+}
 
 void ProcessingWorker::stop() {
   if (stopped_.exchange(true)) return;
@@ -367,7 +473,9 @@ ProcessingStatus ProcessingWorker::status() const {
   const uint64_t packed = status_.load();
   s.state = ProcessingState(packed >> kStateShift);
   const auto why = Reason((packed >> kReasonShift) & 0xFF);
+  s.reason_code = why;
   s.reason = reason_text(why, packed & kFailureMask);
+  s.web_port = core_->web_port_active.load();
   s.latency_ms = delay_frames() * 1000.0 / kStationRate;
   const bool feeding = s.state == ProcessingState::Running || why == Reason::LicenceCheck;
   s.cpu_pct = feeding ? core_->cpu_pct.load() : 0.0;
@@ -388,7 +496,8 @@ uint64_t ProcessingWorker::events_since(uint64_t since, std::vector<ProcessingEv
     ProcessingEvent e;
     e.seq = seq;
     e.state = ProcessingState(packed >> kStateShift);
-    e.reason = reason_text(Reason((packed >> kReasonShift) & 0xFF), packed & kFailureMask);
+    e.reason_code = Reason((packed >> kReasonShift) & 0xFF);
+    e.reason = reason_text(e.reason_code, packed & kFailureMask);
     out->push_back(std::move(e));
   }
   return next;
@@ -444,6 +553,12 @@ void ProcessingWorker::take_streams() {
 }
 
 bool ProcessingWorker::falling_behind(int64_t now) {
+  if (core_->side_busy.load(std::memory_order_relaxed)) {
+    // a save between two blocks: only the queue's limit counts; being stuck and the backlog
+    // window count from its end
+    job_posted_ns_ = now;
+    window_ns_ = 0;
+  }
   if (pending_ == Pending::Job && now - job_posted_ns_ > kMaxBehindNs) return true;  // stuck in a call
   const size_t backlog = in_.size_frames();
   // the queue would drop audio soon, unless Stereo Tool is draining it (a burst after a stall)
@@ -487,6 +602,7 @@ void ProcessingWorker::go_dry(Reason why, ProcessingState state) {
 
 void ProcessingWorker::begin_restart() {
   restart_wanted_ = false;
+  reload_wanted_ = false;  // the Stereo Tool thread takes the preset set last
   go_dry(Reason::Starting, ProcessingState::Bypass);
   {
     std::lock_guard lock(core_->m);
@@ -585,9 +701,18 @@ void ProcessingWorker::emit() {
     set_state(ProcessingState::Running, Reason::None);
   }
   const int64_t end = written_ - int64_t(delay_.load(std::memory_order_relaxed));
+  if (faded_) {  // faded out (fade_out()): nothing more for the streams
+    emitted_ = std::max(emitted_, end);
+    return;
+  }
+  if (!fading_ && fade_wanted_.load(std::memory_order_relaxed)) {
+    fading_ = true;
+    fade_.set_target(0.0);
+  }
   while (emitted_ < end) {
     const size_t n = size_t(std::min<int64_t>(end - emitted_, int64_t(kBlockFrames)));
     float* o = out_.data();
+    size_t out_n = n;
     for (size_t k = 0; k < n; ++k) {
       const size_t i = size_t((emitted_ + int64_t(k)) & kRingMask) * 2;
       const double a = mix_.ramping() ? mix_.next() : mix_.level();
@@ -601,9 +726,25 @@ void ProcessingWorker::emit() {
         for (int c = 0; c < 2; ++c)
           o[k * 2 + c] = static_cast<float>(a * double(proc_[i + c]) + (1.0 - a) * double(dry_[i + c]));
       }
+      if (fading_) {
+        const double g = fade_.next();
+        o[k * 2] = static_cast<float>(g * double(o[k * 2]));
+        o[k * 2 + 1] = static_cast<float>(g * double(o[k * 2 + 1]));
+        if (!fade_.ramping()) {  // silent from here: the rest of the block is not handed over
+          out_n = k + 1;
+          break;
+        }
+      }
     }
-    deliver(o, n);
+    deliver(o, out_n);
     emitted_ += int64_t(n);
+    if (fading_ && !fade_.ramping()) {
+      fading_ = false;
+      faded_ = true;
+      faded_out_.store(true, std::memory_order_release);
+      emitted_ = std::max(emitted_, end);
+      return;
+    }
   }
 }
 
@@ -611,12 +752,14 @@ void ProcessingWorker::run() {
   while (running_.load(std::memory_order_relaxed)) {
     take_streams();
     if (restart_.exchange(false)) restart_wanted_ = true;
+    if (preset_change_.exchange(false)) restart_wanted_ = reload_wanted_ = true;
     if (pending_ != Pending::None) take_result(false);
     if (restart_wanted_) {
       if (pending_ == Pending::None)
         begin_restart();
       else if (pending_ == Pending::Setup)
-        restart_wanted_ = false;  // a (re)start is under way already
+        // a (re)start is under way already; a new preset waits for it (it may have missed it)
+        restart_wanted_ = reload_wanted_;
       else
         set_state(ProcessingState(status_.load() >> kStateShift), Reason::RestartWaits);  // a block stuck in Stereo Tool
     }

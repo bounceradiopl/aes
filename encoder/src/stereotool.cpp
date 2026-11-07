@@ -254,6 +254,7 @@ struct Cache {
   StereoToolInfo current() const {
     StereoToolInfo i = info;
     i.abandoned = g_abandoned.load();
+    i.checked = tried;
     return i;
   }
 };
@@ -277,6 +278,12 @@ StereoToolInfo stereotool_info() {
   StereoToolInfo info;
   stereotool_api(&info);
   return info;
+}
+
+StereoToolInfo stereotool_peek() {
+  auto& c = cache();
+  std::lock_guard<std::mutex> lock(c.mutex);
+  return c.current();
 }
 
 StereoToolInfo stereotool_reload() {

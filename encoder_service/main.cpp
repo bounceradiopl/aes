@@ -93,11 +93,15 @@ void install_file_sink(const std::string& dir) {
   });
 }
 
-int run(const std::string& config_path, const std::string& dir_error, std::atomic<bool>& stop) {
+int run(const std::string& config_path, bool protect, const std::string& dir_error, std::atomic<bool>& stop) {
   bam::log_info(std::string(be::kEncoderProductName) + " " + be::kEncoderVersion + ", konfiguracja: " + config_path);
   if (!dir_error.empty()) bam::log_error("Folder danych: " + dir_error);
   const be::EncoderConfig cfg = be::load_startup_config(config_path);
-  be::EncoderEngine engine;
+  // Stereo Tool's folder next to config.json (preset_store.hpp), created with the same protection
+  be::EncoderEngineOptions opts;
+  opts.stereotool_dir = dir_of(config_path) + kSep + be::kStereoToolDirName;
+  opts.protect_stereotool_dir = protect;
+  be::EncoderEngine engine(opts);
   std::string err;
   if (!engine.start(cfg, &err)) {
     bam::log_error("Nie można uruchomić usługi: " + err);
@@ -161,7 +165,7 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
   if (!console) {
     bam::install_event_log_sink(kEncoderEventSource);
-    if (bam::run_as_windows_service([&](std::atomic<bool>& stop) { return run(config_path, dir_error, stop); }, kEncoderServiceName))
+    if (bam::run_as_windows_service([&](std::atomic<bool>& stop) { return run(config_path, protect, dir_error, stop); }, kEncoderServiceName))
       return 0;
     print_usage();  // started by hand, not by the service control manager
     return 2;
@@ -175,5 +179,5 @@ int main(int argc, char** argv) {
   });
   std::signal(SIGINT, [](int) { g_console_stop = true; });
   std::signal(SIGTERM, [](int) { g_console_stop = true; });
-  return run(config_path, dir_error, g_console_stop);
+  return run(config_path, protect, dir_error, g_console_stop);
 }

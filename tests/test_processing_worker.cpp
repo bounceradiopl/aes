@@ -158,9 +158,13 @@ struct Path {
   std::vector<std::pair<size_t, bool>> switches;  // frame where a crossfade starts, true = to processed
 };
 
-Path analyse(const std::vector<float>& in, const std::vector<float>& out, float gain, bool start_processed = false) {
+// `gains`: the fake's gain in each stretch of processing, in order (the last one stays).
+Path analyse(const std::vector<float>& in, const std::vector<float>& out, const std::vector<float>& gains,
+             bool start_processed = false) {
   Path p;
   bool processed = start_processed;
+  size_t episode = start_processed ? 0 : size_t(-1);
+  float gain = gains.front();
   const size_t frames = std::min(in.size(), out.size()) / 2;
   auto proc = [&](size_t j, int c) { return in[j * 2 + c] * gain; };
   auto dry = [&](size_t j, int c) { return in[j * 2 + c]; };
@@ -181,6 +185,7 @@ Path analyse(const std::vector<float>& in, const std::vector<float>& out, float 
       continue;
     }
     const bool to = !processed;
+    if (to) gain = gains[std::min(++episode, gains.size() - 1)];
     if (is(j, [&](size_t f, int c) { return ramp(f, c, 1, to); })) {
       p.switches.push_back({j, to});
       for (uint32_t k = 1; k <= kRamp && j < frames; ++k, ++j)
@@ -188,10 +193,15 @@ Path analyse(const std::vector<float>& in, const std::vector<float>& out, float 
       processed = to;
       continue;
     }
+    if (to) --episode;  // not a switch after all
     bad(j);
     ++j;
   }
   return p;
+}
+
+Path analyse(const std::vector<float>& in, const std::vector<float>& out, float gain, bool start_processed = false) {
+  return analyse(in, out, std::vector<float>{gain}, start_processed);
 }
 
 // No 10 ms of the output is silent (the input never is).
@@ -755,6 +765,107 @@ TEST_CASE("processing: streams are handed over like a plan and released off the 
   feed(w, input, 4800);
   w.set_streams({});  // the list the output thread let go of is released here
   CHECK(stream.use_count() == 1);
+}
+
+TEST_CASE("processing: a new preset is loaded into the running instance, aligned, with crossfades") {
+  UseFake use;
+  TempDir dir("reload");
+  const std::string p1 = (fs::path(dir.path) / "a.sts").string(), p2 = (fs::path(dir.path) / "b.sts").string();
+  std::ofstream(p1, std::ios::binary) << "[FakeStereoTool]\ngain=0.5\nlatency=512\n";
+  std::ofstream(p2, std::ios::binary) << "[FakeStereoTool]\ngain=0.25\nlatency=300\n";
+  Collector col;
+  Input input;
+  auto s = settings(col);
+  s.preset_path = p1;
+  s.web_port = 8123;
+  PW w(s, "rl");
+  REQUIRE(feed_until(w, input, be::ProcessingState::Running));
+  CHECK(w.status().web_port == 8123);
+  feed(w, input, 9600);
+  w.set_preset(p2);
+  REQUIRE(status_when(w, [](auto& x) { return x.state != be::ProcessingState::Running; }).reason_code ==
+          be::ProcessingReason::Starting);
+  REQUIRE(feed_until(w, input, be::ProcessingState::Running));
+  feed(w, input, 9600);
+  REQUIRE(drained(w, col, input));
+  CHECK(w.delay_frames() == 512 + kRamp);  // a shorter latency never shrinks the delay
+  CHECK(fake().value("created") == 1);     // the same instance
+  CHECK(fake().value("load_calls") == 2);
+  CHECK(fake().text("load_path") == std::optional<std::string>(p2));
+  CHECK(w.status().web_port == 8123);  // the web interface kept its port
+  const auto out = col.copy();
+  const Path p = analyse(input.in, out, std::vector<float>{0.5f, 0.25f});
+  CHECK_MESSAGE(p.mismatches == 0, "first mismatch at frame " << p.first_mismatch);
+  REQUIRE(p.switches.size() == 3);  // in, out for the reload, in with the new preset
+  CHECK(silent_blocks(out) == 0);
+  // a preset that cannot be loaded: an error, the unprocessed signal, the instance let go
+  w.set_preset((fs::path(dir.path) / "missing.sts").string());
+  const auto st = status_when(w, [](auto& x) { return x.state == be::ProcessingState::Error; });
+  CHECK_MESSAGE(contains(st.reason, "nie wczytał presetu"), st.reason);
+  CHECK(st.reason_code == be::ProcessingReason::Setup);
+  CHECK(st.web_port == 0);
+  CHECK(wait_until([] { return fake().value("live") == 0; }));
+}
+
+TEST_CASE("processing: the settings are saved on the Stereo Tool thread while processing goes on") {
+  UseFake use;
+  TempDir dir("save");
+  Collector col;
+  Input input;
+  PW w(settings(col), "sv");
+  std::string err;
+  // no instance yet (or any more): refused, nothing waits for ever
+  fake().set("create_fails", 1);
+  REQUIRE(status_when(w, [](auto& x) { return x.state == be::ProcessingState::Error; }).state == be::ProcessingState::Error);
+  CHECK_FALSE(w.save_preset((fs::path(dir.path) / "x.sts").string(), 2000, &err));
+  CHECK_MESSAGE(contains(err, "brak instancji"), err);
+  fake().set("create_fails", 0);
+  w.restart();
+  REQUIRE(feed_until(w, input, be::ProcessingState::Running));
+  std::atomic<bool> stop{false};
+  std::thread feeder([&] {
+    while (!stop) feed(w, input, 480, 10'000'000);
+  });
+  const std::string path = (fs::path(dir.path) / "saved.sts").string();
+  CHECK(w.save_preset(path, 5000, &err));
+  std::ifstream f(path, std::ios::binary);
+  std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  CHECK(text == "[FakeStereoTool]\ngain=0.5\nlatency=512\n");
+  fake().set("save_fails", 1);
+  CHECK_FALSE(w.save_preset(path + "2", 5000, &err));
+  CHECK(err == "Stereo Tool nie zapisał presetu");
+  bp::sleep_ns(200'000'000);
+  stop = true;
+  feeder.join();
+  CHECK(w.status().state == be::ProcessingState::Running);
+  w.stop();
+  CHECK_FALSE(w.save_preset(path + "3", 2000, &err));
+  CHECK_MESSAGE(contains(err, "zatrzymany"), err);
+}
+
+TEST_CASE("processing: fade_out() ramps the output down over 240 frames, then hands over nothing") {
+  UseFake use;
+  Collector col;
+  Input input;
+  input.dc = 0.5f;
+  PW w(settings(col), "fo");
+  REQUIRE(feed_until(w, input, be::ProcessingState::Running));
+  feed(w, input, 9600);
+  REQUIRE(drained(w, col, input));
+  const size_t before = col.frames();
+  CHECK_FALSE(w.faded_out());
+  w.fade_out();
+  feed(w, input, 4800);
+  REQUIRE(wait_until([&] { return w.faded_out(); }));
+  feed(w, input, 4800);
+  bp::sleep_ns(100'000'000);
+  const auto out = col.copy();
+  REQUIRE(out.size() / 2 == before + kRamp);  // the fade, and nothing after it
+  for (uint32_t k = 0; k < kRamp; ++k) {
+    const double g = double(kRamp - 1 - k) / kRamp;  // GainRamp from 1 to 0
+    CHECK(out[(before + k) * 2] == static_cast<float>(g * double(0.25f)));
+  }
+  CHECK(out.back() == 0.0f);
 }
 
 TEST_CASE("processing: key, station name, home folder, web port and preset reach the instance; no key in reasons") {

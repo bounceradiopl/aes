@@ -30,6 +30,7 @@ struct StereoToolInfo {
   int version = 0;     // stereoTool_GetSoftwareVersion(): 11070 for 11.07
   std::string error;   // Polish, for the panel, when not available
   int abandoned = 0;   // instances abandoned after a crash in the library (process-wide)
+  bool checked = false;  // the library was looked for (stereotool_peek: not yet when false)
 };
 
 // The library, loaded once per search-dir setting (default: the program folder). Before the
@@ -38,6 +39,9 @@ struct StereoToolInfo {
 // A loaded library stays loaded until the process ends: Stereo Tool may keep threads of its own
 // after the last instance is deleted.
 StereoToolInfo stereotool_info();
+// The same, without looking for the library when nothing has asked for it yet (checked false):
+// the engine's status, which must not load the 117 MB library on an encoder without processing.
+StereoToolInfo stereotool_peek();
 
 // File names searched in each dir: libStereoTool_64.dll (Windows x64), libStereoTool_64.dylib
 // (macOS), libStereoTool_intel64.so / libStereoTool_noX11_arm64.so / libStereoTool_arm64.so (Linux).
