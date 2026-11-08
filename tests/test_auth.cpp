@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <string>
+#include <vector>
 
 #include "bam/auth.hpp"
 
@@ -30,6 +31,28 @@ TEST_CASE("PBKDF2-HMAC-SHA256") {
         "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b");
   CHECK(bam::to_hex(bam::pbkdf2_sha256("password", bytes(salt), 2, 32)) ==
         "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43");
+}
+
+TEST_CASE("PBKDF2 with a password longer than the HMAC block: the same result, its cost independent of the length") {
+  // the definition, HMAC by HMAC (each one hashes the long key itself)
+  const std::string salt = "sol";
+  const std::string password(1000, 'p');
+  std::vector<uint8_t> msg(salt.begin(), salt.end());
+  for (uint8_t b : {0, 0, 0, 1}) msg.push_back(b);
+  auto u = bam::hmac_sha256(bytes(password), msg);
+  auto t = u;
+  for (int it = 1; it < 3; ++it) {
+    u = bam::hmac_sha256(bytes(password), u);
+    for (size_t i = 0; i < t.size(); ++i) t[i] ^= u[i];
+  }
+  CHECK(bam::to_hex(bam::pbkdf2_sha256(password, bytes(salt), 3, 32)) == bam::to_hex(t));
+  // a login with a 1 MB password costs what a short one does (it used to hash the 1 MB 200 000 times)
+  const auto h = bam::make_password_hash("tajne-haslo");
+  const auto t0 = std::chrono::steady_clock::now();
+  CHECK_FALSE(bam::verify_password(std::string(1024 * 1024, 'x'), h));
+  CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(3));
+  const std::string long_password(200, 'L');
+  CHECK(bam::verify_password(long_password, bam::make_password_hash(long_password)));
 }
 
 namespace {

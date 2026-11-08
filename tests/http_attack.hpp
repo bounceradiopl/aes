@@ -107,9 +107,13 @@ inline std::string smuggled_setup(const std::string& password) {
 // starting exactly `offset` bytes into the connection: httplib reads ahead in 4 KB blocks and
 // drops the read-ahead with the request, so a refused request's leftover body is parsed from a
 // 4 KB boundary on. `head(body_size)` gives everything before the body; `tail` follows it.
-inline std::string hiding_request(const std::function<std::string(size_t)>& head, size_t offset, const std::string& tail = "") {
+// The same with 60 copies of any request (`smuggled(i)` gives copy i), e.g. an authenticated one
+// when a password is set already.
+inline std::string hiding_request_with(const std::function<std::string(size_t)>& head, size_t offset,
+                                       const std::function<std::string(int)>& smuggled, const std::string& tail = "") {
   std::string copies;
-  for (int i = 0; i < 60; ++i) copies += smuggled_setup("przejete" + std::to_string(i));
+  for (int i = 0; i < 60; ++i) copies += smuggled(i);
+  const std::string first = smuggled(0).substr(0, 24);
   size_t body_size = copies.size() + offset;
   for (int i = 0; i < 4; ++i) {  // the head's length field depends on the body size
     const size_t h = head(body_size).size();
@@ -119,8 +123,11 @@ inline std::string hiding_request(const std::function<std::string(size_t)>& head
   const std::string hd = head(body_size);
   const std::string body = std::string(offset - hd.size() - 2, 'x') + "\r\n" + copies;
   REQUIRE(body.size() == body_size);
-  REQUIRE((hd + body).compare(offset, 24, "POST /api/setup HTTP/1.0") == 0);
+  REQUIRE((hd + body).compare(offset, first.size(), first) == 0);
   return hd + body + tail;
+}
+inline std::string hiding_request(const std::function<std::string(size_t)>& head, size_t offset, const std::string& tail = "") {
+  return hiding_request_with(head, offset, [](int i) { return smuggled_setup("przejete" + std::to_string(i)); }, tail);
 }
 inline std::string head_with_length(const std::string& method, const std::string& path, const std::string& type, size_t body_size,
                                     const std::string& cookie = "", const std::string& length = "") {

@@ -3,20 +3,30 @@
 ; układzie i z tym samym brandingiem co BounceAES-setup.nsi. makensis działa natywnie na
 ; macOS/Linux/Windows.
 ;
-; Build (z katalogu installer/nsis):  makensis [-DPAYLOAD=<bezwzględna ścieżka do plików>] BounceEncoder-setup.nsi
+; Build (z katalogu installer/nsis):
+;   makensis [-DPAYLOAD=<bezwzględna ścieżka do plików>] [-DWITH_STEREOTOOL=<ścieżka do libStereoTool_64.dll>] BounceEncoder-setup.nsi
 ;         ->  BounceEncoder-setup.exe obok skryptu
 ;         PAYLOAD = katalog 64-bitowego buildu z kodekami (MinGW: build-win, MSVC: build\Release):
 ;                   BounceEncoder.exe, BounceEncoderTray.exe, libmp3lame.dll, libfdk-aac-2.dll
-;                   i encoder-licenses\ (teksty licencji kodeków, kopiowane przez cmake/codecs.cmake).
+;                   i encoder-licenses\ (teksty licencji kodeków z cmake/codecs.cmake).
+;         WITH_STEREOTOOL = pełny instalator: ta biblioteka (Thimeo Stereo Tool 11.07, SHA-256
+;                   48cbdc06…8c4e, cmake/stereotool.cmake) jako libStereoTool_64.dll i nota Thimeo
+;                   (cmake/stereotool/StereoTool-NOTICE.txt). Bez niego instalator nie zawiera
+;                   niczego od Thimeo (tak buduje go CI: artefakty repozytorium są publiczne):
+;                   processing pokazuje „brak biblioteki Stereo Tool”, a instalacja na miejscu
+;                   wcześniejszej pełnej zostawia jej bibliotekę i notę (INSTRUKCJA.md, rozdz. 10).
+;                   Polecenie dla pełnego instalatora: INSTRUKCJA.md, „Budowanie ze źródeł”.
 ;
 ; Kreator: Welcome -> Licencja (GPLv3) -> folder -> Instalacja -> Finish.
-; Instalacja: pliki (kodeki obok programu: ładowane są tylko z jego folderu), usługa Windows
+; Instalacja: pliki (kodeki i Stereo Tool obok programu: ładowane są tylko z jego folderu), usługa Windows
 ; "Bounce Encoder" (auto, restart po awarii), źródło Dziennika zdarzeń, reguła zapory dla programu,
 ; folder %ProgramData%\Bounce Encoder z uprawnieniami tylko dla administratorów i SYSTEM
 ; (config.json zawiera hasła strumieni) i podfolderem public\ do odczytu dla użytkowników
 ; (panel.json: adres panelu dla ikony w zasobniku), autostart ikony w zasobniku, skróty.
 ; Deinstalacja: zatrzymuje i usuwa usługę, usuwa regułę zapory, źródło Dziennika zdarzeń, skróty
-; i pliki; konfigurację w %ProgramData%\Bounce Encoder usuwa tylko na wyraźne życzenie.
+; i pliki; konfigurację w %ProgramData%\Bounce Encoder (z folderami Stereo Tool stacji) i presety
+; Stereo Tool (stereotool\presets) usuwa tylko na wyraźne życzenie, każde osobno (deinstalacja
+; cicha /S zostawia oba).
 ; Tylko Windows 10/11 x64 (enkoder jest wyłącznie 64-bitowy).
 
 Unicode true
@@ -29,10 +39,27 @@ Unicode true
   !define PAYLOAD "${__FILEDIR__}\..\..\build-win"
 !endif
 !define ROOT "${__FILEDIR__}\..\.."  ; paths are relative to this script, not to the working directory
+; the licence texts: encoder-licenses\ of a build folder, or licencje\ of the CI artifact
+; BounceEncoder-binaries (the installed layout), so that artifact is a PAYLOAD too
+!if /FileExists "${PAYLOAD}\encoder-licenses\LAME-COPYING.txt"
+  !define LICENSES "${PAYLOAD}\encoder-licenses"
+!else
+  !define LICENSES "${PAYLOAD}\licencje"
+!endif
+!ifndef OUTFILE
+  !define OUTFILE "BounceEncoder-setup.exe"
+!endif
+!ifdef WITH_STEREOTOOL
+  !define STEREOTOOL_TEXT_PL "Processing: Stereo Tool (Thimeo, biblioteka komercyjna, osobna licencja na każdą stację z processingiem)."
+  !define STEREOTOOL_TEXT_EN "Processing: Stereo Tool (Thimeo, a commercial library, a licence of its own for every station with processing)."
+!else
+  !define STEREOTOOL_TEXT_PL "Processing: ten instalator nie zawiera biblioteki Stereo Tool (Thimeo) — processing działa po umieszczeniu libStereoTool_64.dll 11.07 w folderze programu albo z pełnym instalatorem (INSTRUKCJA.md, rozdział 10)."
+  !define STEREOTOOL_TEXT_EN "Processing: this installer does not contain the Stereo Tool library (Thimeo) — processing works once libStereoTool_64.dll 11.07 is in the program folder, or with the full installer (INSTRUKCJA.md, chapter 10)."
+!endif
 
 !define APP "Bounce Encoder"
 !define PUBLISHER "BOUNCE SP. Z O.O."
-!define VER "1.0.4"
+!define VER "1.1.0"
 !define SERVICE "BounceEncoder"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\BounceEncoder"
 !define EVENTLOG_KEY "SYSTEM\CurrentControlSet\Services\EventLog\Application\Bounce Encoder"
@@ -49,13 +76,13 @@ Unicode true
 !define PROGRAM_SDDL "D:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;FRFX;;;BU)"
 
 Name "${APP}"
-OutFile "BounceEncoder-setup.exe"
+OutFile "${OUTFILE}"
 InstallDir "$PROGRAMFILES64\Bounce Encoder"
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 InstallColors F72868 050505
 
-VIProductVersion "1.0.4.0"
+VIProductVersion "1.1.0.0"
 VIAddVersionKey "ProductName" "${APP}"
 VIAddVersionKey "CompanyName" "${PUBLISHER}"
 VIAddVersionKey "FileDescription" "${APP} - instalator"
@@ -96,8 +123,8 @@ VIAddVersionKey "LegalCopyright" "GPL-3.0-or-later"
 
 LangString WelcomeTitle ${LANG_POLISH} "Instalacja Bounce Encoder"
 LangString WelcomeTitle ${LANG_ENGLISH} "Bounce Encoder Setup"
-LangString WelcomeText ${LANG_POLISH} "Kreator zainstaluje Bounce Encoder: usługę, która odbiera strumienie AES67, miksuje je w sygnał stacji i wysyła do serwerów Icecast (MP3, AAC, HE-AAC, FLAC), ikonę w zasobniku oraz panel WWW.$\r$\n$\r$\nKodeki: LAME (LGPL) i Fraunhofer FDK AAC. Bounce Encoder jest na GPLv3 z dodatkowym uprawnieniem na połączenie z FDK AAC. Licencja Fraunhofera nie obejmuje patentów AAC: przed przekazaniem instalatora poza Bounce sprawdź licencję patentową (LICENCJE.md).$\r$\n$\r$\nPo instalacji otwórz panel (${PANEL_URL}) i ustaw hasło.$\r$\n$\r$\nKliknij Dalej, aby kontynuować."
-LangString WelcomeText ${LANG_ENGLISH} "This wizard installs Bounce Encoder: the service that receives AES67 streams, mixes them into a station signal and sends it to Icecast servers (MP3, AAC, HE-AAC, FLAC), the tray icon and the web panel.$\r$\n$\r$\nCodecs: LAME (LGPL) and Fraunhofer FDK AAC. Bounce Encoder is GPLv3 with an additional permission to combine it with FDK AAC. The Fraunhofer licence does not cover AAC patents: check patent licensing before passing the installer on outside Bounce (LICENCJE.md).$\r$\n$\r$\nAfter installation open the panel (${PANEL_URL}) and set a password.$\r$\n$\r$\nClick Next to continue."
+LangString WelcomeText ${LANG_POLISH} "Kreator zainstaluje Bounce Encoder: usługę, która odbiera strumienie AES67, miksuje je w sygnał stacji i wysyła do serwerów Icecast (MP3, AAC, HE-AAC, FLAC), ikonę w zasobniku oraz panel WWW.$\r$\n$\r$\nKodeki: LAME (LGPL) i Fraunhofer FDK AAC. ${STEREOTOOL_TEXT_PL} Bounce Encoder jest na GPLv3 z dodatkowym uprawnieniem na połączenie z FDK AAC i Stereo Tool. Przed przekazaniem instalatora poza Bounce sprawdź licencję patentową AAC i uzyskaj zgodę Thimeo (LICENCJE.md).$\r$\n$\r$\nPo instalacji otwórz panel (${PANEL_URL}) i ustaw hasło.$\r$\n$\r$\nKliknij Dalej, aby kontynuować."
+LangString WelcomeText ${LANG_ENGLISH} "This wizard installs Bounce Encoder: the service that receives AES67 streams, mixes them into a station signal and sends it to Icecast servers (MP3, AAC, HE-AAC, FLAC), the tray icon and the web panel.$\r$\n$\r$\nCodecs: LAME (LGPL) and Fraunhofer FDK AAC. ${STEREOTOOL_TEXT_EN} Bounce Encoder is GPLv3 with an additional permission to combine it with FDK AAC and Stereo Tool. Before passing the installer on outside Bounce, check AAC patent licensing and get Thimeo's consent (LICENCJE.md).$\r$\n$\r$\nAfter installation open the panel (${PANEL_URL}) and set a password.$\r$\n$\r$\nClick Next to continue."
 LangString LicCheck ${LANG_POLISH} "Zapoznałem się z licencją GPLv3 i akceptuję jej warunki."
 LangString LicCheck ${LANG_ENGLISH} "I have read and accept the GPLv3 license."
 LangString RunTray ${LANG_POLISH} "Uruchom ikonę Bounce Encoder w zasobniku"
@@ -108,8 +135,8 @@ LangString FinishText ${LANG_POLISH} "Bounce Encoder został zainstalowany i dzi
 LangString FinishText ${LANG_ENGLISH} "Bounce Encoder has been installed and is running.$\r$\n$\r$\nAutostart: the service starts with Windows, the tray icon at every logon. A $\"Bounce Encoder$\" shortcut is on the desktop and in the Start menu.$\r$\n$\r$\nIn the panel select the AoIP network card (Ustawienia…) and add the first station."
 LangString Need64 ${LANG_POLISH} "Bounce Encoder wymaga 64-bitowego systemu Windows 10 lub 11."
 LangString Need64 ${LANG_ENGLISH} "Bounce Encoder requires 64-bit Windows 10 or 11."
-LangString PtpWarn ${LANG_POLISH} "Włączony jest klient PTP usługi czasu Windows (w32time). Zajmuje on porty 319/320 i uniemożliwi synchronizację Bounce Encoder z zegarem PTP.$\r$\n$\r$\nWyłącz go po instalacji (opis w INSTRUKCJA.md, rozdział 11)."
-LangString PtpWarn ${LANG_ENGLISH} "The Windows Time service PTP client (w32time) is enabled. It occupies ports 319/320 and prevents Bounce Encoder from synchronising to the PTP clock.$\r$\n$\r$\nDisable it after installation (see INSTRUKCJA.md, section 11)."
+LangString PtpWarn ${LANG_POLISH} "Włączony jest klient PTP usługi czasu Windows (w32time). Zajmuje on porty 319/320 i uniemożliwi synchronizację Bounce Encoder z zegarem PTP.$\r$\n$\r$\nWyłącz go po instalacji (opis w INSTRUKCJA.md, rozdział 12)."
+LangString PtpWarn ${LANG_ENGLISH} "The Windows Time service PTP client (w32time) is enabled. It occupies ports 319/320 and prevents Bounce Encoder from synchronising to the PTP clock.$\r$\n$\r$\nDisable it after installation (see INSTRUKCJA.md, section 12)."
 LangString AclWarn ${LANG_POLISH} "Nie udało się ustawić uprawnień folderu $APPDATA\Bounce Encoder (kod $1). Plik config.json z hasłami strumieni może być czytelny dla innych użytkowników tego komputera: ustaw uprawnienia ręcznie (INSTRUKCJA.md, rozdział 2)."
 LangString AclWarn ${LANG_ENGLISH} "Could not set the permissions of $APPDATA\Bounce Encoder (code $1). config.json with the stream passwords may be readable by other users of this computer: set the permissions by hand (INSTRUKCJA.md, section 2)."
 LangString InstAclWarn ${LANG_POLISH} "Nie udało się ustawić uprawnień folderu programu $INSTDIR (kod $1). Inni użytkownicy tego komputera mogą podmienić pliki usługi Bounce Encoder: zainstaluj program w Program Files albo ustaw uprawnienia ręcznie (administratorzy i SYSTEM: pełna kontrola, Użytkownicy: odczyt i wykonanie)."
@@ -118,8 +145,10 @@ LangString ForeignDirWarn ${LANG_POLISH} "Folder $INSTDIR już istniał, zawiera
 LangString ForeignDirWarn ${LANG_ENGLISH} "The folder $INSTDIR already existed, holds other files and is not a Bounce Encoder folder, so its permissions were not changed. If other users of this computer can write to it, they can also replace the service files: install the program in Program Files or in a new folder."
 LangString RootDir ${LANG_POLISH} "Wybierz folder dla programu (np. $PROGRAMFILES64\Bounce Encoder), nie katalog główny dysku."
 LangString RootDir ${LANG_ENGLISH} "Choose a folder for the program (e.g. $PROGRAMFILES64\Bounce Encoder), not the root of a drive."
-LangString DelConfig ${LANG_POLISH} "Usunąć także konfigurację i logi Bounce Encoder ($APPDATA\Bounce Encoder)?$\r$\n$\r$\nKonfiguracja zawiera stacje, strumienie z hasłami Icecast i hasło panelu. Wybierz Nie, jeśli zamierzasz zainstalować program ponownie."
-LangString DelConfig ${LANG_ENGLISH} "Also delete the Bounce Encoder configuration and logs ($APPDATA\Bounce Encoder)?$\r$\n$\r$\nThe configuration holds the stations, the streams with their Icecast passwords and the panel password. Choose No if you plan to install the program again."
+LangString DelConfig ${LANG_POLISH} "Usunąć także konfigurację i logi Bounce Encoder ($APPDATA\Bounce Encoder)?$\r$\n$\r$\nKonfiguracja zawiera stacje, strumienie z hasłami Icecast, hasło panelu i klucze licencji Stereo Tool. Wybierz Nie, jeśli zamierzasz zainstalować program ponownie."
+LangString DelConfig ${LANG_ENGLISH} "Also delete the Bounce Encoder configuration and logs ($APPDATA\Bounce Encoder)?$\r$\n$\r$\nThe configuration holds the stations, the streams with their Icecast passwords, the panel password and the Stereo Tool licence keys. Choose No if you plan to install the program again."
+LangString DelPresets ${LANG_POLISH} "Usunąć także presety Stereo Tool ($APPDATA\Bounce Encoder\stereotool\presets)?$\r$\n$\r$\nZnikną presety .sts wgrane w panelu i zapisane przyciskiem $\"Zapisz jako preset…$\". Wybierz Nie, żeby je zachować (np. przed ponowną instalacją)."
+LangString DelPresets ${LANG_ENGLISH} "Also delete the Stereo Tool presets ($APPDATA\Bounce Encoder\stereotool\presets)?$\r$\n$\r$\nThe .sts presets uploaded in the panel and saved with $\"Zapisz jako preset…$\" will be gone. Choose No to keep them (e.g. before installing again)."
 
 Function .onInit
   ${IfNot} ${RunningX64}
@@ -271,6 +300,11 @@ Section "Bounce Encoder" SecMain
   ; run-time loaded codecs: only ever loaded from the program's own folder
   File "${PAYLOAD}\libmp3lame.dll"
   File "${PAYLOAD}\libfdk-aac-2.dll"
+!ifdef WITH_STEREOTOOL
+  ; Stereo Tool (Thimeo, commercial, about 117 MB): loaded from this folder only, like the codecs.
+  ; Without it (CI) an earlier full installation's library stays where it is.
+  File "/oname=libStereoTool_64.dll" "${WITH_STEREOTOOL}"
+!endif
   File "/oname=LICENSE.txt" "${ROOT}\LICENSE"
   File "/oname=LICENCJE.md" "${ROOT}\LICENSING.md"
   File "/oname=INSTRUKCJA.md" "${ROOT}\docs\ENCODER-INSTALL.md"
@@ -283,11 +317,14 @@ Section "Bounce Encoder" SecMain
     Delete "$INSTDIR\bounce.ico"
   ${EndIf}
   SetOutPath "$INSTDIR\licencje"
-  File "${PAYLOAD}\encoder-licenses\LAME-COPYING.txt"
-  File "${PAYLOAD}\encoder-licenses\fdk-aac-NOTICE.txt"
-  File "${PAYLOAD}\encoder-licenses\libogg-COPYING.txt"
-  File "${PAYLOAD}\encoder-licenses\flac-COPYING.Xiph.txt"
-  File "${PAYLOAD}\encoder-licenses\libsamplerate-COPYING.txt"
+  File "${LICENSES}\LAME-COPYING.txt"
+  File "${LICENSES}\fdk-aac-NOTICE.txt"
+  File "${LICENSES}\libogg-COPYING.txt"
+  File "${LICENSES}\flac-COPYING.Xiph.txt"
+  File "${LICENSES}\libsamplerate-COPYING.txt"
+!ifdef WITH_STEREOTOOL
+  File "${ROOT}\cmake\stereotool\StereoTool-NOTICE.txt"  ; only with the library
+!endif
   SetOutPath "$INSTDIR"
 
   ; --- %ProgramData%\Bounce Encoder: administrators and SYSTEM only (config.json holds the stream
@@ -399,7 +436,11 @@ Section "Bounce Encoder" SecMain
   WriteRegStr HKLM "${UNINST_KEY}" "QuietUninstallString" '"$INSTDIR\uninstall.exe" /S'
   WriteRegDWORD HKLM "${UNINST_KEY}" "NoModify" 1
   WriteRegDWORD HKLM "${UNINST_KEY}" "NoRepair" 1
-  WriteRegDWORD HKLM "${UNINST_KEY}" "EstimatedSize" 7500
+!ifdef WITH_STEREOTOOL
+  WriteRegDWORD HKLM "${UNINST_KEY}" "EstimatedSize" 122000  ; KB, about 115 MB of it Stereo Tool
+!else
+  WriteRegDWORD HKLM "${UNINST_KEY}" "EstimatedSize" 8000  ; KB
+!endif
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   ; --- klient PTP Windows zająłby porty 319/320 ---
@@ -414,6 +455,25 @@ Section "Bounce Encoder" SecMain
   nsExec::ExecToLog 'sc.exe start ${SERVICE}'
   Pop $0
 SectionEnd
+
+; Deletes everything in DIR (files and folders with their contents) except the entry named KEEP
+; (compared without regard to case). Uses $6 and $7.
+!macro DELETE_ALL_BUT DIR KEEP
+  FindFirst $6 $7 "${DIR}\*.*"
+  ${DoWhile} $7 != ""
+    ${If} $7 != "."
+    ${AndIf} $7 != ".."
+    ${AndIf} $7 != "${KEEP}"
+      ${If} ${FileExists} "${DIR}\$7\*.*"
+        RMDir /r "${DIR}\$7"
+      ${Else}
+        Delete "${DIR}\$7"
+      ${EndIf}
+    ${EndIf}
+    FindNext $6 $7
+  ${Loop}
+  FindClose $6
+!macroend
 
 Section "Uninstall"
   !insertmacro STOP_COMPONENTS
@@ -432,6 +492,7 @@ Section "Uninstall"
   Delete "$INSTDIR\BounceEncoderTray.exe"
   Delete "$INSTDIR\libmp3lame.dll"
   Delete "$INSTDIR\libfdk-aac-2.dll"
+  Delete "$INSTDIR\libStereoTool_64.dll"
   Delete "$INSTDIR\LICENSE.txt"
   Delete "$INSTDIR\LICENCJE.md"
   Delete "$INSTDIR\INSTRUKCJA.md"
@@ -446,15 +507,38 @@ Section "Uninstall"
   Delete "$INSTDIR\licencje\libogg-COPYING.txt"
   Delete "$INSTDIR\licencje\flac-COPYING.Xiph.txt"
   Delete "$INSTDIR\licencje\libsamplerate-COPYING.txt"
+  Delete "$INSTDIR\licencje\StereoTool-NOTICE.txt"
   RMDir "$INSTDIR\licencje"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
   DeleteRegKey HKLM "Software\Bounce\Bounce Encoder"
   DeleteRegKey HKLM "${UNINST_KEY}"
 
-  ; konfiguracja (stacje, hasła) i logi zostają, chyba że użytkownik wybierze inaczej;
-  ; deinstalacja cicha (/S) zawsze je zostawia
+  ; The configuration (stations, passwords, Stereo Tool keys) with the logs and the stations'
+  ; Stereo Tool folders (stereotool\station-<id>, part of the stations), and the Stereo Tool presets
+  ; (stereotool\presets): each kept unless the user chooses otherwise; a silent uninstall (/S)
+  ; always keeps both. $8 = 1: delete the configuration, $9 = 1: delete the presets (asked only
+  ; when the presets folder is there).
+  StrCpy $8 0
+  StrCpy $9 0
   MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 "$(DelConfig)" /SD IDNO IDNO keep_config
-    RMDir /r "$APPDATA\Bounce Encoder"
+    StrCpy $8 1
   keep_config:
+  ${If} ${FileExists} "$APPDATA\Bounce Encoder\stereotool\presets\*.*"
+    MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 "$(DelPresets)" /SD IDNO IDNO keep_presets
+      StrCpy $9 1
+    keep_presets:
+  ${EndIf}
+  ${If} $9 == 1
+    RMDir /r "$APPDATA\Bounce Encoder\stereotool\presets"
+  ${EndIf}
+  ${If} $8 == 1
+    ; everything but stereotool\presets, then the folders that are empty
+    !insertmacro DELETE_ALL_BUT "$APPDATA\Bounce Encoder\stereotool" "presets"
+    RMDir "$APPDATA\Bounce Encoder\stereotool"
+    !insertmacro DELETE_ALL_BUT "$APPDATA\Bounce Encoder" "stereotool"
+    RMDir "$APPDATA\Bounce Encoder"
+  ${ElseIf} $9 == 1
+    RMDir "$APPDATA\Bounce Encoder\stereotool"  ; when no station folder is left
+  ${EndIf}
 SectionEnd

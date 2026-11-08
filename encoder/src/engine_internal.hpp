@@ -146,6 +146,7 @@ class AudioQueue {
   // Waits up to wait_ms for frames, then takes up to max_frames; 0 when none (or woken).
   size_t pop(float* out, size_t max_frames, int wait_ms);
   void wake();  // makes a waiting pop() return
+  size_t size_frames() const;  // frames waiting now
   uint64_t dropped_frames() const { return dropped_.load(std::memory_order_relaxed); }
   size_t capacity_frames() const { return capacity_; }
 
@@ -210,6 +211,258 @@ class StreamWorker {
   std::thread thread_;
 };
 
+// ---- Stereo Tool processing (processing_worker.cpp) ----
+
+// The reason of a station held by the crash-loop guard (ProcessingReason::PreviousCrash).
+inline constexpr const char* kPreviousCrashReason =
+    "awaria przy poprzednim uruchomieniu — processing wyłączony, uruchom ponownie ręcznie (Uruchom ponownie processing)";
+
+// What a ProcessingWorker runs with, fixed for its lifetime.
+struct ProcessingSettings {
+  std::string license_key;  // the effective key (the station's, else the default); a secret: never logged
+  std::string preset_path;  // the .sts to load; empty: Stereo Tool's own defaults
+  std::string home_dir;     // the instance's home folder; empty: the library's default
+  int web_port = 0;         // the instance's web interface (127.0.0.1 only); 0: off
+  std::string station_name;  // for the log ("Processing stacji „…”"); empty: the station id
+  std::string setup_error;  // Polish: why processing cannot be set up at all (nothing is created)
+  // The streams the output goes to from the first block on (set_streams() replaces them later):
+  // a worker never hands a block to no stream list.
+  std::vector<std::shared_ptr<StreamWorker>> streams;
+  // Instances to wait for before this one is created (other workers' instance_gone(), being
+  // stopped): the ones on the same web interface port, which is one socket, and the station's own
+  // old one (the same home folder, also without a web port). Waited for at most the
+  // stop timeout + 1 s (an instance stuck in the library keeps its port: then it is refused,
+  // logged); meanwhile the streams get the unprocessed mix, as during any setup.
+  std::vector<std::shared_ptr<const std::atomic<bool>>> wait_for_gone;
+  // Tests: sees every block handed to the streams, on the output thread (must not allocate).
+  std::function<void(const float* stereo, size_t frames)> output_tap;
+  // Tests: called on the Stereo Tool thread after each block it processed.
+  std::function<void()> st_block_tap;
+};
+
+namespace testing {
+// How long stop() waits for the Stereo Tool thread before leaving it (0: the default 5 s).
+void set_processing_stop_timeout_ms(int ms);
+// The engine's automatic retries after "too slow" (ruling S1): the waits before retry 1, 2, 3 and
+// every later one, and how long processing must run to start the count again (empty / 0: the
+// defaults 30 s, 2, 5, 10 min and 10 min).
+void set_processing_retry_ms(std::vector<int> waits_ms, int reset_ms);
+// Runs in apply_config right after a processing worker was built, before the station gets its
+// plan (e.g. as long as a slow log line); empty: none.
+void set_processing_built_hook(std::function<void()> hook);
+// How long a preset save is waited for (0: the default 10 s).
+void set_save_preset_timeout_ms(int ms);
+}  // namespace testing
+
+// How long a preset save is waited for (EncoderEngine::save_processing_preset): 10 s.
+int save_preset_timeout_ms();
+
+// The last kSlots values one thread wrote, numbered 1, 2, ... (their seq), read by any thread
+// without a lock and without blocking the writer (ProcessingWorker's events).
+class EventRing {
+ public:
+  static constexpr size_t kSlots = 32;
+  void push(uint64_t value);  // the one writer thread only
+  // Appends (seq, value) of every event after `since` that is still intact, oldest first, and
+  // returns the seq to pass next time. An event the writer overwrote meanwhile (more than
+  // kSlots - 1 newer ones) is left out: the caller sees the gap in seq. `between` (tests) runs
+  // after the slots were read, before they are checked.
+  uint64_t read(uint64_t since, std::vector<std::pair<uint64_t, uint64_t>>* out,
+                const std::function<void()>& between = {}) const;
+
+ private:
+  std::array<std::atomic<uint64_t>, kSlots> slots_{};
+  std::atomic<uint64_t> seq_{0};
+};
+
+// A change of a worker's state or reason (ProcessingWorker::events_since), for the engine's log.
+struct ProcessingEvent {
+  uint64_t seq = 0;  // 1, 2, ... per worker
+  ProcessingState state = ProcessingState::Off;
+  ProcessingReason reason_code = ProcessingReason::None;
+  std::string reason;  // Polish, as in ProcessingStatus (empty when running)
+};
+
+// Stereo Tool between a station and its streams (spec §3), one per station with processing.
+//
+// Threads: the station thread only copies its mix into the bounded queue (push). The output
+// thread takes it in blocks of 10 ms, keeps the unprocessed signal in a ring (the bypass), hands
+// each block to the Stereo Tool thread and waits for it, then crossfades processed and
+// unprocessed and hands the result to the streams. The Stereo Tool thread owns the instance: it
+// creates it, loads the preset, measures the latency and processes the blocks. Neither audio
+// thread allocates per block, and no lock is held across a Stereo Tool call; the output thread
+// never waits on Stereo Tool for more than kMaxBehindNs, so a stuck or slow Stereo Tool ends in
+// the bypass, not in silence.
+//
+// Timing: both paths are delayed by the same delay_frames() = Stereo Tool latency + kRampFrames
+// (the margin lets every switch away from Stereo Tool crossfade over kRampFrames, even when the
+// failed block itself never came back). The delay is 0 until the latency is known and never
+// shrinks; when it grows the output pauses for the difference (the streams get the audio later,
+// nothing is skipped or inserted). Every switch processed <-> unprocessed is a kRampFrames
+// crossfade of the two, aligned.
+// For the engine: that pause happens once, when Stereo Tool becomes ready (about 90 ms with the
+// real library: 4096 + 240 frames): for that long the streams get nothing at all, then the audio
+// goes on where it stopped; no silence is inserted. A restart pauses again only if the latency
+// grew. Audio pushed before Stereo Tool is ready comes out unprocessed with no delay.
+//
+// Bypass (spec §3): until Stereo Tool is ready and its licence was found valid for the settings
+// (checked after kLicenceFirstCheckFrames of processed audio, then every kLicenceCheckFrames);
+// for good on a licence found invalid or a Stereo Tool failure; and when Stereo Tool cannot keep
+// up ("kolejka > 200 ms"): a call out for longer than kMaxBehindNs (stuck), a backlog of more
+// than kMaxBehindNs of audio that has not shrunk over kBehindWindowNs (slower than real time; the
+// window is long enough for a Stereo Tool at 95 % CPU to show its drain above the 10 ms jitter of
+// the queue), or a backlog of kMaxBacklogFrames that has not shrunk over kCapWindowNs (the queue
+// would overflow soon). A burst after a station stall that Stereo Tool drains never trips it.
+// restart() leaves the bypass. Every change of state or reason is an event (events_since) the
+// engine logs; an event keeps the failure text of its moment.
+class ProcessingWorker {
+ public:
+  static constexpr size_t kQueueFrames = size_t(kStationRate) * 2;  // 2 s from the station
+  static constexpr size_t kBlockFrames = 480;                       // 10 ms per Stereo Tool call
+  static constexpr uint32_t kMaxLatencyFrames = kStationRate / 2;   // a longer latency is refused
+  static constexpr int64_t kMaxBehindNs = 200'000'000;
+  static constexpr size_t kBehindFrames = size_t(kStationRate) / 5;          // kMaxBehindNs of audio
+  static constexpr int64_t kBehindWindowNs = 500'000'000;
+  static constexpr size_t kMaxBacklogFrames = size_t(kStationRate) * 3 / 2;  // 1.5 s: bypass before the queue drops
+  // A backlog over kMaxBacklogFrames that has not shrunk over this long bypasses (Stereo Tool
+  // drains 10 ms more than the queue's jitter in it below about 90 % CPU).
+  static constexpr int64_t kCapWindowNs = 100'000'000;
+  static constexpr uint64_t kLicenceFirstCheckFrames = kStationRate / 2;
+  // Re-checked every 250 ms of audio (cheap in the fake; Task 7 measures the real library's cost).
+  static constexpr uint64_t kLicenceCheckFrames = kStationRate / 4;
+  static constexpr size_t kEventSlots = EventRing::kSlots;  // events kept for events_since()
+
+  // Starts both threads; the instance is built on the Stereo Tool thread (meanwhile, and on any
+  // failure, the streams get the unprocessed mix).
+  ProcessingWorker(const ProcessingSettings& s, std::string station_id);
+  ~ProcessingWorker();  // stop()
+  ProcessingWorker(const ProcessingWorker&) = delete;
+  ProcessingWorker& operator=(const ProcessingWorker&) = delete;
+
+  // Station thread: hands over a block of the mix (copies only, never waits on Stereo Tool).
+  void push(const float* stereo, size_t frames) { in_.push(stereo, frames); }
+  // Any thread: the streams the output goes to, taken by the output thread at its next block;
+  // lists it let go of are released here (on the caller's thread), or by stop().
+  void set_streams(std::vector<std::shared_ptr<StreamWorker>> streams);
+  // Any thread: leaves the bypass and tries again (a failed or missing instance is built anew,
+  // a working one is kept with its settings). After a crash nothing is created until the
+  // service restarts; while Stereo Tool is stuck in a call, the restart waits for it to return.
+  void restart();
+  // Any thread: loads another preset into the running instance (a restart that loads it first:
+  // crossfade to the unprocessed signal, the preset, the latency, the licence check, crossfade
+  // back). A missing or failed instance is built with it.
+  void set_preset(std::string sts_path);
+  // Any thread: the station's name in the worker's own log lines (after a rename).
+  void set_station_name(std::string name);
+  // Any thread (not the audio threads): saves the instance's current settings to `sts_path` on the
+  // Stereo Tool thread, between two blocks, and waits up to timeout_ms for it. Meanwhile the
+  // output waits too; a save longer than kMaxBehindNs bypasses (reason Saving, never "too slow")
+  // until it is over, then processing goes on by itself (a new session on the same instance, no
+  // restart). false with a Polish *error; *busy is set when another save was under way.
+  bool save_preset(const std::string& sts_path, int timeout_ms, std::string* error, bool* busy = nullptr);
+  // Any thread: fades the output out over kRampFrames of the next frames emitted, then hands
+  // nothing more to the streams (faded_out()). For a switch away from this worker: the station's
+  // new path fades in once faded_out() (the engine waits for it, bounded).
+  void fade_out() { fade_wanted_.store(true, std::memory_order_relaxed); }
+  bool faded_out() const { return faded_out_.load(std::memory_order_acquire); }
+  ProcessingStatus status() const;
+  // Any thread: the state changes after event `since` (0: all kept), oldest first; returns the
+  // seq to pass next time. Only the last kEventSlots - 1 are kept: the caller sees the gap in seq.
+  uint64_t events_since(uint64_t since, std::vector<ProcessingEvent>* out) const;
+  uint32_t delay_frames() const { return delay_.load(std::memory_order_relaxed); }
+  // The web interface port it was built with (ProcessingSettings::web_port).
+  int configured_web_port() const;
+  // Stereo Tool's web interface password of every instance this worker builds (random, fixed for
+  // the worker's lifetime; account "Admin"). A secret: never logged, never in the status.
+  const std::string& web_password() const;
+  // Its Stereo Tool thread holds an instance right now (a worker in the bypass for want of a
+  // library, a preset or after a failure holds none).
+  bool has_instance() const;
+  // Set once its Stereo Tool thread has let go of the instance for good (after stop(); never when
+  // that thread is stuck in the library): ProcessingSettings::wait_for_gone of a later worker.
+  std::shared_ptr<const std::atomic<bool>> instance_gone() const;
+  // Stops both threads; waits for the Stereo Tool thread at most the stop timeout (a call stuck
+  // in the library leaves that thread behind, logged). Idempotent.
+  void stop();
+  // Before stop() when the process ends next (ruling S7): the Stereo Tool thread lets go of its
+  // instance without deleting it (StereoToolInstance::leave_to_process_exit), so the stop does not
+  // wait for stereoTool_Delete. instance_gone() is then never set (the instance keeps its port).
+  void keep_instance_at_stop();
+
+  struct Core;  // shared with the Stereo Tool thread, which may outlive the worker (stop())
+
+ private:
+  enum class Mode { Dry, Probation, Processed };
+  using Reason = ProcessingReason;
+  enum class Pending { None, Setup, Job };
+  void run();
+  void take_streams();
+  void begin_restart();
+  void resume_session();
+  bool preset_pending() const;
+  bool take_result(bool wait);    // a finished Stereo Tool command, handled; false when none
+  void wait_job();
+  void go_dry(Reason why, ProcessingState state);
+  void set_state(ProcessingState state, Reason why);  // output thread (and constructor / stop())
+  std::string reason_text(Reason why, uint64_t failure_id) const;
+  bool falling_behind(int64_t now);
+  void emit();
+  void deliver(const float* stereo, size_t frames);
+
+  const std::string station_id_;
+  AudioQueue in_;
+  std::shared_ptr<Core> core_;
+  std::function<void(const float*, size_t)> output_tap_;
+
+  std::mutex streams_m_;
+  std::shared_ptr<const std::vector<std::shared_ptr<StreamWorker>>> pending_streams_;
+  // At most the one list the output thread let go of since the last set_streams() (it takes one
+  // pending list at a time); released by set_streams()/stop().
+  std::vector<std::shared_ptr<const void>> graveyard_;
+  std::atomic<bool> has_pending_streams_{false};
+
+  // output thread only
+  std::shared_ptr<const std::vector<std::shared_ptr<StreamWorker>>> streams_;
+  std::vector<float> block_, dry_, proc_, out_;  // dry_/proc_: rings indexed by input frame
+  int64_t written_ = 0;        // input frames in dry_ so far (the next input frame's index)
+  int64_t emitted_ = 0;        // the next input frame to emit
+  int64_t proc_end_ = 0;       // proc_ holds processed frames [session_start_, proc_end_)
+  int64_t session_start_ = 0;  // first input frame of the current Stereo Tool session
+  uint32_t session_latency_ = 0;
+  int64_t job_start_ = 0;      // input frame of the block at the Stereo Tool thread
+  size_t job_frames_ = 0;
+  Mode mode_ = Mode::Dry;
+  bool licence_ok_ = false;    // the current session's licence check passed
+  Pending pending_ = Pending::None;
+  bool restart_wanted_ = false;
+  bool reload_wanted_ = false;  // a new preset (set_preset) waits for a restart to load it
+  bool resume_after_save_ = false;  // in the bypass for a save: back into processing once it is over
+  GainRamp fade_{1.0};          // fade_out(): the output level
+  bool fading_ = false;
+  bool faded_ = false;
+  int64_t job_posted_ns_ = 0;  // when the block at the Stereo Tool thread was handed over
+  int64_t window_ns_ = 0;      // start of the backlog window (0: backlog under kBehindFrames)
+  size_t window_backlog_ = 0;  // the backlog at window_ns_
+  int64_t cap_ns_ = 0;         // when the backlog was last looked at above kMaxBacklogFrames (0: below)
+  size_t cap_backlog_ = 0;     // the backlog then
+  GainRamp mix_{0.0};          // share of the processed signal
+  uint64_t failure_id_ = 0;    // the failure text of the last failed Stereo Tool command (Core)
+
+  std::atomic<uint32_t> delay_{0};
+  // state << 56 | reason << 48 | failure id: read together; the failure id names the text the
+  // state was set with (Core keeps the last few), so a later failure does not change it
+  std::atomic<uint64_t> status_{0};
+  EventRing events_;  // status_ values
+  std::atomic<bool> restart_{false};
+  std::atomic<bool> preset_change_{false};
+  std::atomic<bool> fade_wanted_{false};
+  std::atomic<bool> faded_out_{false};
+  std::atomic<bool> running_{true};
+  std::atomic<bool> stopped_{false};
+  std::thread out_thread_;
+  std::thread st_thread_;
+};
+
 // ---- stations (station.cpp) ----
 
 // What a station thread runs: replaced as a whole by apply_config, never changed in place.
@@ -222,12 +475,18 @@ struct StationPlan {
   };
   // The enabled inputs in any order; an input's identity is its delay line (see Station).
   std::array<std::shared_ptr<const Input>, kStationInputs> inputs;
+  // Where the mix goes: the processing worker when there is one (it feeds the streams), else
+  // straight to the streams (the 1.0 path, bit for bit).
+  std::shared_ptr<ProcessingWorker> processing;
   std::vector<std::shared_ptr<StreamWorker>> streams;
   uint32_t latency_frames = 0;  // the station reads every input this far behind "now"
+  // A value other than the last plan's fades the station's output in over kRampFrames: the
+  // engine's switch away from a processing worker that faded out (ProcessingWorker::fade_out).
+  uint64_t fade_in = 0;
 };
 
 // The station thread: every 10 ms reads each input ring up to "now - latency", feeds the delay
-// lines, mixes and hands the mix to every stream worker.
+// lines, mixes and hands the mix to every stream worker (or to the processing worker).
 class Station {
  public:
   static constexpr int64_t kTickNs = 10'000'000;
@@ -279,6 +538,8 @@ class Station {
   std::array<std::vector<int32_t>, 2> pcm_;                 // kPassFrames per side
   std::array<std::vector<float>, kStationInputs> in_;      // kPassFrames stereo per input
   std::vector<float> mix_;                                  // kPassFrames stereo
+  GainRamp out_{1.0};       // the output level (StationPlan::fade_in); 1 except while fading in
+  uint64_t fade_in_ = 0;    // the plan value it last faded in for
   uint64_t pos_ = 0;  // next timeline sample to mix
   bool positioned_ = false;
   uint64_t step_generation_ = 0;

@@ -69,6 +69,7 @@
           <div class="card-head">
             <h2>Stacje <small id="station-count"></small></h2>
             <div class="head-tools">
+              <button type="button" class="ghost" id="open-presets" data-icon="file">Presety Stereo Tool…</button>
               <button type="button" class="ghost" id="open-settings" data-icon="sliders">Ustawienia…</button>
               <button type="button" class="primary" id="add-station" data-icon="plus">Dodaj stację</button>
             </div>
@@ -106,6 +107,14 @@
           <p class="hint">Wejścia stacji są sumowane. SDP źródła wklej albo wczytaj z pliku (np. z Orbana, konsoli albo BounceAES Master). Opóźnienie przesuwa wejście w czasie (0–60 s, co 0,1 s).</p>
           <p class="field-error" id="inputs-error"></p>
           <div class="blocks" id="edit-inputs"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h2>Processing <small id="proc-library">Stereo Tool</small></h2>
+            <button type="button" class="ghost" id="edit-presets" data-icon="file">Presety…</button>
+          </div>
+          <p class="hint">Stereo Tool przetwarza sumę wejść, zanim trafi do strumieni. Gdy Stereo Tool nie działa albo nie nadąża, stacja nadaje sygnał bez processingu, nigdy ciszę.</p>
+          <div class="blocks" id="edit-processing"></div>
         </div>
         <div class="card">
           <div class="card-head">
@@ -218,7 +227,7 @@
   </dialog>
 
   <dialog id="dlg-settings">
-    <form method="dialog" id="settings-form">
+    <form method="dialog" id="settings-form" autocomplete="off">
       <h3>Ustawienia <small>wspólne dla wszystkich stacji</small></h3>
       <div class="settings-grid">
         <label class="wide">Karta sieciowa AoIP
@@ -235,11 +244,62 @@
           <input type="text" id="set-bind" autocomplete="off" spellcheck="false">
           <small>0.0.0.0: panel dostępny ze wszystkich kart sieciowych; 127.0.0.1: tylko z tego komputera. Adres i port zmieniają się po ponownym uruchomieniu usługi.</small>
         </label>
+        <label class="wide">Domyślny klucz licencji Stereo Tool
+          <span class="field-row">
+            <input type="password" id="set-st-key" name="stereotool-default-licence" autocomplete="off" spellcheck="false" maxlength="512"
+              aria-label="Domyślny klucz licencji Stereo Tool" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other">
+            <button type="button" class="mini danger" id="set-st-key-clear" data-icon="trash">Usuń klucz</button>
+          </span>
+          <small id="set-st-key-hint"></small>
+        </label>
+        <label>Port bazowy interfejsu WWW Stereo Tool
+          <input type="number" id="set-st-port" step="1">
+          <small>Stacja z processingiem dostaje port bazowy + swój numer (0–15), zawsze tylko na 127.0.0.1.</small>
+        </label>
       </div>
       <ul class="form-error" id="set-error" hidden></ul>
       <menu>
         <button type="button" class="ghost" data-close>Anuluj</button>
         <button type="submit" class="primary" id="set-save">Zapisz</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-presets">
+    <form method="dialog" id="presets-form">
+      <h3>Presety Stereo Tool <small id="presets-count"></small></h3>
+      <p class="hint" id="presets-library"></p>
+      <p class="hint">Pliki .sts z ustawieniami Stereo Tool, wspólne dla wszystkich stacji (najwyżej <span id="presets-max">64</span> pliki po <span id="presets-max-size">4 MB</span>). Preset używany przez stację nie może zostać usunięty.</p>
+      <p class="hint warn-text" id="presets-retry" hidden></p>
+      <div class="table-wrap tall">
+        <table class="presets">
+          <thead><tr><th>Nazwa</th><th>Rozmiar</th><th>Używany przez</th><th><span class="sr-only">Działania</span></th></tr></thead>
+          <tbody id="preset-rows"></tbody>
+        </table>
+      </div>
+      <ul class="form-error" id="presets-error" hidden></ul>
+      <menu>
+        <button type="button" class="ghost" id="presets-upload" data-icon="upload">Wgraj preset…</button>
+        <input type="file" id="presets-file" accept=".sts" hidden aria-label="Plik presetu Stereo Tool">
+        <span class="spacer"></span>
+        <button type="button" class="primary" data-close>Zamknij</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-save-preset">
+    <form method="dialog" id="save-preset-form">
+      <h3>Zapisz jako preset <small id="save-preset-station"></small></h3>
+      <p class="hint">Zapisuje bieżące ustawienia Stereo Tool tej stacji, także zmiany z interfejsu WWW, jako nowy preset. Zapis trwa do 10 s; w tym czasie stacja nadaje sygnał bez processingu.</p>
+      <label>Nazwa presetu
+        <input type="text" id="save-preset-name" maxlength="64" autocomplete="off" spellcheck="false" placeholder="np. Radio Bounce strojony.sts">
+        <small>Litery, cyfry, spacja, „-”, „_” i „.”; rozszerzenie .sts zostanie dodane.</small>
+      </label>
+      <label class="toggle"><input type="checkbox" id="save-preset-use" checked> ustaw go jako preset stacji (zadziała po zapisaniu stacji)</label>
+      <ul class="form-error" id="save-preset-error" hidden></ul>
+      <menu>
+        <button type="button" class="ghost" data-close>Anuluj</button>
+        <button type="submit" class="primary" id="save-preset-ok">Zapisz preset</button>
       </menu>
     </form>
   </dialog>

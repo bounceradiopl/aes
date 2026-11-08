@@ -40,7 +40,23 @@ constexpr size_t kMaxSdpBytes = 64 * 1024;
 // normalize_config work through thousands of entries); validate_config explains smaller overshoots.
 constexpr size_t kParseLimitFactor = 4;
 constexpr const char* kStationIdPrefix = "s";
+// Station numbers ("s<n>") stay below this: validate_config refuses an id past it (given by hand,
+// or the one numbering would give after the largest), so the counter, kept at most here, never
+// has to come back below a number it gave (ruling S4) and cannot overflow.
+constexpr int64_t kMaxStationNumber = 100'000'000'000'000'000LL;  // 10^17
 constexpr const char* kStreamIdPrefix = "str";
+
+// n of a station id "s<n>" (any case, leading zeros allowed); kMaxStationNumber when n is at least
+// that; 0 when the id is not of that form.
+int64_t station_number(std::string_view id) {
+  if (id.size() < 2 || (id[0] != 's' && id[0] != 'S')) return 0;
+  int64_t n = 0;
+  for (char ch : id.substr(1)) {
+    if (ch < '0' || ch > '9') return 0;
+    if (n < kMaxStationNumber) n = n * 10 + (ch - '0');  // past it the digits only need checking
+  }
+  return std::min(n, kMaxStationNumber);
+}
 
 // ---- labels for the messages ----
 
@@ -112,13 +128,32 @@ bool valid_mount(std::string_view m) {
   return true;
 }
 
-std::string lower(std::string s) {
-  for (auto& ch : s)
-    if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
-  return s;
-}
+std::string lower(std::string s) { return ascii_lower(s); }
 
 bool same_server(const StreamConfig& a, const StreamConfig& b) { return a.port == b.port && lower(a.host) == lower(b.host); }
+
+bool is_blank(char ch) { return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n'; }
+
+std::string trim_blanks(std::string_view s) {
+  size_t b = 0, e = s.size();
+  while (b < e && is_blank(s[b])) ++b;
+  while (e > b && is_blank(s[e - 1])) --e;
+  return std::string(s.substr(b, e - b));
+}
+
+// Why a non-empty Stereo Tool key has the wrong shape, or "" when it is fine. Never mentions
+// the key itself.
+std::string key_shape_error(std::string_view key) {
+  if (key.empty()) return {};
+  if (key.size() > kMaxStereoToolKeyChars) return "może mieć najwyżej " + std::to_string(kMaxStereoToolKeyChars) + " znaków";
+  for (unsigned char ch : key)
+    if (ch < 0x20 || ch > 0x7e) return "może zawierać tylko drukowalne znaki ASCII (bez polskich liter i znaków sterujących)";
+  if (key.size() < 2 || key.front() != '<' || key.back() != '>')
+    return "musi zaczynać się znakiem „<” i kończyć znakiem „>” (wklej cały klucz z nawiasami)";
+  return {};
+}
+
+bool is_alnum(char ch) { return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'); }
 
 bool in_gain_range(double db) { return db >= kGainMinDb && db <= kGainMaxDb; }
 
@@ -126,7 +161,7 @@ double round_to(double v, double step) { return std::round(v / step) * step; }
 
 // The smallest "<prefix><n>" with n >= from not in `used`; it is added to `used` and `from` moves
 // past it, so assigning k ids costs O((k + |used|) log |used|) in total, not a rescan from 1 each.
-std::string next_id(const char* prefix, std::set<std::string>& used, int& from) {
+std::string next_id(const char* prefix, std::set<std::string>& used, int64_t& from) {
   for (;; ++from) {
     std::string id = prefix + std::to_string(from);
     if (used.insert(id).second) {
@@ -193,6 +228,15 @@ void read_array(const json& j, const char* key, const std::string& path, size_t 
   }
 }
 
+// Calls fn(object) for j[key] when present (must be an object).
+template <typename Fn>
+void read_object(const json& j, const char* key, const std::string& path, Fn&& fn) {
+  if (!j.contains(key)) return;
+  const json& obj = j.at(key);
+  if (!obj.is_object()) bad_field(path + key, "oczekiwano obiektu");
+  fn(obj);
+}
+
 json to_json(const EncoderConfig& c, bool api) {
   json j;
   j["version"] = kEncoderConfigVersion;
@@ -201,6 +245,10 @@ json to_json(const EncoderConfig& c, bool api) {
   j["http_bind"] = c.http_bind;
   j["http_port"] = c.http_port;
   if (!api) j["password_hash"] = c.password_hash;
+  j["stereotool_default_key"] = api ? std::string() : c.stereotool_default_key;
+  if (api) j["stereotool_default_key_set"] = !c.stereotool_default_key.empty();
+  j["stereotool_web_port_base"] = c.stereotool_web_port_base;
+  if (!api) j["next_station_number"] = c.next_station_number;
   json stations = json::array();
   for (const auto& st : c.stations) {
     json inputs = json::array(), streams = json::array();
@@ -226,11 +274,17 @@ json to_json(const EncoderConfig& c, bool api) {
       if (api) sj["password_set"] = !s.password.empty();
       streams.push_back(std::move(sj));
     }
+    json processing = {{"enabled", st.processing.enabled},
+                       {"license_key", api ? std::string() : st.processing.license_key},
+                       {"preset", st.processing.preset},
+                       {"web_port_slot", st.processing.web_port_slot}};
+    if (api) processing["license_key_set"] = !st.processing.license_key.empty();
     stations.push_back({{"id", st.id},
                         {"name", st.name},
                         {"enabled", st.enabled},
                         {"inputs", std::move(inputs)},
-                        {"streams", std::move(streams)}});
+                        {"streams", std::move(streams)},
+                        {"processing", std::move(processing)}});
   }
   j["stations"] = std::move(stations);
   return j;
@@ -238,7 +292,35 @@ json to_json(const EncoderConfig& c, bool api) {
 
 }  // namespace
 
+std::string ascii_lower(std::string s) {
+  for (char& ch : s)
+    if (ch >= 'A' && ch <= 'Z') ch = char(ch - 'A' + 'a');
+  return s;
+}
+
 EncoderConfig default_encoder_config() { return EncoderConfig{}; }
+
+bool valid_preset_name(std::string_view name) {
+  constexpr std::string_view ext = ".sts";
+  if (name.size() <= ext.size() || name.size() > kMaxPresetNameChars || name.front() == ' ') return false;
+  for (char ch : name) {
+    const bool ok = is_alnum(ch) || ch == ' ' || ch == '_' || ch == '.' || ch == '-';
+    if (!ok) return false;
+  }
+  if (lower(std::string(name.substr(name.size() - ext.size()))) != ext) return false;
+  const std::string_view before = name.substr(0, name.size() - ext.size());
+  if (std::none_of(before.begin(), before.end(), is_alnum)) return false;  // " .sts", "..sts", "-.sts"
+  // Windows device names stay devices whatever the extension ("CON.sts" opens the console)
+  const std::string stem = lower(trim_blanks(name.substr(0, name.find('.'))));
+  for (const char* device : {"con", "prn", "aux", "nul"})
+    if (stem == device) return false;
+  if (stem.size() == 4 && (stem.rfind("com", 0) == 0 || stem.rfind("lpt", 0) == 0) && stem[3] >= '0' && stem[3] <= '9') return false;
+  return true;
+}
+
+const std::string& effective_stereotool_key(const EncoderConfig& c, const StationConfig& st) {
+  return st.processing.license_key.empty() ? c.stereotool_default_key : st.processing.license_key;
+}
 
 std::string config_to_json(const EncoderConfig& c) { return to_json(c, false).dump(2); }
 
@@ -259,6 +341,10 @@ std::optional<EncoderConfig> config_from_json(std::string_view text, std::string
     read_field(j, "http_bind", c.http_bind, "");
     read_field(j, "http_port", c.http_port, "");
     read_field(j, "password_hash", c.password_hash, "");
+    read_field(j, "stereotool_default_key", c.stereotool_default_key, "");
+    read_field(j, "stereotool_default_key_clear", c.stereotool_default_key_clear, "");
+    read_field(j, "stereotool_web_port_base", c.stereotool_web_port_base, "");
+    read_field(j, "next_station_number", c.next_station_number, "");
     read_array(j, "stations", "", kMaxStations * kParseLimitFactor, [&](size_t i, const json& sj) {
       StationConfig st;
       const std::string sp = station_path(i) + ".";
@@ -302,9 +388,24 @@ std::optional<EncoderConfig> config_from_json(std::string_view text, std::string
         read_field(tj, "password", s.password, tp);
         st.streams.push_back(std::move(s));
       });
+      read_object(sj, "processing", sp, [&](const json& pj) {
+        const std::string pp = sp + "processing.";
+        read_field(pj, "enabled", st.processing.enabled, pp);
+        read_field(pj, "license_key", st.processing.license_key, pp);
+        read_field(pj, "preset", st.processing.preset, pp);
+        read_field(pj, "license_key_clear", st.processing.license_key_clear, pp);
+        read_field(pj, "web_port_slot", st.processing.web_port_slot, pp);
+      });
       c.stations.push_back(std::move(st));
     });
     return c;
+  } catch (const json::parse_error& e) {
+    // nlohmann ends the message with "; last read: '<text>'", which may be part of a password or
+    // a Stereo Tool key: only the position and the reason are passed on
+    std::string what = e.what();
+    if (const auto cut = what.find("; last read"); cut != std::string::npos) what.resize(cut);
+    if (error) *error = "nieprawidłowa konfiguracja: " + what;
+    return std::nullopt;
   } catch (const std::exception& e) {
     if (error) *error = std::string("nieprawidłowa konfiguracja: ") + e.what();
     return std::nullopt;
@@ -319,11 +420,24 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
     add("interface_ip", "Nieprawidłowy adres karty sieciowej: „" + c.interface_ip + "”");
   if (c.ptp_domain < 0 || c.ptp_domain > 127) add("ptp_domain", "Domena PTP musi być w zakresie 0–127");
   if (!parse_ipv4(c.http_bind)) add("http_bind", "Nieprawidłowy adres panelu: „" + c.http_bind + "”");
-  if (c.http_port < 1 || c.http_port > 65535) add("http_port", "Port panelu musi być w zakresie 1–65535");
+  const bool http_port_ok = c.http_port >= 1 && c.http_port <= 65535;
+  if (!http_port_ok) add("http_port", "Port panelu musi być w zakresie 1–65535");
+  if (c.stereotool_web_port_base < kMinStereoToolWebPortBase || c.stereotool_web_port_base > kMaxStereoToolWebPortBase) {
+    add("stereotool_web_port_base", "Port bazowy interfejsu WWW Stereo Tool musi być w zakresie " +
+                                        std::to_string(kMinStereoToolWebPortBase) + "–" + std::to_string(kMaxStereoToolWebPortBase));
+  } else if (const int last = c.stereotool_web_port_base + kMaxStations - 1;
+             http_port_ok && c.http_port >= c.stereotool_web_port_base && c.http_port <= last) {
+    add("stereotool_web_port_base", "Porty interfejsu WWW Stereo Tool (" + std::to_string(c.stereotool_web_port_base) + "–" +
+                                        std::to_string(last) + ") obejmują port panelu " + std::to_string(c.http_port) +
+                                        ": zmień port bazowy albo port panelu");
+  }
+  if (const std::string why = key_shape_error(c.stereotool_default_key); !why.empty())
+    add("stereotool_default_key", "Domyślny klucz Stereo Tool " + why);
   if (c.stations.size() > static_cast<size_t>(kMaxStations))
     add("stations", "Najwyżej " + std::to_string(kMaxStations) + " stacji (jest " + std::to_string(c.stations.size()) + ")");
 
-  std::map<std::string, size_t> station_ids;                       // id -> station index
+  std::map<std::string, size_t> station_ids;                       // id in lower case -> station index
+  std::map<int, size_t> web_slots;                                 // web port slot -> station index
   std::map<std::string, std::pair<size_t, size_t>> targets;        // server + mount -> (station, stream)
   for (size_t i = 0; i < c.stations.size(); ++i) {
     const auto& st = c.stations[i];
@@ -334,8 +448,39 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
       add(sp + ".id", label + "brak identyfikatora");
     } else if (!valid_id(st.id)) {
       add(sp + ".id", label + "nieprawidłowy identyfikator „" + st.id + "” (dozwolone litery, cyfry, „-” i „_”, najwyżej 32 znaki)");
-    } else if (auto [it, inserted] = station_ids.emplace(st.id, i); !inserted) {
-      add(sp + ".id", label + "identyfikator „" + st.id + "” jest już używany przez " + station_ref(c.stations[it->second], it->second));
+    } else if (station_number(st.id) >= kMaxStationNumber) {
+      // also what a new station gets once a hand-made id took the largest number: name the station
+      // with the largest valid number when it is the cause (its number + 1 reached the counter;
+      // else the counter got there through a station deleted since, or by hand) and say how out
+      std::string way_out;
+      size_t largest = c.stations.size();
+      for (size_t j = 0; j < c.stations.size(); ++j) {
+        const int64_t n = station_number(c.stations[j].id);
+        if (j != i && n > 0 && n < kMaxStationNumber &&
+            (largest == c.stations.size() || n > station_number(c.stations[largest].id)))
+          largest = j;
+      }
+      // (the counter, capped at the limit: handing out the refused id steps it past)
+      if (largest < c.stations.size() &&
+          station_number(c.stations[largest].id) + 1 < std::min<int64_t>(c.next_station_number, kMaxStationNumber))
+        largest = c.stations.size();  // not the cause
+      if (largest < c.stations.size()) {
+        const StationConfig& big = c.stations[largest];
+        way_out = "numery stacji skończyły się przez " + station_ref(big, largest) + " z ręcznie nadanym identyfikatorem „" +
+                  big.id + "”: zatrzymaj usługę, w config.json zmień jej identyfikator na mniejszy (np. „s100”; jej folder "
+                  "stereotool\\station-" + big.id + " zostaje wtedy niepotrzebny i można go usunąć), ustaw "
+                  "„next_station_number” na największy numer stacji + 1 i uruchom usługę";
+      } else {
+        way_out = "numery stacji skończyły się przez ręcznie nadany bardzo duży numer (tej stacji już nie ma): zatrzymaj "
+                  "usługę, w config.json ustaw „next_station_number” na największy numer stacji + 1 i uruchom usługę";
+      }
+      add(sp + ".id", label + "identyfikator „" + st.id + "” ma za duży numer (najwyżej " +
+                          std::to_string(kMaxStationNumber - 1) +
+                          "): nadaj stacji inny identyfikator. Jeśli to nowa stacja dodana w panelu, " + way_out);
+    } else if (auto [it, inserted] = station_ids.emplace(ascii_lower(st.id), i); !inserted) {
+      const bool other_case = c.stations[it->second].id != st.id;
+      add(sp + ".id", label + "identyfikator „" + st.id + "” jest już używany przez " + station_ref(c.stations[it->second], it->second) +
+                          (other_case ? " (wielkość liter nie ma znaczenia)" : ""));
     }
     if (st.name.size() > kMaxNameBytes) add(sp + ".name", label + "nazwa może mieć najwyżej 64 bajty");
     if (has_control(st.name)) add(sp + ".name", label + "nazwa nie może zawierać znaków sterujących");
@@ -444,20 +589,87 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
         }
       }
     }
+
+    // Stereo Tool processing: the shapes always, the requirements when it is switched on
+    const ProcessingConfig& pr = st.processing;
+    const std::string pf = sp + ".processing.";
+    if (!pr.preset.empty() && !valid_preset_name(pr.preset)) {
+      // never quoted when it could be a key pasted into the wrong field
+      const bool quotable = pr.preset.size() <= kMaxPresetNameChars && !has_control(pr.preset) &&
+                            pr.preset.find_first_of("<>") == std::string::npos;
+      add(pf + "preset", label + "nieprawidłowa nazwa presetu Stereo Tool" + (quotable ? " „" + pr.preset + "”" : std::string()) +
+                             " (litery, cyfry, spacja, „-”, „_” i „.”, bez spacji na początku, z rozszerzeniem .sts, najwyżej " +
+                             std::to_string(kMaxPresetNameChars) + " znaki)");
+    }
+    if (const std::string why = key_shape_error(pr.license_key); !why.empty())
+      add(pf + "license_key", label + "klucz licencji Stereo Tool " + why);
+    if (pr.web_port_slot < -1 || pr.web_port_slot >= kMaxStations) {
+      add(pf + "web_port_slot", label + "numer portu interfejsu WWW Stereo Tool musi być w zakresie 0–" + std::to_string(kMaxStations - 1));
+    } else if (pr.web_port_slot >= 0) {
+      if (auto [it, inserted] = web_slots.emplace(pr.web_port_slot, i); !inserted)
+        add(pf + "web_port_slot", label + "port interfejsu WWW Stereo Tool (numer " + std::to_string(pr.web_port_slot) +
+                                      ") jest już używany przez " + station_ref(c.stations[it->second], it->second));
+    }
+    if (pr.enabled) {
+      if (pr.preset.empty()) add(pf + "preset", label + "processing wymaga wybrania presetu Stereo Tool");
+      if (effective_stereotool_key(c, st).empty())
+        add(pf + "license_key", label + "processing wymaga klucza licencji Stereo Tool (klucza stacji albo domyślnego klucza w Ustawieniach)");
+    }
   }
   return issues;
 }
 
+std::vector<EncoderConfigIssue> config_warnings(const EncoderConfig& c) {
+  std::vector<EncoderConfigIssue> warnings;
+  std::map<std::string, size_t> first_on_key;  // effective key -> the first station using it
+  for (size_t i = 0; i < c.stations.size(); ++i) {
+    const StationConfig& st = c.stations[i];
+    const std::string& key = effective_stereotool_key(c, st);
+    if (!st.enabled || !st.processing.enabled || key.empty()) continue;
+    auto [it, inserted] = first_on_key.emplace(key, i);
+    if (inserted) continue;
+    const StationConfig& first = c.stations[it->second];
+    const bool both_default = st.processing.license_key.empty() && first.processing.license_key.empty();
+    warnings.push_back({station_path(i) + ".processing.license_key",
+                        station_label(st, i) + ": ten sam klucz licencji Stereo Tool" + (both_default ? " (domyślny)" : "") + " co " +
+                            station_mention(first, it->second) + ": sprawdź, czy licencja obejmuje obie stacje"});
+  }
+  return warnings;
+}
+
+
 std::vector<std::string> normalize_config(EncoderConfig& c) {
   std::vector<std::string> notices;
-  std::set<std::string> station_ids;
+  c.stereotool_default_key = trim_blanks(c.stereotool_default_key);
+  c.stereotool_default_key_clear = false;
+  std::set<std::string> station_ids;  // in lower case: a new id never differs from one only in case
   for (const auto& st : c.stations)
-    if (!st.id.empty()) station_ids.insert(st.id);
-  int next_station = 1;
+    if (!st.id.empty()) station_ids.insert(ascii_lower(st.id));
+  // ruling S4: new ids continue past every number given so far (the counter) and every "s<n>" in
+  // the configuration (a 1.0 file has no counter); a gap may be a deleted station's id
+  int64_t next_station = std::clamp<int64_t>(c.next_station_number, 1, kMaxStationNumber);
+  for (const auto& st : c.stations)
+    if (const int64_t n = station_number(st.id); n < kMaxStationNumber) next_station = std::max(next_station, n + 1);
+  // web port slots: a station without one gets the lowest free slot; given ones are never moved
+  std::set<int> slots;
+  for (const auto& st : c.stations)
+    if (st.processing.web_port_slot >= 0) slots.insert(st.processing.web_port_slot);
+  for (auto& st : c.stations) {
+    if (st.processing.web_port_slot != -1) continue;
+    int slot = 0;
+    while (slots.count(slot)) ++slot;
+    if (slot >= kMaxStations) break;  // more stations than slots: validate_config reports the count
+    st.processing.web_port_slot = slot;
+    slots.insert(slot);
+  }
 
+  c.next_station_number = next_station;
   for (size_t i = 0; i < c.stations.size(); ++i) {
     auto& st = c.stations[i];
     if (st.id.empty()) st.id = next_id(kStationIdPrefix, station_ids, next_station);
+    c.next_station_number = next_station;
+    st.processing.license_key = trim_blanks(st.processing.license_key);
+    st.processing.license_key_clear = false;
 
     for (size_t j = 0; j < st.inputs.size(); ++j) {
       auto& in = st.inputs[j];
@@ -480,7 +692,7 @@ std::vector<std::string> normalize_config(EncoderConfig& c) {
     std::set<std::string> stream_ids;
     for (const auto& s : st.streams)
       if (!s.id.empty()) stream_ids.insert(s.id);
-    int next_stream = 1;
+    int64_t next_stream = 1;
     for (auto& s : st.streams) {
       if (s.id.empty()) s.id = next_id(kStreamIdPrefix, stream_ids, next_stream);
       s.gain_db = round_to(s.gain_db, 0.5);
@@ -492,14 +704,40 @@ std::vector<std::string> normalize_config(EncoderConfig& c) {
 EncoderConfig mask_passwords(const EncoderConfig& c) {
   EncoderConfig m = c;
   m.password_hash.clear();
-  for (auto& st : m.stations)
+  m.stereotool_default_key.clear();
+  for (auto& st : m.stations) {
+    st.processing.license_key.clear();
     for (auto& s : st.streams) s.password.clear();
+  }
   return m;
+}
+
+void retire_reused_ids(EncoderConfig& next, const EncoderConfig& previous) {
+  for (auto& st : next.stations) {
+    if (st.id.empty()) continue;
+    bool same = false, other_case = false;
+    for (const auto& o : previous.stations) {
+      same |= o.id == st.id;
+      other_case |= ascii_lower(o.id) == ascii_lower(st.id);
+    }
+    if (same) continue;
+    const int64_t n = station_number(st.id);
+    if (other_case || (n > 0 && n < previous.next_station_number)) st.id.clear();  // normalize_config gives a new one
+  }
 }
 
 void merge_passwords(EncoderConfig& next, const EncoderConfig& previous) {
   next.password_hash = previous.password_hash;
+  next.next_station_number = std::max(next.next_station_number, previous.next_station_number);  // never back (S4)
+  // Stereo Tool keys: no server rule (a key is not tied to a server); a blank key is no key
+  if (trim_blanks(next.stereotool_default_key).empty())
+    next.stereotool_default_key = next.stereotool_default_key_clear ? std::string() : previous.stereotool_default_key;
+  next.stereotool_default_key_clear = false;
   for (auto& st : next.stations) {
+    const bool clear_key = st.processing.license_key_clear;
+    st.processing.license_key_clear = false;
+    const bool keep_key = trim_blanks(st.processing.license_key).empty();
+    if (keep_key) st.processing.license_key.clear();
     if (st.id.empty()) continue;
     const StationConfig* old_station = nullptr;
     for (const auto& o : previous.stations)
@@ -508,6 +746,8 @@ void merge_passwords(EncoderConfig& next, const EncoderConfig& previous) {
         break;
       }
     if (!old_station) continue;
+    if (keep_key && !clear_key) st.processing.license_key = old_station->processing.license_key;
+    if (st.processing.web_port_slot == -1) st.processing.web_port_slot = old_station->processing.web_port_slot;
     for (auto& s : st.streams) {
       if (!s.password.empty() || s.id.empty()) continue;
       for (const auto& o : old_station->streams)

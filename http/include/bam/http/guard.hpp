@@ -25,7 +25,7 @@ inline constexpr size_t kMaxBodyBytes = 1024 * 1024;  // larger request bodies g
 // recursively runs out of stack, a flat 1 MB list ~6 MB, and an object of 90 000 keys takes
 // seconds (ordered_json looks every key up). The panels' bodies nest 5 levels at most; the largest
 // configuration of either program has a few thousand values (tests keep it under a third of the
-// cap). Checked before any session: whoever can reach the panel can send such a body.
+// cap); a preset upload is one string.
 inline constexpr size_t kMaxJsonDepth = 16;
 inline constexpr size_t kMaxJsonContainers = 10'000;
 inline constexpr size_t kMaxJsonValues = 20'000;
@@ -51,8 +51,8 @@ inline bool is_local(const httplib::Request& req) { return is_local_address(req)
 bool is_json_type(const std::string& value);
 
 // Why `text` may not be parsed as a request body, "" when it may: over one of the caps above.
-// One linear scan of the bytes with constant memory (strings and their escapes skipped): nothing
-// is built for a body refused here.
+// A scan of the bytes (strings skipped): nothing is
+// built for a body refused here.
 std::string json_shape_error(std::string_view text);
 // The request body as JSON (nlohmann ordered_json); otherwise answered with 400 {"error"} and
 // nullopt: json_shape_error, or not JSON at all ("nieprawidłowy JSON w treści żądania").
@@ -64,9 +64,22 @@ bool refuse(const httplib::Request& req, httplib::Response& res, size_t max_body
 // A body that is not JSON (and /api/setup always needs a JSON body). Checked after the body was read.
 bool wrong_body_type(const httplib::Request& req);
 
+// The body size limit of one request, decided on its headers (method, path, cookie) before any
+// body is read; at most the max_body_bytes given to install_request_guard.
+using BodyLimit = std::function<size_t(const httplib::Request&)>;
+// A check of a request on its headers once refuse() let it through, before any body is read;
+// true: it answered (e.g. 401 for a large upload without a session).
+using HeaderCheck = std::function<bool(const httplib::Request&, httplib::Response&)>;
+
 // Sets up `server`: one request per connection, the body size limit, JSON answers for httplib's
-// own refusals, and a pre-routing handler with the security headers and refuse().
-void install_request_guard(httplib::Server& server, size_t max_body_bytes = kMaxBodyBytes);
+// own refusals, and a pre-routing handler with the security headers, refuse() and `check`. With
+// `limit`, each request gets the smaller of limit(req) and `max_body_bytes` (e.g. one upload route
+// allowed more than the rest); without it, `max_body_bytes` for every request. With `limit` or
+// `check` (the encoder), a request with "Expect: 100-continue" gets the same checks before the
+// 100: a refused one is answered instead, and the client never sends its body. Without both
+// (BounceAES Master) httplib sends its 100 and the checks run at routing, as in 1.2.5.
+void install_request_guard(httplib::Server& server, size_t max_body_bytes = kMaxBodyBytes, BodyLimit limit = {},
+                           HeaderCheck check = {});
 
 enum class Access { Public, Session };
 

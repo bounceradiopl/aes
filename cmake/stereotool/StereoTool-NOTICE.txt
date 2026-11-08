@@ -1,0 +1,36 @@
+Stereo Tool library (libStereoTool) - notice
+=============================================
+
+File:       libStereoTool_64.dll (libStereoTool 11.07, Windows x64)
+SHA-256:    48cbdc06f44a203f7fa2895b3ec79fc63557d61dcd687563c6a17388d6308c4e
+Copyright:  (C) Thimeo Holding B.V. (https://www.thimeo.com)
+Source:     Stereo Tool Generic plugin SDK, https://download.thimeo.com/Stereo_Tool_Generic_plugin.zip
+
+libStereoTool is commercial software of Thimeo Holding B.V. It is NOT covered by the GNU
+General Public License of Bounce Encoder and no source code of it is available. Bounce Encoder
+loads it at run time as a separate file, only from its own program folder, and uses it only for
+the optional per-station processing.
+
+- Every Stereo Tool instance (every station with processing switched on) needs its own Stereo
+  Tool licence key from Thimeo. The keys are entered in the Bounce Encoder panel.
+- This file is included in the Bounce Encoder installer for use within BOUNCE SP. Z O.O., the
+  holder of the Stereo Tool licences. Passing the installer or this file on to anyone outside
+  BOUNCE SP. Z O.O. needs Thimeo's consent, and the recipient needs Stereo Tool licences of their
+  own.
+- Without this file Bounce Encoder works as before; processing is then unavailable and every
+  station sends its signal unprocessed.
+
+Bounce Encoder's licence (GPL-3.0-or-later) has an additional permission (GNU GPL version 3,
+section 7) to combine it with libStereoTool: see LICENCJE.md in the program folder (LICENSING.md in
+the source repository).
+
+
+Po polsku
+---------
+
+libStereoTool_64.dll (Stereo Tool 11.07, (C) Thimeo Holding B.V.) to biblioteka komercyjna, nie
+jest objęta licencją GPL Bounce Encodera. Bounce Encoder ładuje ją w czasie pracy jako osobny plik,
+tylko z folderu programu. Każda stacja z włączonym processingiem potrzebuje własnego klucza licencji
+Stereo Tool. Plik jest dołączony do instalatora dla BOUNCE SP. Z O.O. (licencjobiorcy); przekazanie
+instalatora albo tego pliku poza BOUNCE SP. Z O.O. wymaga zgody Thimeo, a odbiorca potrzebuje
+własnych licencji. Szczegóły: LICENCJE.md w folderze programu (w repozytorium: LICENSING.md).

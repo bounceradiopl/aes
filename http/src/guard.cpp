@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "bam/http/guard.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -178,7 +179,22 @@ bool wrong_body_type(const httplib::Request& req) {
   return (length > 0 || req.path == "/api/setup") && !is_json_type(req.get_header_value("Content-Type"));
 }
 
-void install_request_guard(httplib::Server& server, size_t max_body_bytes) {
+void install_request_guard(httplib::Server& server, size_t max_body_bytes, BodyLimit limit, HeaderCheck check) {
+  // the screening before "100 Continue" below is the encoder's (it passes a limit or a check);
+  // BounceAES Master passes neither and keeps httplib's own 100, as in 1.2.5
+  const bool screen_before_continue = limit || check;
+  const auto limit_of = [max_body_bytes, limit = std::move(limit)](const httplib::Request& req) {
+    return limit ? std::min(limit(req), max_body_bytes) : max_body_bytes;
+  };
+  // On the headers, before any body is read: true when answered.
+  const auto screen = [limit_of, check = std::move(check)](const httplib::Request& req, httplib::Response& res) {
+    // once: a request with "Expect: 100-continue" is screened twice (before the 100 and at routing)
+    for (const auto& [name, value] : {std::pair<const char*, const char*>{"X-Frame-Options", "DENY"},
+                                      {"X-Content-Type-Options", "nosniff"},
+                                      {"Cache-Control", "no-store"}})
+      if (!res.has_header(name)) res.set_header(name, value);
+    return refuse(req, res, limit_of(req)) || (check && check(req, res));
+  };
   // One request per connection. With a keep-alive count of 1, httplib serves exactly one request,
   // answers it with "Connection: close" and closes the socket, so nothing a client sends after
   // the first request (a body httplib did not read, whatever the reason: a refusal below, a
@@ -187,13 +203,13 @@ void install_request_guard(httplib::Server& server, size_t max_body_bytes) {
   // new connection, well within httplib's listen backlog of 5).
   server.set_keep_alive_max_count(1);
   server.set_payload_max_length(max_body_bytes);  // a second line of defence: checked before routing below
-  server.set_error_handler([max_body_bytes](const httplib::Request& req, httplib::Response& res) {
+  server.set_error_handler([limit_of](const httplib::Request& req, httplib::Response& res) {
     if (res.has_header("Content-Type")) return httplib::Server::HandlerResponse::Unhandled;  // already answered
     if (res.status == 413 && !is_json_type(req.get_header_value("Content-Type"))) {
       // httplib's own limit for a form (urlencoded) body, 8 KB, far below ours: the type is wrong
       send_error(res, 413, "oczekiwano treści typu application/json");
     } else if (res.status == 413) {
-      send_error(res, 413, "treść żądania jest za duża (najwyżej " + std::to_string(max_body_bytes / (1024 * 1024)) + " MB)");
+      send_error(res, 413, "treść żądania jest za duża (najwyżej " + std::to_string(limit_of(req) / (1024 * 1024)) + " MB)");
     } else if (res.status == 400) {
       send_error(res, 400, "nieprawidłowe żądanie");
     } else {
@@ -204,11 +220,14 @@ void install_request_guard(httplib::Server& server, size_t max_body_bytes) {
   // Runs on the headers, before any body is read: what cannot be read safely (refuse). The
   // connection closes after every answer (one request per connection), so an unread body is never
   // parsed; bounded bodies are read first and answered by guard().
-  server.set_pre_routing_handler([max_body_bytes](const httplib::Request& req, httplib::Response& res) {
-    res.set_header("X-Frame-Options", "DENY");
-    res.set_header("X-Content-Type-Options", "nosniff");
-    res.set_header("Cache-Control", "no-store");
-    return refuse(req, res, max_body_bytes) ? httplib::Server::HandlerResponse::Handled : httplib::Server::HandlerResponse::Unhandled;
+  server.set_pre_routing_handler([screen](const httplib::Request& req, httplib::Response& res) {
+    return screen(req, res) ? httplib::Server::HandlerResponse::Handled : httplib::Server::HandlerResponse::Unhandled;
+  });
+  // httplib sends "100 Continue" before routing: the same checks first, so a refused request is
+  // answered (and the connection closed) before the client sends its body
+  if (!screen_before_continue) return;
+  server.set_expect_100_continue_handler([screen](const httplib::Request& req, httplib::Response& res) {
+    return screen(req, res) ? res.status : 100;
   });
 }
 

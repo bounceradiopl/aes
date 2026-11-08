@@ -12,6 +12,11 @@ inline std::string read_file(const std::string& path) {
   return ss.str();
 }
 
+inline void write_file(const std::string& path, const std::string& text) {
+  std::ofstream f(path, std::ios::binary | std::ios::trunc);
+  f << text;
+}
+
 // The values of a JSON text as bam::http::json_shape_error counts them: each ',' and ':' outside
 // strings.
 inline size_t json_value_separators(const std::string& text) {

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Bounce Encoder web panel. Plain JS, no framework; talks to the REST API (task 8) and the SSE
 // status feed /api/live. Pure helpers (formatting, codec choices, hints) live in logic.js.
+// Stereo Tool licence keys are write-only here: never shown, never pre-filled, never stored in the
+// browser; the server answers only license_key_set / stereotool_default_key_set.
 "use strict";
 
 const L = window.EncoderLogic;
@@ -25,6 +27,16 @@ const state = {
   issues: { fields: {}, general: [] },
   issuesUsed: new Set(),
   saving: false,
+  // Stereo Tool (Bounce Encoder 1.1)
+  st: null,           // GET /api/stereotool: library, presets, limits (loaded only when Stereo Tool is shown)
+  stLoad: null,       // the request under way
+  stError: "",        // why the last GET /api/stereotool failed ("" = fine)
+  procView: null,     // { id, update(liveStation) } of the processing block in the editor
+  settingsKeyClear: false,  // "Usuń klucz" pressed in the settings dialog
+  savePresetFor: null,      // the station id of the "Zapisz jako preset…" dialog
+  retryUpload: null,  // a preset file whose upload met an expired session (offered again after the login)
+  reopenPresets: false,     // the presets dialog was open when the session ended
+  warned: new Set(),  // config warnings already shown (toasted again only when they change)
 };
 
 // ---------------------------------------------------------------- helpers
@@ -115,7 +127,7 @@ function setState(box, s, tally = false) {
   const onAir = tally && s.kind === "on" && s.kbps != null;
   const [mark, txt] = box.children;
   box.className = `state ${s.kind}`;
-  box.title = s.text;  // the whole text, also when the row cuts it short
+  box.title = s.title || s.text;  // the whole text, also when the row cuts it short
   mark.className = onAir ? "tally" : `dot ${s.kind}`;
   mark.textContent = onAir ? "NA ANTENIE" : "";
   txt.textContent = onAir ? L.fmtKbps(s.kbps) : s.text;
@@ -175,7 +187,9 @@ function stopLive() {
 // refills its editor then, see boot()).
 function clearPasswordFields() {
   for (const p of $$("input[type=password]")) p.value = "";
-  if ($("#dlg-password").open) $("#dlg-password").close();
+  // dialogs would cover the login screen; the presets dialog opens again after the login
+  if ($("#dlg-presets").open) state.reopenPresets = true;
+  for (const id of ["#dlg-password", "#dlg-settings", "#dlg-presets", "#dlg-save-preset"]) if ($(id).open) $(id).close();
 }
 
 async function showAuth() {
@@ -293,6 +307,10 @@ async function loadConfig() {
 function adoptConfig(data) {
   state.config = data.config;
   for (const n of data.notices || []) toast(n, "warn");
+  // config_warnings (saved anyway): toasted when new, not again on every later save
+  const warnings = (data.warnings || []).map((w) => w.message);
+  for (const m of warnings) if (!state.warned.has(m)) toast(m, "warn");
+  state.warned = new Set(warnings);
   renderStations();
   renderEditPick();
 }
@@ -342,6 +360,15 @@ function stationCard(st, i) {
     el("td", { class: "c-set" }, `gain ${L.fmtGain(s.gain_db)}`),
     el("td", { class: "c-meter" }, meter(`str:${st.id}:${s.id}`)),
     el("td", { class: "c-state" }, stateBox(`str:${st.id}:${s.id}`))));
+  // processing (only on a station that has it switched on): its preset, web port, CPU and state
+  const pr = st.processing;
+  const processing = pr?.enabled ? group("Processing", [el("tr", {},
+    el("td", { class: "c-num" }, ""),
+    el("td", { class: "c-name", title: pr.preset || "" }, pr.preset || "brak presetu"),
+    el("td", { class: "c-addr", dataset: { procaddr: st.id } }, "—"),
+    el("td", { class: "c-set", dataset: { procset: st.id } }, ""),
+    el("td", { class: "c-meter" }),
+    el("td", { class: "c-state" }, stateBox(`proc:${st.id}`)))], "") : null;
   return el("article", { class: "station" + (st.enabled ? "" : " off") },
     el("div", { class: "station-head" },
       el("label", { class: "toggle", title: "Włącz lub wyłącz stację (od razu)" }, toggle),
@@ -356,6 +383,7 @@ function stationCard(st, i) {
     el("div", { class: "table-wrap" }, el("table", { class: "lines" },
       el("colgroup", {}, ...["legend", "num", "name", "addr", "set", "meter", "state"].map((c) => el("col", { class: `k-${c}` }))),
       group(`Wejścia ${st.inputs.length}`, inputs, "Brak wejść: stacja nadaje ciszę."),
+      processing,
       group(`Strumienie ${st.streams.length}`, streams, "Brak strumieni: dodaj je w edycji stacji."))));
 }
 
@@ -433,9 +461,13 @@ async function openEditor(id, force = false) {
   state.saved = saved ? clone(saved) : null;
   state.draft = saved ? clone(saved) : L.newStation();
   state.draft.inputs.forEach((inp, j) => { inp._k = j; });  // the saved input it was (live meters)
+  state.draft.processing ||= L.newProcessing();
   state.original = L.draftJson(state.draft);
   state.issues = { fields: {}, general: [] };
   renderEditor();
+  // fresh presets for the processing section; GET /api/stereotool loads the library only when
+  // something already needs it (processing on, or loaded before)
+  if (state.draft.processing.enabled || state.live?.stereotool?.checked) refreshStereoTool();
   return true;
 }
 
@@ -533,6 +565,7 @@ function renderEditor() {
   if (!d.inputs.length) $("#edit-inputs").append(el("p", { class: "hint" }, "Bez wejść stacja nadaje ciszę."));
   $("#edit-streams").replaceChildren(...d.streams.map((_, k) => streamBlock(k)));
   if (!d.streams.length) $("#edit-streams").append(el("p", { class: "hint" }, "Brak strumieni. „Dodaj strumień” ustawia kodek, bitrate i serwer Icecast."));
+  $("#edit-processing").replaceChildren(processingBlock());
   renderEquivalents();
   renderGeneralIssues();
   updateSavebar();
@@ -773,9 +806,12 @@ function renderEquivalents() {
   $("#eq-text").textContent = state.codecs.recommendation_text ? `Podpowiedź: ${state.codecs.recommendation_text}.` : "";
 }
 
-// Fields the panel checks itself before sending: only rule E7 (everything else is the server's).
+// Fields the panel checks itself before sending: rule E7 and the shape of a typed licence key
+// (everything else is the server's).
 function clientIssues() {
   const fields = {};
+  const why = L.keyShapeError(state.draft.processing?.license_key);
+  if (why) fields["processing.license_key"] = [`Klucz licencji Stereo Tool ${why}`];
   state.draft.streams.forEach((s, k) => {
     const saved = s.id ? state.saved?.streams.find((x) => x.id === s.id) : null;
     if (s.enabled && L.needsPasswordAgain(saved, s))
@@ -866,6 +902,484 @@ $("#discard").addEventListener("click", async () => {
 
 window.addEventListener("beforeunload", (e) => { if (editorDirty()) e.preventDefault(); });
 
+// ---------------------------------------------------------------- Stereo Tool processing
+// GET /api/stereotool maps the Stereo Tool library (117 MB) the first time: it is called only when
+// Stereo Tool is shown (the processing of a station in the editor, the presets dialog), never for
+// the live feed (/api/live carries the library state without loading it).
+function loadStereoTool() {
+  state.stLoad ||= api("/api/stereotool").then((r) => {
+    if (r.ok) {
+      state.st = r.data;
+      state.stError = "";
+      state.warned = new Set((r.data.warnings || []).map((w) => w.message));  // shown in the processing block
+    } else state.stError = r.data?.error || `HTTP ${r.status}`;
+    return state.st;
+  }, (e) => {
+    if (!(e instanceof AuthRequired)) state.stError = "brak połączenia z usługą";
+    throw e;
+  }).finally(() => { state.stLoad = null; });
+  return state.stLoad;
+}
+
+function refreshStereoTool() {
+  return loadStereoTool().then(() => { renderProcessing(); if ($("#dlg-presets").open) renderPresets(); }).catch(() => {});
+}
+
+// Only the processing block of the editor again (a new preset list, a live change of the library).
+function renderProcessing() {
+  if (!state.draft) return;
+  // a re-render after an asynchronous answer keeps the field (and caret) the user is in
+  const box = $("#edit-processing");
+  const active = box.contains(document.activeElement) ? document.activeElement : null;
+  const focusKey = active?.dataset.field ? `[data-field="${active.dataset.field}"]` : null;
+  const caret = active && typeof active.selectionStart === "number" ? [active.selectionStart, active.selectionEnd] : null;
+  box.replaceChildren(processingBlock());
+  const again = focusKey ? $(focusKey, box) : null;
+  if (again && !again.disabled) {
+    again.focus({ preventScroll: true });
+    if (caret) try { again.setSelectionRange(...caret); } catch { /* not a text field */ }
+  }
+  renderGeneralIssues();
+  applyLive();
+}
+
+function setLibraryText(node, lib) {
+  const t = L.libraryText(lib);
+  node.textContent = t.text;
+  node.classList.toggle("warn-text", t.warn);
+}
+
+// The library state for the presets dialog: the live feed once it knows the library (it follows
+// loading and crashes), else the answer of GET /api/stereotool.
+function libraryState() {
+  const live = state.live?.stereotool;
+  return live && (live.checked || live.loading) ? live : state.st?.library || live;
+}
+
+// A licence key field: not a credential for the browser or password managers (no autofill, no
+// password generation, no "save password"); the panel clears it after use.
+const KEY_FIELD = { autocomplete: "off", name: "stereotool-licence", spellcheck: false, maxLength: 512,
+  "data-lpignore": "true", "data-1p-ignore": "true", "data-bwignore": "true", "data-form-type": "other" };
+
+function megabytes(bytes) { return `${L.fmtNum(bytes / (1024 * 1024))} MB`; }
+
+// The editor's processing section: the switch, the preset and the key (part of the draft, saved with
+// the station), the live state, and the actions on the running processing of the saved station
+// (web interface, save as preset, restart), which apply at once.
+function processingBlock() {
+  const d = state.draft;
+  const p = d.processing;
+  const saved = state.saved?.processing || null;
+  const sid = state.saved?.id || null;
+  const set = (key, value) => { p[key] = value; markDirty(); };
+  const rerender = () => { renderProcessing(); };
+  state.procView = null;
+
+  const enabled = el("input", { type: "checkbox", checked: p.enabled, "aria-label": "Processing Stereo Tool włączony",
+    onchange: (e) => {
+      set("enabled", e.target.checked);
+      rerender();
+      if (e.target.checked) refreshStereoTool();
+    } });
+  const presetTitle = el("small", {}, p.preset || "");
+  const head = el("div", { class: "block-head" },
+    el("label", { class: "toggle" }, enabled, "włączony"),
+    el("div", { class: "block-title" }, el("span", {}, "Stereo Tool"), presetTitle),
+    sid ? stateBox(`proc:${sid}`) : el("span", { class: "hint" }, "nowa stacja: stan po zapisaniu"));
+  const block = el("div", { class: "block proc" + (p.enabled ? "" : " off") }, head);
+
+  if (!p.enabled) {
+    const parts = [saved?.preset ? `preset „${saved.preset}”` : "", saved?.license_key_set ? "klucz stacji zapisany" : ""].filter(Boolean);
+    block.append(el("div", { class: "block-body" }, el("p", { class: "hint" },
+      `Processing wyłączony${parts.length ? ` (${parts.join(", ")})` : ""}. Włącz go, aby wybrać preset i klucz licencji; zacznie działać po zapisaniu stacji.`)));
+    return block;
+  }
+
+  // the preset: from the uploaded ones (a preset that is not uploaded stays selectable)
+  let presetField;
+  if (state.st) {
+    presetField = checkField(el("select", { "aria-label": "Preset Stereo Tool", dataset: { field: "preset" } },
+      ...L.presetChoices(state.st.presets, p.preset).map((o) => el("option", { value: o.value, selected: o.selected }, o.label))), "processing.preset");
+    presetField.addEventListener("change", () => { set("preset", presetField.value); presetTitle.textContent = presetField.value; });
+  } else {
+    presetField = el("select", { disabled: true, "aria-label": "Preset Stereo Tool" },
+      el("option", {}, state.stError ? "lista presetów niedostępna" : "wczytywanie listy presetów…"));
+    if (!state.stLoad && !state.stError) refreshStereoTool();
+  }
+  const file = el("input", { type: "file", accept: ".sts", hidden: true, "aria-label": "Plik presetu Stereo Tool" });
+  file.addEventListener("change", async () => {
+    const f = file.files[0];
+    file.value = "";
+    if (!f) return;
+    const r = await uploadPreset(f).catch((e) => { if (e instanceof AuthRequired) return null; return { ok: false, error: "brak połączenia z usługą" }; });
+    if (!r) return;
+    if (!r.ok) { toast(`Preset nie został wgrany: ${r.error}`, "err"); return; }
+    toast(r.renamed ? `Wgrano preset „${f.name}” jako „${r.name}”` : `Wgrano preset „${r.name}”`);
+    if (state.draft?.processing === p) { set("preset", r.name); }
+    renderProcessing();
+    if ($("#dlg-presets").open) renderPresets();
+  });
+  const presetTools = el("div", { class: "sdp-tools" },
+    el("button", { type: "button", class: "mini", dataset: { icon: "upload" }, onclick: () => file.click() }, "Wgraj preset…"), file,
+    state.stError ? el("span", { class: "hint warn-text" }, `Nie można wczytać listy presetów: ${state.stError}`) : null,
+    state.stError ? el("button", { type: "button", class: "mini", dataset: { icon: "refresh" }, onclick: () => { state.stError = ""; refreshStereoTool(); } }, "Spróbuj ponownie") : null);
+
+  // the licence key: write-only ("" = keep the stored one); "Usuń klucz" sends license_key_clear
+  const keySet = !!saved?.license_key_set;
+  const clearing = !!p.license_key_clear;
+  const defaultSet = !!state.config.stereotool_default_key_set;
+  const key = checkField(el("input", { type: "password", value: clearing ? "" : p.license_key, ...KEY_FIELD,
+    disabled: clearing, "aria-label": "Klucz licencji stacji (Stereo Tool)", dataset: { field: "license_key" } }), "processing.license_key");
+  key.placeholder = clearing ? "klucz zostanie usunięty po zapisaniu" : keySet ? "zapisany (puste = bez zmian)"
+    : defaultSet ? "puste = domyślny klucz z Ustawień" : "wklej klucz licencji (z nawiasami < >)";
+  key.addEventListener("input", () => { set("license_key", key.value); if (!L.keyShapeError(key.value)) setClientError(key, ""); });
+  key.addEventListener("change", () => { const why = L.keyShapeError(key.value); setClientError(key, why ? `Klucz licencji Stereo Tool ${why}` : ""); });
+  const keyClear = keySet ? el("button", { type: "button", class: "mini danger", dataset: { icon: clearing ? "undo" : "trash" },
+    onclick: () => {
+      if (clearing) delete p.license_key_clear;
+      else { p.license_key_clear = true; p.license_key = ""; }
+      markDirty();
+      rerender();
+    } }, clearing ? "Zachowaj klucz" : "Usuń klucz") : null;
+  const keyHint = clearing
+    ? `Klucz stacji zostanie usunięty po zapisaniu stacji${defaultSet ? "; stacja użyje domyślnego klucza z Ustawień" : ""}.`
+    : keySet ? "Klucz stacji jest zapisany w usłudze i nigdy nie jest wyświetlany. Wpisz nowy, aby go zastąpić."
+      : defaultSet ? "Bez klucza stacji używany jest domyślny klucz z Ustawień."
+        : "Bez klucza stacji i bez domyślnego klucza (Ustawienia…) processing nie zadziała.";
+
+  const body = el("div", { class: "block-body proc-body" },
+    el("label", { class: "s3" }, "Preset", presetField, presetTools, fieldError("processing.preset")),
+    el("label", { class: "s3" }, "Klucz licencji stacji", el("span", { class: "field-row" }, key, keyClear),
+      el("small", {}, keyHint), fieldError("processing.license_key")));
+  block.append(body);
+
+  // warnings of the configuration about this station (the same key on two stations)
+  const index = sid ? state.config.stations.findIndex((x) => x.id === sid) : -1;
+  const warned = index >= 0 ? L.mapIssues(state.st?.warnings || [], index).fields["processing.license_key"] || [] : [];
+  for (const w of warned) body.append(el("p", { class: "hint warn-text s6" }, w));
+
+  if (!sid) {
+    body.append(el("p", { class: "hint s6" }, "Interfejs WWW Stereo Tool, zapis presetu i ponowne uruchomienie: po zapisaniu stacji."));
+    return block;
+  }
+
+  // live: the state, CPU, latency and web interface of the saved station
+  const facts = el("dl", { class: "facts" });
+  const licence = el("p", { class: "field-error", hidden: true });
+  const openWeb = el("button", { type: "button", class: "mini", dataset: { icon: "sliders" } }, "Otwórz Stereo Tool");
+  const savePreset = el("button", { type: "button", class: "mini", dataset: { icon: "download" }, onclick: () => openSavePreset(sid) }, "Zapisz jako preset…");
+  const restart = el("button", { type: "button", class: "mini", dataset: { icon: "refresh" }, onclick: () => restartProcessing(sid) }, "Uruchom ponownie processing");
+  const cpu = el("p", { class: "hint warn-text", hidden: true });
+  // Stereo Tool's web interface asks for its own password: shown on request only, never kept
+  const showPassword = el("button", { type: "button", class: "mini", dataset: { icon: "key" } }, "Pokaż hasło");
+  const password = el("p", { class: "web-password", hidden: true });
+  const note = el("small", { class: "web-note" });
+  let webUrl = "";
+  openWeb.addEventListener("click", () => { if (webUrl && L.isLocalHost(location.hostname)) window.open(webUrl, "_blank", "noopener,noreferrer"); });
+  showPassword.addEventListener("click", async () => {
+    if (!password.hidden) { password.replaceChildren(); password.hidden = true; showPassword.textContent = "Pokaż hasło"; return; }
+    let r;
+    try {
+      r = await api(`/api/stations/${encodeURIComponent(sid)}/processing/web-password`);
+    } catch (e) {
+      if (!(e instanceof AuthRequired)) toast("Brak połączenia z usługą: nie pobrano hasła", "err");
+      return;
+    }
+    if (!r.ok) { toast(r.data?.error || `Nie można pobrać hasła interfejsu Stereo Tool (HTTP ${r.status})`, "err"); return; }
+    const secret = String(r.data.password || "");
+    const code = el("code", { class: "secret" }, secret);
+    const copy = el("button", { type: "button", class: "mini", dataset: { icon: "copy" } }, "Kopiuj");
+    copy.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(secret);
+        toast("Hasło skopiowane do schowka");
+      } catch {
+        getSelection().selectAllChildren(code);  // no clipboard (e.g. http:// from another computer): selected for Ctrl+C
+        toast("Hasło zaznaczone: skopiuj je skrótem Ctrl+C", "warn");
+      }
+    });
+    password.replaceChildren("Hasło interfejsu Stereo Tool: ", code, " ", copy,
+      el("small", {}, ` Interfejs WWW (127.0.0.1:${r.data.web_port}) pyta o nie przy logowaniu (konto ${r.data.user || "Admin"}). Hasło jest losowe; nowe dostaje dopiero nowa instancja (zmiana klucza albo portu).`));
+    password.hidden = false;
+    showPassword.textContent = "Ukryj hasło";
+  });
+  body.append(el("div", { class: "s6 proc-live" }, facts, licence, cpu,
+    el("div", { class: "proc-actions" }, openWeb, showPassword, savePreset, restart), password, note));
+
+  const update = (lst) => {
+    const lp = lst?.processing;
+    const on = !!lst?.enabled;
+    const shown = L.processingState(lp, on);
+    const up = on && lp?.enabled && (lp.state === "running" || lp.state === "bypass");
+    webUrl = on ? L.webUiUrl(lp) : "";
+    const warn = L.licenceWarning(on ? lp : null);
+    const local = L.isLocalHost(location.hostname);
+    const cpuWarn = L.cpuWarning(on ? lp : null);
+    const rows = [
+      ["Stan", lp?.state === "running" ? "działa"
+        : warn ? lp.reason || shown.text  // the features are in the warning below
+          : (shown.title || shown.text) + (on && lp?.reason_code === "too_slow" && lp.retry_in_s >= 0 ? ` (ponowna próba za ${L.fmtWait(lp.retry_in_s)})` : "")],
+      ["Procesor", on && lp?.state === "running" ? L.fmtPct(lp.cpu_pct) + (cpuWarn ? ` — ponad ${L.CPU_WARN_PCT} %` : "") : "—"],
+      ["Opóźnienie", up && lp.latency_ms > 0 ? L.fmtMs(lp.latency_ms) : "—"],
+      ["Interfejs WWW", webUrl ? `127.0.0.1:${lp.web_port}` : "—"],
+      ...(lp?.retries > 0 ? [["Automatyczne ponowienia", L.fmtNum(lp.retries)]] : []),
+      ...(lp?.queue_dropped_frames > 0 ? [["Ramki odrzucone w kolejce", L.fmtNum(lp.queue_dropped_frames)]] : []),
+    ];
+    facts.replaceChildren(...rows.flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]));
+    licence.textContent = warn;
+    licence.hidden = !warn;
+    cpu.textContent = cpuWarn;
+    cpu.hidden = !cpuWarn;
+    showPassword.disabled = !webUrl;
+    showPassword.title = webUrl ? "Pokazuje hasło, o które pyta interfejs WWW Stereo Tool tej stacji" : "Interfejs WWW działa, gdy działa processing tej stacji";
+    if (!webUrl && !password.hidden) { password.replaceChildren(); password.hidden = true; showPassword.textContent = "Pokaż hasło"; }
+    openWeb.disabled = !webUrl || !local;  // 127.0.0.1 of another computer is not the encoder
+    openWeb.title = !local ? "Interfejs WWW Stereo Tool otwiera się tylko na komputerze z usługą"
+      : webUrl ? `Otwiera ${webUrl} w nowej karcie` : "Interfejs WWW działa, gdy działa processing tej stacji";
+    savePreset.disabled = !up || state.savePresetFor === sid;
+    restart.disabled = !(on && lp?.enabled && lp.state !== "off");
+    const port = webUrl ? `127.0.0.1:${lp.web_port}` : "127.0.0.1";
+    note.textContent = L.isLocalHost(location.hostname)
+      ? `Interfejs WWW Stereo Tool (${port}) działa tylko na tym komputerze.`
+      : `Interfejs WWW Stereo Tool (${port}) działa tylko na komputerze z usługą Bounce Encoder: otwórz go tam, np. przez pulpit zdalny.`;
+  };
+  state.procView = { id: sid, update };
+  update(state.live?.stations.find((x) => x.id === sid));
+  return block;
+}
+
+// ---- presets dialog
+async function openPresets() {
+  $("#presets-error").hidden = true;
+  renderPresets();
+  if (!$("#dlg-presets").open) $("#dlg-presets").showModal();
+  try {
+    await loadStereoTool();
+  } catch (e) {
+    if (e instanceof AuthRequired) return;
+  }
+  renderPresets();
+  renderProcessing();
+}
+$("#open-presets").addEventListener("click", openPresets);
+$("#edit-presets").addEventListener("click", openPresets);
+
+function presetsError(list) {
+  $("#presets-error").replaceChildren(...list.map((m) => el("li", {}, m)));
+  $("#presets-error").hidden = !list.length;
+}
+
+function renderPresets() {
+  const st = state.st;
+  const lim = st?.limits || { max_presets: 64, max_preset_bytes: LIM.presetMaxBytes };
+  const presets = st?.presets || [];
+  setLibraryText($("#presets-library"), libraryState());
+  $("#presets-count").textContent = st ? `${presets.length} z ${lim.max_presets}` : "";
+  $("#presets-max").textContent = String(lim.max_presets);
+  $("#presets-max-size").textContent = megabytes(lim.max_preset_bytes);
+  $("#presets-upload").disabled = !st || presets.length >= lim.max_presets;
+  $("#presets-upload").title = st && presets.length >= lim.max_presets ? `Najwyżej ${lim.max_presets} ${L.plural(lim.max_presets, "preset", "presety", "presetów")}: usuń niepotrzebny` : "";
+  const retry = $("#presets-retry");
+  if (state.retryUpload) {
+    const f = state.retryUpload;
+    retry.replaceChildren(`Sesja wygasła podczas wgrywania „${f.name}”: preset nie został wgrany. `,
+      el("button", { type: "button", class: "mini", dataset: { icon: "upload" }, onclick: () => uploadFromDialog(f) }, "Wgraj ponownie"),
+      el("button", { type: "button", class: "mini", onclick: () => { state.retryUpload = null; renderPresets(); } }, "Pomiń"));
+  }
+  retry.hidden = !state.retryUpload;
+  const rows = presets.map((x) => {
+    const users = (x.used_by || []).map((u) => `„${u.name || u.id}”`).join(", ");
+    return el("tr", {},
+      el("td", { class: "name", title: x.name }, x.name),
+      el("td", { class: "num" }, L.fmtBytes(x.bytes)),
+      el("td", { class: "users", title: users }, users || "—"),
+      el("td", { class: "acts" },
+        el("button", { type: "button", class: "mini", dataset: { icon: "download" }, "aria-label": `Pobierz ${x.name}`, onclick: () => downloadPreset(x.name) }, "Pobierz"),
+        el("button", { type: "button", class: "mini danger", dataset: { icon: "trash" }, "aria-label": `Usuń ${x.name}`, disabled: !!users,
+          title: users ? `Używany przez ${users}: wybierz w tych stacjach inny preset` : "", onclick: () => deletePreset(x.name) }, "Usuń")));
+  });
+  if (!rows.length) rows.push(el("tr", {}, el("td", { class: "hint", colSpan: 4 },
+    !st ? (state.stError ? `Nie można wczytać presetów: ${state.stError}` : "Wczytywanie…")
+      : "Brak presetów. „Wgraj preset…” dodaje plik .sts zapisany w Stereo Tool (także na innym komputerze).")));
+  $("#preset-rows").replaceChildren(...rows);
+}
+
+function readBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).slice(String(r.result).indexOf(",") + 1));  // "data:…;base64,<data>"
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(file);
+  });
+}
+
+// Uploads a .sts file under a name the server accepts: { ok, name, renamed } or { ok: false, error }.
+// An expired session (401, also for a big file) shows the login; the file is offered again after it.
+async function uploadPreset(file) {
+  const max = state.st?.limits?.max_preset_bytes || LIM.presetMaxBytes;
+  if (!file.size) return { ok: false, error: `plik „${file.name}” jest pusty` };
+  if (file.size > max) return { ok: false, error: `plik „${file.name}” jest za duży (najwyżej ${megabytes(max)})` };
+  const name = L.presetUploadName(file.name);
+  const why = L.presetNameError(name);
+  if (why) return { ok: false, error: why };
+  let data;
+  try {
+    data = await readBase64(file);
+  } catch {
+    return { ok: false, error: `nie można odczytać pliku „${file.name}”` };
+  }
+  let r;
+  try {
+    r = await api("/api/stereotool/presets", { method: "POST", body: JSON.stringify({ name, data_base64: data }) });
+  } catch (e) {
+    if (e instanceof AuthRequired) { state.retryUpload = file; state.reopenPresets = true; }
+    throw e;
+  }
+  if (!r.ok) return { ok: false, error: r.data?.error || `HTTP ${r.status}` };
+  state.retryUpload = null;
+  if (state.st) state.st.presets = r.data.presets;
+  return { ok: true, name: r.data.preset.name, renamed: r.data.preset.name !== file.name };
+}
+
+async function uploadFromDialog(file) {
+  presetsError([]);
+  $("#presets-upload").disabled = true;
+  let r;
+  try {
+    r = await uploadPreset(file);
+  } catch (e) {
+    if (e instanceof AuthRequired) return;
+    r = { ok: false, error: "brak połączenia z usługą" };
+  } finally {
+    $("#presets-upload").disabled = false;
+  }
+  if (!r.ok) {
+    presetsError([`Preset nie został wgrany: ${r.error}`]);
+    renderPresets();
+    return;
+  }
+  toast(r.renamed ? `Wgrano preset „${file.name}” jako „${r.name}”` : `Wgrano preset „${r.name}”`);
+  renderPresets();
+  renderProcessing();
+}
+
+$("#presets-upload").addEventListener("click", () => $("#presets-file").click());
+$("#presets-file").addEventListener("change", () => {
+  const f = $("#presets-file").files[0];
+  $("#presets-file").value = "";
+  if (f) uploadFromDialog(f);
+});
+
+async function downloadPreset(name) {
+  presetsError([]);
+  const r = await api(`/api/stereotool/presets/${encodeURIComponent(name)}`).catch((e) => {
+    if (e instanceof AuthRequired) throw e;
+    return { ok: false, data: { error: "brak połączenia z usługą" } };
+  });
+  if (!r.ok) { presetsError([`Nie można pobrać presetu „${name}”: ${r.data?.error || `HTTP ${r.status}`}`]); return; }
+  const bin = atob(r.data.data_base64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; ++i) bytes[i] = bin.charCodeAt(i);
+  const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+  const a = el("a", { href: url, download: r.data.name, hidden: true });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+async function deletePreset(name) {
+  presetsError([]);
+  if (!(await confirmDialog(`Usunąć preset „${name}”?`, "Plik presetu zostanie usunięty z usługi. Tego nie można cofnąć.", "Usuń preset"))) return;
+  let r;
+  try {
+    r = await api(`/api/stereotool/presets/${encodeURIComponent(name)}`, { method: "DELETE" });
+  } catch (e) {
+    if (!(e instanceof AuthRequired)) toast(`Brak połączenia z usługą: preset „${name}” nie został usunięty`, "err");
+    return;
+  }
+  if (!r.ok) { presetsError([`Nie usunięto presetu „${name}”: ${r.data?.error || `HTTP ${r.status}`}`]); return; }
+  if (state.st) state.st.presets = r.data.presets;
+  toast(`Usunięto preset „${name}”`);
+  renderPresets();
+  renderProcessing();
+}
+
+// ---- save the running settings as a preset, restart
+function openSavePreset(sid) {
+  const i = state.config.stations.findIndex((x) => x.id === sid);
+  if (i < 0) return;
+  $("#save-preset-station").textContent = stationLabel(state.config.stations[i], i);
+  $("#save-preset-name").value = "";
+  $("#save-preset-use").checked = true;
+  $("#save-preset-error").hidden = true;
+  $("#save-preset-ok").disabled = false;
+  $("#save-preset-ok").textContent = "Zapisz preset";
+  $("#dlg-save-preset").dataset.station = sid;
+  $("#dlg-save-preset").showModal();
+  $("#save-preset-name").focus();
+}
+
+function savePresetError(list) {
+  $("#save-preset-error").replaceChildren(...list.map((m) => el("li", {}, m)));
+  $("#save-preset-error").hidden = !list.length;
+}
+
+$("#save-preset-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const sid = $("#dlg-save-preset").dataset.station;
+  if (state.savePresetFor) return;  // one save at a time
+  const name = L.withSts($("#save-preset-name").value);
+  const why = name ? L.presetNameError(name) : "wpisz nazwę presetu";
+  if (why) { savePresetError([why]); $("#save-preset-name").focus(); return; }
+  savePresetError([]);
+  const use = $("#save-preset-use").checked;
+  state.savePresetFor = sid;
+  $("#save-preset-ok").disabled = true;
+  $("#save-preset-ok").textContent = "Zapisywanie…";
+  let r;
+  try {
+    r = await api(`/api/stations/${encodeURIComponent(sid)}/processing/save-preset`, { method: "POST", body: JSON.stringify({ name }) });
+  } catch (err) {
+    if (!(err instanceof AuthRequired)) savePresetError(["Brak połączenia z usługą: preset nie został zapisany"]);
+    return;
+  } finally {
+    state.savePresetFor = null;
+    $("#save-preset-ok").disabled = false;
+    $("#save-preset-ok").textContent = "Zapisz preset";
+    applyLive();
+  }
+  if (!r.ok) { savePresetError([r.data?.error || `Błąd zapisu (HTTP ${r.status})`]); return; }
+  $("#dlg-save-preset").close();
+  if (state.st) state.st.presets = r.data.presets;
+  toast(`Zapisano preset „${r.data.preset.name}”`);
+  if (use && state.editId === sid && state.draft?.processing) {
+    state.draft.processing.preset = r.data.preset.name;
+    markDirty();
+    toast("Zapisz stację, aby używała nowego presetu także po ponownym uruchomieniu", "warn");
+  }
+  renderProcessing();
+  if ($("#dlg-presets").open) renderPresets();
+});
+
+async function restartProcessing(sid) {
+  const i = state.config.stations.findIndex((x) => x.id === sid);
+  if (i < 0) return;
+  const label = stationLabel(state.config.stations[i], i);
+  if (!(await confirmDialog(`Uruchomić ponownie processing stacji „${label}”?`,
+    "Stereo Tool uruchomi się od nowa z presetem stacji: zmiany z interfejsu WWW, których nie zapisano jako preset, przepadną. Do czasu uruchomienia stacja nadaje sygnał bez processingu.",
+    "Uruchom ponownie"))) return;
+  let r;
+  try {
+    r = await api(`/api/stations/${encodeURIComponent(sid)}/processing/restart`, { method: "POST" });
+  } catch (e) {
+    if (!(e instanceof AuthRequired)) toast("Brak połączenia z usługą: processing nie został uruchomiony ponownie", "err");
+    return;
+  }
+  if (!r.ok) { toast(r.data?.error || `Nie można uruchomić ponownie processingu (HTTP ${r.status})`, "err"); return; }
+  toast(`Processing stacji „${label}” uruchamia się ponownie`);
+}
+
 // ---------------------------------------------------------------- global settings
 async function openSettings() {
   const r = await api("/api/interfaces");
@@ -880,10 +1394,34 @@ async function openSettings() {
   $("#set-domain").value = c.ptp_domain;
   $("#set-port").value = c.http_port;
   $("#set-bind").value = c.http_bind;
+  $("#set-st-port").min = LIM.webPortBaseMin;
+  $("#set-st-port").max = LIM.webPortBaseMax;
+  $("#set-st-port").value = c.stereotool_web_port_base;
+  $("#set-st-key").value = "";  // never pre-filled: the key is write-only
+  state.settingsKeyClear = false;
+  renderSettingsKey();
   $("#set-error").hidden = true;
   $("#dlg-settings").showModal();
 }
 $("#open-settings").addEventListener("click", openSettings);
+
+// The default Stereo Tool key: write-only ("" = keep), "Usuń klucz" sends stereotool_default_key_clear.
+function renderSettingsKey() {
+  const set = !!state.config.stereotool_default_key_set;
+  const clearing = state.settingsKeyClear;
+  const key = $("#set-st-key"), btn = $("#set-st-key-clear");
+  key.disabled = clearing;
+  if (clearing) key.value = "";
+  key.placeholder = clearing ? "klucz zostanie usunięty po zapisaniu" : set ? "zapisany (puste = bez zmian)" : "wklej klucz licencji (z nawiasami < >)";
+  btn.hidden = !set;
+  btn.textContent = clearing ? "Zachowaj klucz" : "Usuń klucz";
+  btn.dataset.icon = clearing ? "undo" : "trash";
+  $("#set-st-key-hint").textContent = clearing
+    ? "Domyślny klucz zostanie usunięty po zapisaniu; stacje bez własnego klucza nie będą mogły używać processingu."
+    : "Dla stacji z processingiem bez własnego klucza. Klucz nie jest nigdy wyświetlany.";
+}
+$("#set-st-key-clear").addEventListener("click", () => { state.settingsKeyClear = !state.settingsKeyClear; renderSettingsKey(); });
+$("#dlg-settings").addEventListener("close", () => { $("#set-st-key").value = ""; });
 
 $("#settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -893,11 +1431,26 @@ $("#settings-form").addEventListener("submit", async (e) => {
     ptp_domain: Math.trunc(L.parseNumber($("#set-domain").value)),
     http_bind: $("#set-bind").value.trim(),
     http_port: Math.trunc(L.parseNumber($("#set-port").value)),
+    stereotool_web_port_base: Math.trunc(L.parseNumber($("#set-st-port").value)),
   };
   // only what changed is sent: PUT /api/config keeps every key left out
   const body = Object.fromEntries(Object.entries(next).filter(([k, v]) => v !== c[k]));
+  const keyText = $("#set-st-key").value;
+  if (state.settingsKeyClear) {
+    body.stereotool_default_key_clear = true;
+  } else if (keyText.trim()) {
+    const why = L.keyShapeError(keyText);
+    if (why) {
+      $("#set-error").replaceChildren(el("li", {}, `Domyślny klucz Stereo Tool ${why}`));
+      $("#set-error").hidden = false;
+      $("#set-st-key").focus();
+      return;
+    }
+    body.stereotool_default_key = keyText.trim();
+  }
   if (!Object.keys(body).length) { $("#dlg-settings").close(); return; }
-  for (const k of ["ptp_domain", "http_port"]) if (k in body && Number.isNaN(body[k])) body[k] = -1;  // the server names the field
+  for (const k of ["ptp_domain", "http_port", "stereotool_web_port_base"]) if (k in body && Number.isNaN(body[k])) body[k] = -1;  // the server names the field
+  $("#set-st-key").value = "";  // not left in a submitted form (password managers); the shape was checked above
   const r = await api("/api/config", { method: "PUT", body: JSON.stringify(body) });
   if (!r.ok) {
     const list = r.data?.issues?.length ? r.data.issues.map((x) => x.message) : [r.data?.error || "Błąd zapisu"];
@@ -908,6 +1461,7 @@ $("#settings-form").addEventListener("submit", async (e) => {
   $("#dlg-settings").close();
   adoptConfig(r.data);
   toast("Zapisano ustawienia");
+  if (state.draft) renderProcessing();  // the default key hints of the editor
 });
 
 // ---------------------------------------------------------------- live feed
@@ -954,8 +1508,28 @@ function applyLive() {
     const on = !!st?.enabled;
     setState(box, kind === "st" ? L.stationState(st)
       : kind === "in" ? L.inputState(st?.inputs[Number(x)], on)
-        : L.streamState(st?.streams.find((s) => s.id === x), on), kind === "str");
+        : kind === "proc" ? L.processingState(st?.processing, on)
+          : L.streamState(st?.streams.find((s) => s.id === x), on), kind === "str");
   }
+  // processing: the rows of the station list, the editor's block and the library line
+  for (const td of $$("[data-procset]")) {
+    const st = stations.get(td.dataset.procset);
+    const lp = st?.enabled ? st.processing : null;
+    const cpuWarn = L.cpuWarning(lp);
+    td.textContent = lp?.state === "running"
+      ? `CPU ${L.fmtPct(lp.cpu_pct)}${cpuWarn ? ` (ponad ${L.CPU_WARN_PCT} %)` : ""} · opóźnienie ${L.fmtMs(lp.latency_ms)}` : "";
+    td.title = cpuWarn || td.textContent;
+    td.classList.toggle("warn-text", !!cpuWarn);
+  }
+  for (const td of $$("[data-procaddr]")) {
+    const st = stations.get(td.dataset.procaddr);
+    const url = st?.enabled ? L.webUiUrl(st.processing) : "";
+    td.textContent = url ? `127.0.0.1:${st.processing.web_port}` : "—";
+    td.title = url ? `Interfejs WWW Stereo Tool: ${url} (tylko na komputerze z usługą)` : "";
+  }
+  if (state.procView) state.procView.update(stations.get(state.procView.id));
+  setLibraryText($("#proc-library"), live.stereotool);
+  if ($("#dlg-presets").open) setLibraryText($("#presets-library"), libraryState());
   for (const span of $$("[data-peak]")) {
     const st = stations.get(span.dataset.peak);
     span.textContent = st ? `${L.fmtPeak(st.peak_db[0])} / ${L.fmtPeak(st.peak_db[1])} dBFS` : "";
@@ -1080,6 +1654,10 @@ async function boot() {
   renderEditPick();
   connectLive();
   showTab();
+  if (state.reopenPresets) {  // the session ended while the presets dialog was open
+    state.reopenPresets = false;
+    openPresets();
+  }
 }
 
 (async function init() {

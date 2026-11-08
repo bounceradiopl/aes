@@ -119,6 +119,11 @@ void Station::take_plan() {
       a.leaving = true;
     }
   }
+  if (next->fade_in != fade_in_) {  // the output went elsewhere until now: it comes in from silence
+    fade_in_ = next->fade_in;
+    out_ = GainRamp(0.0);
+    out_.set_target(1.0);
+  }
   retire(std::move(plan_));
   plan_ = std::move(next);
   place_joins();
@@ -216,7 +221,18 @@ void Station::process(uint64_t from, size_t frames) {
     }
   }
   if (freed) place_joins();
-  for (const auto& stream : plan_->streams) stream->push(mix_.data(), frames);
+  if (out_.ramping()) {
+    float* m = mix_.data();
+    for (size_t f = 0; f < frames; ++f) {
+      const double g = out_.next();
+      m[f * 2] = static_cast<float>(g * double(m[f * 2]));
+      m[f * 2 + 1] = static_cast<float>(g * double(m[f * 2 + 1]));
+    }
+  }
+  if (plan_->processing)
+    plan_->processing->push(mix_.data(), frames);  // a copy into its queue: never waits on Stereo Tool
+  else
+    for (const auto& stream : plan_->streams) stream->push(mix_.data(), frames);
 
   frames_since_peaks_ += frames;
   if (frames_since_peaks_ >= kPeakFrames) publish_peaks();

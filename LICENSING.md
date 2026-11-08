@@ -6,7 +6,7 @@ BounceAES Master i Bounce Encoder są udostępniane na licencji **GPL-3.0-or-lat
 ## Osobna licencja dla Ricochetu
 
 Jedynym autorem i właścicielem praw autorskich do kodu BounceAES Master i Bounce Encoder (poza
-katalogiem `third_party/` i kodekami pobieranymi przy budowaniu) jest Daniel Bobrowski. Jako
+katalogiem `third_party/` oraz kodeków i Stereo Tool pobieranych przy budowaniu) jest Daniel Bobrowski. Jako
 właściciel praw udziela on dodatkowej, osobnej licencji na ten kod dla systemu emisyjnego
 **Ricochet** (Bounce):
 
@@ -66,11 +66,41 @@ Bounce Encoder, może otrzymać odpowiadający im pełny kod źródłowy: to rep
 kodeków. Kto przekazuje pliki binarne dalej, przekazuje razem z nimi ten kod albo informację, skąd
 go pobrać.
 
-## Dodatkowe uprawnienie dla FDK AAC (GPLv3, sekcja 7)
+## Stereo Tool (processing Bounce Encoder 1.1)
 
-Licencja Fraunhofer FDK AAC nie jest zgodna z GPL. Żeby Bounce Encoder razem z fdk-aac można było
-legalnie używać i rozpowszechniać, właściciel praw autorskich do Bounce Encoder dodaje do jego
-licencji GPLv3 poniższe dodatkowe uprawnienie (sekcja 7 GPLv3). Obowiązuje tekst angielski:
+Processing stacji w Bounce Encoder 1.1 używa biblioteki **Stereo Tool** (`libStereoTool`, wersja
+11.07) firmy **Thimeo Holding B.V.** (© Thimeo Holding B.V.).
+
+- To **biblioteka komercyjna, nie GPL** i bez dostępnego kodu źródłowego. Nie jest częścią kodu
+  Bounce Encoder ani tego repozytorium.
+- Bounce Encoder ładuje ją **w czasie pracy jako osobny plik** (`libStereoTool_64.dll`), tylko z
+  folderu programu. Deklaracje używanych funkcji są w kodzie Bounce Encoder (`encoder/src/
+  stereotool_api.hpp`); nagłówki Thimeo z SDK służą tylko do sprawdzenia przy budowaniu, że te
+  deklaracje się zgadzają, i nie trafiają do repozytorium ani do instalatora.
+- CMake pobiera SDK z https://download.thimeo.com/Stereo_Tool_Generic_plugin.zip i sprawdza sumy
+  SHA-256 (`cmake/stereotool.cmake`): archiwum
+  `ed07c086cd95523abf5e7d655fa1f32e556fca2539ff0e85b4e12ff3a4c3ec22`, `libStereoTool_64.dll`
+  `48cbdc06f44a203f7fa2895b3ec79fc63557d61dcd687563c6a17388d6308c4e`.
+- **Jedna licencja Stereo Tool na jedną instancję**: każda stacja z włączonym processingiem
+  potrzebuje własnego klucza licencji od Thimeo.
+- Biblioteka jest dołączona do **pełnego** instalatora Bounce Encoder **dla Bounce** (BOUNCE SP.
+  Z O.O. jest licencjobiorcą Stereo Tool), budowanego lokalnie (`makensis /DWITH_STEREOTOOL=…`,
+  ENCODER-INSTALL.md, rozdział 16). **Przekazanie instalatora albo pliku `libStereoTool_64.dll`
+  poza Bounce wymaga zgody Thimeo**, a odbiorca potrzebuje własnych licencji Stereo Tool. Bez tego
+  pliku Bounce Encoder działa jak wersja 1.0: processing jest niedostępny, stacje nadają sygnał bez
+  processingu.
+- Repozytorium jest publiczne, więc pliki budowane w nim automatycznie (CI na GitHubie: artefakty
+  `BounceEncoder-setup` i `BounceEncoder-binaries`) **nie zawierają** `libStereoTool_64.dll` ani noty
+  Thimeo; CI pobiera bibliotekę tylko do testów. Pełnego instalatora nie publikuj.
+- Pełny instalator kopiuje notę `StereoTool-NOTICE.txt` (`cmake/stereotool/`) do `licencje\` w
+  folderze programu.
+
+## Dodatkowe uprawnienie dla FDK AAC i Stereo Tool (GPLv3, sekcja 7)
+
+Licencja Fraunhofer FDK AAC i licencja Stereo Tool nie są zgodne z GPL. Żeby Bounce Encoder razem z
+fdk-aac i ze Stereo Tool można było legalnie używać i rozpowszechniać, właściciel praw autorskich do
+Bounce Encoder dodaje do jego licencji GPLv3 poniższe dodatkowe uprawnienia (sekcja 7 GPLv3).
+Obowiązuje tekst angielski:
 
 > **Additional permission under GNU GPL version 3 section 7**
 >
@@ -80,16 +110,25 @@ licencji GPLv3 poniższe dodatkowe uprawnienie (sekcja 7 GPLv3). Obowiązuje tek
 > of this Program grant you additional permission to convey the resulting work. Corresponding Source
 > for a non-source form of such a combination shall include the source code for the parts of the
 > Fraunhofer FDK AAC Codec Library used as well as that of the covered work.
+>
+> If you modify this Program, or any covered work, by linking or combining it with libStereoTool,
+> the Stereo Tool library of Thimeo Holding B.V. (or a modified version of that library), containing
+> parts covered by the terms of Thimeo Holding B.V.'s licence for that library, the licensors of this
+> Program grant you additional permission to convey the resulting work.
 
 Po polsku: Bounce Encoder można łączyć z biblioteką Fraunhofer FDK AAC i przekazywać dalej razem z
 nią; kod źródłowy do przekazanych plików obejmuje wtedy także źródła fdk-aac (archiwum z tabeli
-wyżej). Uprawnienie dotyczy kodu Bounce Encoder (katalogi `encoder/`, `encoder_service/`,
+wyżej). Tak samo Bounce Encoder można łączyć z biblioteką Stereo Tool (libStereoTool) i przekazywać
+dalej razem z nią; kod źródłowy obejmuje wtedy tylko kod Bounce Encoder (kodu Stereo Tool nie ma).
+To uprawnienie dotyczy tylko licencji Bounce Encoder: samo przekazanie Stereo Tool wymaga zgody
+Thimeo (wyżej). Uprawnienie dotyczy kodu Bounce Encoder (katalogi `encoder/`, `encoder_service/`,
 `encoder_tray/` i używany przez nie kod wspólny projektu). Kto zmienia Bounce Encoder, może to
 uprawnienie zachować albo usunąć ze swojej wersji.
 
 ## Jak wolno używać plików Bounce Encoder
 
-- **W Bounce** (wszystkie komputery i stacje firmy): bez ograniczeń, z kodekiem AAC.
+- **W Bounce** (wszystkie komputery i stacje firmy): bez ograniczeń, z kodekiem AAC. Processing
+  Stereo Tool: z kluczem licencji Stereo Tool na każdą stację z processingiem.
 - **Przekazanie poza Bounce** (np. stacjom partnerskim): licencje kodu na to pozwalają (GPLv3 z
   powyższym uprawnieniem, LGPL dla LAME, licencja Fraunhofera dla fdk-aac, BSD dla reszty), pod
   warunkiem dołączenia tekstów licencji (folder `licencje\`) i informacji, skąd pobrać kod źródłowy.
@@ -97,10 +136,13 @@ uprawnienie zachować albo usunąć ze swojej wersji.
   HE-AAC są objęte patentami (pula Via LA). Przed przekazaniem instalatora z `libfdk-aac-2.dll` poza
   firmę sprawdź licencję patentową albo przekaż pakiet bez tego pliku: wtedy MP3 i FLAC działają,
   a strumienie AAC są w panelu wyłączone z wyjaśnieniem.
+  **Stereo Tool:** przekazanie poza Bounce instalatora z `libStereoTool_64.dll` wymaga zgody Thimeo,
+  a odbiorca potrzebuje własnych licencji Stereo Tool. Bez zgody przekaż pakiet bez tego pliku:
+  wtedy processing jest niedostępny, a reszta działa.
 
 To opis przyjętych zasad, nie porada prawna.
 
 Bez tego pliku Bounce Encoder działa z MP3 i FLAC, a strumienie AAC są wyłączone z wyjaśnieniem w
 panelu.
 
-Osobna licencja dla Ricochetu (wyżej) nie obejmuje kodeków: mają one własne licencje z tabeli. Ricochet, który chce używać AAC, korzysta z fdk-aac na licencji Fraunhofera (z jej warunkami i bez licencji patentowej) albo z innego kodera AAC.
+Osobna licencja dla Ricochetu (wyżej) nie obejmuje kodeków ani Stereo Tool: mają one własne licencje (Stereo Tool: licencja Thimeo). Ricochet, który chce używać AAC, korzysta z fdk-aac na licencji Fraunhofera (z jej warunkami i bez licencji patentowej) albo z innego kodera AAC.

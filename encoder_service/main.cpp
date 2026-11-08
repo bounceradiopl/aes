@@ -5,6 +5,7 @@
 #include <atomic>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>  // std::_Exit
 #include <ctime>
 #include <fstream>
 #include <memory>
@@ -21,6 +22,8 @@
 #include "bam/platform/time.hpp"
 
 #ifdef _WIN32
+#include <windows.h>  // TerminateProcess
+
 #include "win_service.hpp"
 #endif
 
@@ -93,11 +96,18 @@ void install_file_sink(const std::string& dir) {
   });
 }
 
-int run(const std::string& config_path, const std::string& dir_error, std::atomic<bool>& stop) {
+int run(const std::string& config_path, bool protect, const std::string& dir_error, std::atomic<bool>& stop) {
   bam::log_info(std::string(be::kEncoderProductName) + " " + be::kEncoderVersion + ", konfiguracja: " + config_path);
   if (!dir_error.empty()) bam::log_error("Folder danych: " + dir_error);
   const be::EncoderConfig cfg = be::load_startup_config(config_path);
-  be::EncoderEngine engine;
+  // Stereo Tool's folder next to config.json (preset_store.hpp), created with the same protection
+  be::EncoderEngineOptions opts;
+  opts.stereotool_dir = dir_of(config_path) + kSep + be::kStereoToolDirName;
+  opts.protect_stereotool_dir = protect;
+  opts.keep_stereotool_at_stop = true;  // engine.stop() below is the end of the process (ruling S7)
+  // the crash-loop guard: next to config.json, in the folder only administrators may write to
+  opts.crash_marker_path = dir_of(config_path) + kSep + "running.marker";
+  be::EncoderEngine engine(opts);
   std::string err;
   if (!engine.start(cfg, &err)) {
     bam::log_error("Nie można uruchomić usługi: " + err);
@@ -113,7 +123,24 @@ int run(const std::string& config_path, const std::string& dir_error, std::atomi
   while (!stop) bam::platform::sleep_ns(100'000'000);
   http.stop();
   engine.stop();
+  if (const int left = be::stereotool_threads_left_behind(); left > 0)
+    bam::log_warning("Bounce Encoder: wątki Stereo Tool, które nie zakończyły pracy: " + std::to_string(left) +
+                     " — proces kończy się natychmiast, bez sprzątania pamięci (zrobi to system)");
   return 0;
+}
+
+// The end of the process after run(). A Stereo Tool thread still inside the library (stop() gave
+// up on it) must not see the static destructors run under it, the library's own among them (they
+// may wait for that thread for ever, or free what it uses): then a hard exit, without them and
+// without the library's unload notifications. The logs are written already (every sink writes
+// synchronously) and, as a service, SERVICE_STOPPED is reported already.
+int finish(int rc) {
+  if (be::stereotool_threads_left_behind() == 0) return rc;
+  std::fflush(nullptr);
+#ifdef _WIN32
+  TerminateProcess(GetCurrentProcess(), static_cast<UINT>(rc));
+#endif
+  std::_Exit(rc);
 }
 
 void print_usage() {
@@ -161,8 +188,8 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
   if (!console) {
     bam::install_event_log_sink(kEncoderEventSource);
-    if (bam::run_as_windows_service([&](std::atomic<bool>& stop) { return run(config_path, dir_error, stop); }, kEncoderServiceName))
-      return 0;
+    if (bam::run_as_windows_service([&](std::atomic<bool>& stop) { return run(config_path, protect, dir_error, stop); }, kEncoderServiceName))
+      return finish(0);  // the service control manager has SERVICE_STOPPED by now
     print_usage();  // started by hand, not by the service control manager
     return 2;
   }
@@ -175,5 +202,5 @@ int main(int argc, char** argv) {
   });
   std::signal(SIGINT, [](int) { g_console_stop = true; });
   std::signal(SIGTERM, [](int) { g_console_stop = true; });
-  return run(config_path, dir_error, g_console_stop);
+  return finish(run(config_path, protect, dir_error, g_console_stop));
 }

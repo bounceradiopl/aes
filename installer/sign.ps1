@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Internal code signing for BounceAES Master with the company's own self-signed certificate.
 #   -CreateCert            create the certificate (CurrentUser\My) and export bounce-codesign.cer
-#   -Path <folder>         sign every .exe and .dll in the folder
+#   -Path <folder>         sign every .exe and .dll in the folder, except libStereoTool_*.dll (Thimeo's
+#                          file stays as published: its SHA-256 is pinned and named in StereoTool-NOTICE.txt)
 #   -Trust -Cer <file>     trust the certificate on this computer (administrator)
 param(
   [string]$Path,
@@ -33,6 +34,10 @@ if ($Path) {
   if (-not $cert) { throw "Brak certyfikatu '$Subject' w CurrentUser\My (użyj -CreateCert)" }
   $files = Get-ChildItem -Path $Path -Include *.exe, *.dll -Recurse
   foreach ($f in $files) {
+    if ($f.Name -like 'libStereoTool_*.dll') {
+      Write-Host ("{0,-40} {1}" -f $f.Name, 'pominięty (plik Thimeo)')
+      continue
+    }
     $args = @{ FilePath = $f.FullName; Certificate = $cert; HashAlgorithm = 'SHA256' }
     if ($TimestampServer) { $args.TimestampServer = $TimestampServer }
     $r = Set-AuthenticodeSignature @args

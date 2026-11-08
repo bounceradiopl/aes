@@ -11,6 +11,7 @@
 # written next to the executables (BAM_CODEC_OUTPUT_DIR) so run-time loading finds them.
 # Third-party code is configured without our warning flags and with its own warnings off.
 include(FetchContent)
+include(${CMAKE_CURRENT_LIST_DIR}/download.cmake)
 
 set(BAM_CODEC_OUTPUT_DIR ${PROJECT_BINARY_DIR})
 
@@ -23,7 +24,10 @@ set(BAM_CODEC_CACHE "" CACHE STRING "Folder for the codec source tarballs (relat
 
 # One codec source: SOURCE_SUBDIR points nowhere, FetchContent only downloads and unpacks, the
 # subdirectories are added below (EXCLUDE_FROM_ALL, with their options scoped to this file).
-function(bam_codec_source name url sha256)
+# The first URL is the project's own; the others are mirrors of the same file (the same pinned
+# SHA-256 is required of each), tried when it fails (cmake/download.cmake: retries, then the next).
+function(bam_codec_source name sha256 url)
+  set(urls ${url} ${ARGN})
   if(BAM_CODEC_CACHE)
     get_filename_component(cache "${BAM_CODEC_CACHE}" ABSOLUTE BASE_DIR "${PROJECT_SOURCE_DIR}")
     get_filename_component(file "${url}" NAME)
@@ -37,27 +41,31 @@ function(bam_codec_source name url sha256)
     endif()
     if(NOT EXISTS "${local}")
       file(MAKE_DIRECTORY "${cache}")
-      file(DOWNLOAD "${url}" "${local}.part" EXPECTED_HASH SHA256=${sha256} STATUS status TLS_VERIFY ON)
-      list(GET status 0 code)
-      if(NOT code EQUAL 0)
-        file(REMOVE "${local}.part")
-        message(FATAL_ERROR "Cannot download ${url}: ${status} (configure with -DBAM_WITH_CODECS=OFF to build without the codecs)")
+      bam_download_pinned("${local}" ${sha256} error wrong ${urls})
+      if(error)
+        message(FATAL_ERROR "Cannot download ${name} (${urls}): ${error} (configure with -DBAM_WITH_CODECS=OFF to build without the codecs)")
       endif()
-      file(RENAME "${local}.part" "${local}")
     endif()
-    set(url "${local}")
+    set(urls "${local}")
   endif()
-  FetchContent_Declare(${name} URL "${url}" URL_HASH SHA256=${sha256} SOURCE_SUBDIR bam-no-cmake)
+  FetchContent_Declare(${name} URL ${urls} URL_HASH SHA256=${sha256} SOURCE_SUBDIR bam-no-cmake)
 endfunction()
 
-bam_codec_source(bam_lame https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz
-  ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e)
-bam_codec_source(bam_fdkaac https://github.com/mstorsjo/fdk-aac/archive/refs/tags/v2.0.3.tar.gz
-  e25671cd96b10bad896aa42ab91a695a9e573395262baed4e4a2ff178d6a3a78)
-bam_codec_source(bam_ogg https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.gz
-  0eb4b4b9420a0f51db142ba3f9c64b333f826532dc0f48c6410ae51f4799b664)
-bam_codec_source(bam_flac https://downloads.xiph.org/releases/flac/flac-1.4.3.tar.xz
-  6c58e69cd22348f441b861092b825e591d0b822e106de6eb0ee4d05d27205b70)
+bam_codec_source(bam_lame ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e
+  https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz
+  https://sourceforge.net/projects/lame/files/lame/3.100/lame-3.100.tar.gz/download
+  https://deb.debian.org/debian/pool/main/l/lame/lame_3.100.orig.tar.gz)
+bam_codec_source(bam_fdkaac e25671cd96b10bad896aa42ab91a695a9e573395262baed4e4a2ff178d6a3a78
+  https://github.com/mstorsjo/fdk-aac/archive/refs/tags/v2.0.3.tar.gz
+  https://codeload.github.com/mstorsjo/fdk-aac/tar.gz/refs/tags/v2.0.3)
+bam_codec_source(bam_ogg 0eb4b4b9420a0f51db142ba3f9c64b333f826532dc0f48c6410ae51f4799b664
+  https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.gz
+  https://ftp.osuosl.org/pub/xiph/releases/ogg/libogg-1.3.5.tar.gz
+  https://github.com/xiph/ogg/releases/download/v1.3.5/libogg-1.3.5.tar.gz)
+bam_codec_source(bam_flac 6c58e69cd22348f441b861092b825e591d0b822e106de6eb0ee4d05d27205b70
+  https://downloads.xiph.org/releases/flac/flac-1.4.3.tar.xz
+  https://ftp.osuosl.org/pub/xiph/releases/flac/flac-1.4.3.tar.xz
+  https://github.com/xiph/flac/releases/download/1.4.3/flac-1.4.3.tar.xz)
 FetchContent_MakeAvailable(bam_lame bam_fdkaac bam_ogg bam_flac)
 
 function(bam_silence_third_party)
