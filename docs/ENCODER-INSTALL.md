@@ -4,9 +4,13 @@ Bounce Encoder to osobny program Windows, który odbiera strumienie **AES67**, s
 
 ```
 AES67 ─► wejście 1 (gain, opóźnienie) ─┐
-AES67 ─► wejście 2 (gain, opóźnienie) ─┼─► miks stacji 48 kHz ─► [Stereo Tool] ─┬─► strumień 1: gain → resampler → kodek → Icecast
-AES67 ─► wejście 3 (gain, opóźnienie) ─┘     (processing, opcjonalnie)          ├─► strumień 2: …
-                                                                                └─► … (do 8 strumieni)
+AES67 ─► wejście 2 (gain, opóźnienie) ─┼─► miks stacji 48 kHz ─► [Stereo Tool]
+AES67 ─► wejście 3 (gain, opóźnienie) ─┘                            (opcjonalnie)
+                                                                       │
+   ┌───────────────────────────────────────────────────────────────────┘
+   ├─► strumień 1: gain → resampler → kodek → Icecast
+   ├─► strumień 2: …
+   └─► … (do 8 strumieni)
 ```
 
 BounceAES Master (sterownik ASIO) i Bounce Encoder to dwa niezależne programy. Mogą działać na jednym komputerze: panel BounceAES Master ma port 8067, panel Bounce Encoder port 8070.
