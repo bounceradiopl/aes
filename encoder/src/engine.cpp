@@ -849,13 +849,15 @@ void EncoderEngine::stop() {
   std::lock_guard lock(m.m);
   if (!m.running) return;
   m.running = false;
-  m.shutdown();
-  m.held.clear();
-  if (!m.opts.crash_marker_path.empty()) {  // a clean stop: the next start needs no guard
+  // a stop that was asked for: the next start needs no guard. Removed before the slow part, so a
+  // stop cut short (Windows ending the service at a reboot) does not hold processing next time
+  if (!m.opts.crash_marker_path.empty()) {
     std::error_code ec;
     std::filesystem::remove(marker_fs_path(m.opts.crash_marker_path), ec);
     if (ec) log_warning("Bounce Encoder: nie można usunąć znacznika pracy usługi " + m.opts.crash_marker_path + ": " + ec.message());
   }
+  m.shutdown();
+  m.held.clear();
   log_info("Bounce Encoder: silnik zatrzymany");
 }
 

@@ -2260,6 +2260,31 @@ TEST_CASE("encoder engine: the crash-loop guard's marker: written at start, says
   CHECK_FALSE(marker.exists());  // the destructor stops cleanly too
 }
 
+TEST_CASE("encoder engine: the crash-loop guard's marker goes when the stop begins, not after a slow end") {
+  UseFake use;
+  StDir dir("marker-slow");
+  const Marker marker(dir);
+  be::EncoderEngineOptions opts = st_options(dir);
+  opts.crash_marker_path = marker.path;
+  be::EncoderEngine engine(opts);
+  REQUIRE(engine.put_preset("P.sts", fake_preset(0.5, 64)).ok());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(guarded_config(), &err), err);
+  REQUIRE(processing_running(engine, "s1"));
+  REQUIRE(marker.text() == "processing=1\n");
+  fake().set("delete_sleep_us", 1'500'000);  // the end of the stop takes a while
+  std::atomic<bool> stopped{false};
+  std::thread stopper([&] {
+    engine.stop();
+    stopped = true;
+  });
+  // Windows may end the service before a slow stop is over (a reboot): the marker is gone by then
+  CHECK(wait_for([&] { return !marker.exists(); }, 1000));
+  CHECK_FALSE(stopped.load());
+  stopper.join();
+  CHECK_FALSE(marker.exists());
+}
+
 TEST_CASE("encoder engine: after an unclean end with processing, every processing station starts without it until restarted by hand") {
   UseFake use;
   StDir dir("guard");

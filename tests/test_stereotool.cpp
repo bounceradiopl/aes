@@ -1003,7 +1003,11 @@ TEST_CASE("stereotool: the real library (BAM_TEST_REAL_STEREOTOOL) switches off 
   std::string listing;
   const auto bad = foreign_sockets(&listing);
   if (!bad) {
-    WARN_MESSAGE(false, "the sockets of the process could not be listed");
+#ifdef _WIN32
+    FAIL("the TCP and UDP tables of the process could not be read");  // always there on Windows
+#else
+    WARN_MESSAGE(false, "the sockets of the process could not be listed");  // lsof may be missing
+#endif
   } else {
     CHECK_MESSAGE(bad->empty(), "sockets outside 127.0.0.1:\n" << listing);
     CHECK_MESSAGE(listing.find(":" + std::to_string(port)) != std::string::npos, listing);  // the listener was seen
