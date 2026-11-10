@@ -71,6 +71,7 @@ class Aes67Output {
   uint32_t level_ = 0;      // gain = level_ / kRampFrames
   uint64_t sent_end_ = 0;   // highest source position copied + 1
   uint64_t gap_chunk_ = UINT64_MAX;  // TX chunk (t / fpp_) last counted as a gap
+  bool content_seen_ = false;  // content was there since the last fresh alignment: holes count as gaps
 };
 
 }  // namespace bam::encoder::detail

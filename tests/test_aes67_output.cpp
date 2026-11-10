@@ -151,10 +151,29 @@ TEST_CASE("aes67 output: a clock step while holding re-aligns with the newest de
 TEST_CASE("aes67 output: missing content counts at most one gap per packet") {
   bd::Aes67Output out(4000, 1);  // 192 frames per packet
   out.set_delay(1000);
-  const auto pkts = run(out, 1000, 20000);  // nothing written at all
+  feed(out, 0, 1000);
+  const auto pkts = run(out, 1000, 20000);  // nothing written after the first 1000 frames
   CHECK(out.frames_per_packet() == 192);
   CHECK(out.stats().gaps > 0);
   CHECK(out.stats().gaps <= pkts.size() + 2);  // the fill runs one packet ahead of the sending
+}
+
+TEST_CASE("aes67 output: content missing before the first content is the start, not a gap") {
+  bd::Aes67Output out(1000, 1);
+  out.set_delay(1000);
+  feed(out, 3000, 30000);  // the station's first block comes after the first packets
+  const auto pkts = run(out, 1000, 20000, 1);
+  CHECK(out.stats().gaps == 0);
+  CHECK(pkts.front().left[0] == 0);
+  const auto& last = pkts.back();
+  CHECK(carries(last, 0, last.timestamp - 1000));
+  // the same after a clock step: a fresh timeline starts again
+  feed(out, 503000, 520000);
+  run(out, 500000, 510000, 2);
+  CHECK(out.stats().gaps == 0);
+  // a hole once the content is there is a gap
+  run(out, 510012, 530000, 2);
+  CHECK(out.stats().gaps > 0);
 }
 
 TEST_CASE("aes67 output: after a clock step back a delay change holds only the difference") {

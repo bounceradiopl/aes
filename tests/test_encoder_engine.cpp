@@ -4,10 +4,13 @@
 // FLAC 48 kHz -> a fake Icecast server on 127.0.0.1 -> decoded bit for bit against the expected
 // mix. Also: editing one stream restarts only that stream (the other keeps its connection),
 // disabling the station closes its connections, and the PTP slave follows a BounceAES Master
-// engine acting as PTP master on loopback (domain 87). Elsewhere PTP stays off (free-run).
+// engine acting as PTP master on loopback (domain 87). Elsewhere PTP stays off (free-run), but
+// for the AES67 output tests of its PTP gating.
 // Stereo Tool processing (1.1) runs on the fake library of tests/fake_stereotool: the station's
 // path through it bit for bit, switching it on and off without silence, presets, save, restart,
-// the automatic retries and the status.
+// the automatic retries and the status. The AES67 output of a station (1.2) is received on
+// 127.0.0.1: bit for bit at its delay D, through Stereo Tool, never repeating audio when
+// processing is switched, waiting for the first PTP lock, holdover, gaps and disabling it.
 #include <doctest/doctest.h>
 
 #ifdef BAM_WITH_CODECS
@@ -15,6 +18,7 @@
 #include <FLAC/stream_decoder.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -27,10 +31,14 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
+#include "bam/constants.hpp"
 #include "bam/encoder/engine.hpp"
 #include "bam/engine.hpp"
 #include "bam/platform/event.hpp"
@@ -41,6 +49,7 @@
 #include "bam/platform/udp.hpp"
 #include "bam/rtp.hpp"
 #include "bam/sdp.hpp"
+#include "bam/timeline.hpp"
 #include "test_util.hpp"
 #include "../encoder/src/engine_internal.hpp"  // AudioQueue (the station -> stream handover)
 #include "../encoder/src/stereotool_api.hpp"   // the web interface parameter index
@@ -466,6 +475,88 @@ be::EncoderEngineOptions no_ptp() {
 using SampleFn = std::function<int32_t(uint64_t, int)>;
 
 uint64_t media_now(const be::EncoderEngine& e) { return e.media_clock().sample_at(bp::monotonic_ns()); }
+
+// Receives an AES67 stream on 127.0.0.1 into its own rings (the encoder's output under test).
+// While recording, it also copies every position from the start on (50 ms behind the clock, so
+// the packets are in) into `rec`, for checks longer than the rings hold.
+struct AesReceiver {
+  std::array<std::vector<int32_t>, 2> samples;
+  std::array<std::vector<uint32_t>, 2> tags;
+  std::array<bam::ChannelRing, 2> rings;
+  std::optional<bp::UdpSocket> sock;
+  std::unique_ptr<bam::RxStream> rx;
+  std::thread thread;
+  std::atomic<bool> run{true};
+  const be::EncoderEngine& engine;
+  std::mutex rec_m;
+  bool recording = false;
+  uint64_t rec_from = 0, rec_next = 0;
+  std::vector<std::array<int32_t, 2>> rec;
+
+  AesReceiver(const be::EncoderEngine& e, const std::string& group, uint32_t latency_frames = 480) : engine(e) {
+    for (int ch = 0; ch < 2; ++ch) {
+      samples[ch].assign(bam::kRingFrames, 0);
+      tags[ch].assign(bam::kBlocksPerRing, 0);
+      rings[ch] = bam::ChannelRing(samples[ch].data(), tags[ch].data());
+    }
+    std::string err;
+    sock = bp::UdpSocket::open(bam::kRtpPort, &err);
+    REQUIRE_MESSAGE(sock, err);
+    REQUIRE_MESSAGE(sock->join(group, kLoopback, "", &err), err);
+    const auto sdp = bam::parse_sdp(make_sdp("rx", group, bam::kRtpPort));
+    REQUIRE(sdp.stream);
+    rx = std::make_unique<bam::RxStream>(*sdp.stream, rings[0], rings[1], latency_frames, 1.0);
+    thread = std::thread([this, group] {
+      std::vector<uint8_t> buf(2048);
+      std::array<std::vector<int32_t>, 2> chunk;
+      std::string to;
+      while (run) {
+        int n;
+        // Windows and Linux hand every group joined on the port to each socket: only ours counts
+        while ((n = sock->recv(buf, nullptr, &to)) >= 0)
+          if (to == group)
+            rx->on_packet(std::span<const uint8_t>(buf.data(), size_t(n)), media_now(engine), bp::monotonic_ns());
+        {
+          std::lock_guard lock(rec_m);
+          const uint64_t upto = media_now(engine) - 2400;
+          if (recording && upto > rec_next) {
+            const size_t len = size_t(upto - rec_next);
+            for (int ch = 0; ch < 2; ++ch) {
+              chunk[ch].resize(len);
+              rings[ch].read(rec_next, chunk[ch].data(), len);
+            }
+            for (size_t i = 0; i < len; ++i) rec.push_back({chunk[0][i], chunk[1][i]});
+            rec_next = upto;
+          }
+        }
+        bp::sleep_ns(200'000);
+      }
+    });
+  }
+  ~AesReceiver() {
+    run = false;
+    thread.join();
+  }
+  uint64_t packets() const { return rx->stats().packets; }
+  int32_t at(uint64_t pos, int ch) const {
+    int32_t v;
+    rings[ch].read(pos, &v, 1);
+    return v;
+  }
+  void start_recording(uint64_t from) {
+    std::lock_guard lock(rec_m);
+    rec.clear();
+    rec_from = rec_next = from;
+    recording = true;
+  }
+  // The frames from start_recording's position on; *from is that position.
+  std::vector<std::array<int32_t, 2>> stop_recording(uint64_t* from) {
+    std::lock_guard lock(rec_m);
+    recording = false;
+    *from = rec_from;
+    return std::move(rec);
+  }
+};
 
 // The FLAC stream a server connection carries, decoded.
 Decoded decode_conn(FakeIcecast& server, FakeIcecast::Conn& c) {
@@ -1170,34 +1261,40 @@ TEST_CASE("encoder engine: with positions the queue never pops across a jump and
   }
 }
 
+namespace {
+
+// A BounceAES Master engine on 127.0.0.1 as the PTP master, on a domain nothing else uses.
+struct LoopbackPtpMaster {
+  std::string suffix = std::to_string(bp::current_pid()) + "." + std::to_string(bp::monotonic_ns() % 100000);
+  bam::EngineOptions opts;
+  std::unique_ptr<bam::Engine> engine;
+  explicit LoopbackPtpMaster(int domain) {
+    opts.config_path = "bam_enc_ptp_" + suffix + ".json";
+    opts.shm_name = "bamtest.encptp." + suffix;
+    opts.event_name = "bamtest.encptpev." + suffix;
+    opts.enable_sap = false;
+    auto cfg = bam::default_config();
+    cfg.interface_ip = kLoopback;
+    cfg.station_name = "PTP";
+    cfg.ptp_domain = domain;
+    cfg.ptp_role = bam::PtpRole::Preferred;
+    std::ofstream(opts.config_path) << bam::config_to_json(cfg);
+    engine = std::make_unique<bam::Engine>(opts);
+  }
+  ~LoopbackPtpMaster() {
+    engine->stop();
+    std::remove(opts.config_path.c_str());
+    std::remove((opts.config_path + ".v1.bak").c_str());
+    bp::SharedMemory::remove(opts.shm_name);
+    bp::NamedEvent::remove(opts.event_name);
+  }
+};
+
+}  // namespace
+
 TEST_CASE("encoder engine: the PTP slave follows a master on loopback") {
-  // A BounceAES Master engine on 127.0.0.1 is the PTP master, on a domain nothing else uses.
   constexpr int kDomain = 87;
-  struct Master {
-    std::string suffix = std::to_string(bp::current_pid()) + "." + std::to_string(bp::monotonic_ns() % 100000);
-    bam::EngineOptions opts;
-    std::unique_ptr<bam::Engine> engine;
-    Master() {
-      opts.config_path = "bam_enc_ptp_" + suffix + ".json";
-      opts.shm_name = "bamtest.encptp." + suffix;
-      opts.event_name = "bamtest.encptpev." + suffix;
-      opts.enable_sap = false;
-      auto cfg = bam::default_config();
-      cfg.interface_ip = kLoopback;
-      cfg.station_name = "PTP";
-      cfg.ptp_domain = kDomain;
-      cfg.ptp_role = bam::PtpRole::Preferred;
-      std::ofstream(opts.config_path) << bam::config_to_json(cfg);
-      engine = std::make_unique<bam::Engine>(opts);
-    }
-    ~Master() {
-      engine->stop();
-      std::remove(opts.config_path.c_str());
-      std::remove((opts.config_path + ".v1.bak").c_str());
-      bp::SharedMemory::remove(opts.shm_name);
-      bp::NamedEvent::remove(opts.event_name);
-    }
-  } master;
+  LoopbackPtpMaster master(kDomain);
   std::string err;
   REQUIRE_MESSAGE(master.engine->start(&err), err);
 
@@ -2422,6 +2519,333 @@ TEST_CASE("encoder engine: a save Stereo Tool does not finish in time is reporte
   CHECK(processing_running(engine, "s1", 5000));
   CHECK(log_lines_with(who + "automatyczna ponowna próba") == 0);
   CHECK(engine.list_presets().size() == 1);  // the late file is not a preset
+}
+
+// ---- the AES67 output of a station (1.2), received on 127.0.0.1 ----
+
+namespace {
+
+be::Aes67Status aes67_of(const be::EncoderEngine& e, const std::string& id) {
+  for (const auto& st : e.status().stations)
+    if (st.id == id) return st.aes67;
+  FAIL("no station " << id);
+  return {};
+}
+
+// Tests start sending at once (no PTP master on loopback) and announce nothing.
+be::EncoderEngineOptions aes67_options(be::EncoderEngineOptions o) {
+  o.aes67_require_ptp = false;
+  o.enable_sap = false;
+  return o;
+}
+
+// One input (20 ms receive latency: 960 frames) and the AES67 output switched on.
+be::StationConfig aes67_station(const std::string& group, uint16_t port) {
+  be::StationConfig st = station("s1", "Radio AES67");
+  be::InputConfig a;
+  a.sdp = make_sdp("Wejście", group, port);
+  a.latency_us = 20000;
+  st.inputs = {a};
+  st.aes67_output.enabled = true;
+  return st;
+}
+
+int32_t l24(int32_t v) { return v & int32_t(0xffffff00); }  // what an L24 packet keeps
+
+void wait_media(const be::EncoderEngine& e, uint64_t frames) {
+  const uint64_t from = media_now(e);
+  REQUIRE(wait_for([&] { return media_now(e) > from + frames; }, int(frames / 48) + 10000));
+}
+
+}  // namespace
+
+TEST_CASE("encoder engine: a station's AES67 output carries its mix bit for bit at a constant delay") {
+  // one input at 0 dB carrying sig_a, no processing; the input ring and the mix share the media
+  // timeline (mix position p = input sample p), and packet T carries mix position T - D
+  const std::string group = "239.69.160.1";
+  constexpr uint16_t kInPort = 15260;
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  cfg.stations = {aes67_station(group, kInPort)};
+  cfg = ready(cfg);
+  be::EncoderEngine engine(aes67_options(no_ptp()));
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  AesSender in(engine, group, kInPort, sig_a);
+  REQUIRE(wait_for([&] { return aes67_of(engine, "s1").state == be::Aes67State::Sending; }, 5000));
+  const be::Aes67Status first = aes67_of(engine, "s1");
+  CHECK(first.address == be::aes67_default_address(cfg.stations[0].processing.web_port_slot));
+  CHECK(first.name == "Radio AES67");
+  CHECK(first.ptime_us == 1000);
+  CHECK(first.reason.empty());
+  AesReceiver out(engine, first.address);
+  REQUIRE(wait_for([&] { return out.packets() > 2000; }, 10000));
+  const be::Aes67Status s = aes67_of(engine, "s1");
+  CHECK(s.gaps == 0);
+  CHECK(s.send_errors == 0);
+  CHECK(s.packets >= out.packets());
+  constexpr uint64_t kD = 960 + 480 + 0 + 480;  // latency + tick + no processing + margin
+  CHECK(s.output_latency_ms == doctest::Approx(kD / 48.0));
+  const uint64_t end = media_now(engine) - 4800;
+  for (uint64_t t = end - 1000; t < end; ++t) {
+    REQUIRE(out.at(t, 0) == sig_a(t - kD, 0));
+    REQUIRE(out.at(t, 1) == sig_a(t - kD, 1));
+  }
+}
+
+TEST_CASE("encoder engine: the AES67 output follows Stereo Tool") {
+  UseFake use;
+  StDir dir("aes67_st");
+  const std::string group = "239.69.161.1";
+  constexpr uint16_t kInPort = 15261;
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  be::StationConfig st = aes67_station(group, kInPort);
+  st.processing = processing("Half.sts");
+  cfg.stations = {st};
+  cfg = ready(cfg);
+  be::EncoderEngine engine(aes67_options(st_options(dir)));
+  REQUIRE(engine.put_preset("Half.sts", fake_preset(0.5, 64)).ok());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  AesSender in(engine, group, kInPort, sig_a);
+  REQUIRE(processing_running(engine, "s1"));
+  const uint64_t pd = uint64_t(std::lround(processing_of(engine, "s1").latency_ms * 48.0));
+  CHECK(pd == 64 + 240);  // Stereo Tool's latency + the crossfade margin
+  const uint64_t kD = 960 + 480 + pd + 480;
+  // the housekeeping moves D once the worker's delay grew (it starts unprocessed, undelayed)
+  REQUIRE(wait_for([&] { return std::abs(aes67_of(engine, "s1").output_latency_ms - kD / 48.0) < 1e-6; }, 2000));
+  CHECK(aes67_of(engine, "s1").output_latency_ms == doctest::Approx(kD / 48.0));
+  AesReceiver out(engine, aes67_of(engine, "s1").address);
+  REQUIRE(wait_for([&] { return out.packets() > 1000; }, 10000));
+  CHECK(aes67_of(engine, "s1").state == be::Aes67State::Sending);
+  const uint64_t end = media_now(engine) - 4800;
+  for (uint64_t t = end - 1000; t < end; ++t) {
+    REQUIRE(out.at(t, 0) == l24(sig_a(t - kD, 0) / 2));  // the fake: x 0.5, exact in float
+    REQUIRE(out.at(t, 1) == l24(sig_a(t - kD, 1) / 2));
+  }
+}
+
+TEST_CASE("encoder engine: switching processing on and off never repeats audio on the AES67 output") {
+  UseFake use;
+  StDir dir("aes67_switch");
+  const std::string group = "239.69.162.1";
+  constexpr uint16_t kInPort = 15262;
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  be::StationConfig st = aes67_station(group, kInPort);
+  st.processing = processing("Unity.sts");
+  st.processing.enabled = false;
+  cfg.stations = {st};
+  cfg = ready(cfg);
+  be::EncoderEngine engine(aes67_options(st_options(dir)));
+  REQUIRE(engine.put_preset("Unity.sts", fake_preset(1.0, 64)).ok());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  AesSender in(engine, group, kInPort, sig_a);
+  REQUIRE(wait_for([&] { return aes67_of(engine, "s1").state == be::Aes67State::Sending; }, 5000));
+  AesReceiver out(engine, aes67_of(engine, "s1").address);
+  REQUIRE(wait_for([&] { return out.packets() > 500; }, 10000));
+
+  out.start_recording(media_now(engine));
+  cfg.stations[0].processing.enabled = true;
+  engine.apply_config(ready(cfg));
+  REQUIRE(processing_running(engine, "s1"));
+  wait_media(engine, 48000);
+  cfg.stations[0].processing.enabled = false;
+  engine.apply_config(ready(cfg));
+  wait_media(engine, 3 * 48000 + 4800);
+  uint64_t from = 0;
+  const auto rec = out.stop_recording(&from);
+  REQUIRE(rec.size() > 3 * 48000);
+
+  // source positions by their (left, right) pair over the range the output can carry
+  constexpr uint64_t kAmbiguous = UINT64_MAX;
+  auto key = [](int32_t l, int32_t r) { return uint64_t(uint32_t(l)) << 32 | uint32_t(r); };
+  std::unordered_map<uint64_t, uint64_t> where;
+  where.reserve(rec.size() + 48000);
+  for (uint64_t p = from - 48000; p < from + rec.size(); ++p) {
+    auto [it, fresh] = where.emplace(key(sig_a(p, 0), sig_a(p, 1)), p);
+    if (!fresh) it->second = kAmbiguous;
+  }
+  // silence and ramp frames match no pair: skipped
+  std::unordered_set<uint64_t> seen;
+  size_t matched = 0, repeated = 0, backwards = 0;
+  uint64_t last = 0;
+  for (const auto& f : rec) {
+    const auto it = where.find(key(f[0], f[1]));
+    if (it == where.end() || it->second == kAmbiguous) continue;
+    const uint64_t src = it->second;
+    if (!seen.insert(src).second) ++repeated;
+    if (matched > 0 && src <= last) ++backwards;
+    last = src;
+    ++matched;
+  }
+  CHECK(matched > rec.size() * 9 / 10);
+  CHECK(repeated == 0);
+  CHECK(backwards == 0);
+}
+
+TEST_CASE("encoder engine: without PTP lock the AES67 output does not send") {
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  cfg.ptp_domain = 89;  // no master on loopback
+  be::StationConfig st = station("s1", "Radio Bez Zegara");
+  st.aes67_output.enabled = true;
+  cfg.stations = {st};
+  cfg = ready(cfg);
+  be::EncoderEngineOptions opts;  // PTP on, aes67_require_ptp by default
+  opts.enable_sap = false;
+  be::EncoderEngine engine(opts);
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  AesReceiver out(engine, aes67_of(engine, "s1").address);
+  bp::sleep_ns(1'000'000'000);
+  CHECK(out.packets() == 0);
+  const be::Aes67Status s = aes67_of(engine, "s1");
+  CHECK(s.state == be::Aes67State::WaitingForPtp);
+  CHECK_MESSAGE(s.reason.find("czeka na zegar PTP") != std::string::npos, s.reason);
+  CHECK(s.packets == 0);
+}
+
+TEST_CASE("encoder engine: with PTP switched off the AES67 output says it needs the PTP clock") {
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  be::StationConfig st = station("s1", "Radio Bez PTP");
+  st.aes67_output.enabled = true;
+  cfg.stations = {st};
+  cfg = ready(cfg);
+  be::EncoderEngineOptions opts = no_ptp();  // aes67_require_ptp by default
+  opts.enable_sap = false;
+  be::EncoderEngine engine(opts);
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  AesReceiver out(engine, aes67_of(engine, "s1").address);
+  bp::sleep_ns(500'000'000);
+  CHECK(out.packets() == 0);
+  const be::Aes67Status s = aes67_of(engine, "s1");
+  CHECK(s.state == be::Aes67State::WaitingForPtp);
+  CHECK(s.reason == "PTP wyłączony — wyjście AES67 wymaga zegara PTP");
+}
+
+TEST_CASE("encoder engine: after a lock the AES67 output keeps sending in holdover") {
+  constexpr int kDomain = 87;
+  LoopbackPtpMaster master(kDomain);
+  std::string err;
+  REQUIRE_MESSAGE(master.engine->start(&err), err);
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  cfg.ptp_domain = kDomain;
+  be::StationConfig st = station("s1", "Radio Holdover");
+  st.aes67_output.enabled = true;
+  cfg.stations = {st};
+  cfg = ready(cfg);
+  be::EncoderEngineOptions opts;  // PTP on, aes67_require_ptp by default
+  opts.enable_sap = false;
+  be::EncoderEngine engine(opts);
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  REQUIRE(wait_for([&] { return engine.status().ptp.state == bam::PtpState::Locked; }, 40000));
+  REQUIRE(wait_for([&] { return aes67_of(engine, "s1").state == be::Aes67State::Sending; }, 2000));
+  AesReceiver out(engine, aes67_of(engine, "s1").address);
+  REQUIRE(wait_for([&] { return out.packets() > 200; }, 5000));
+
+  master.engine->stop();
+  uint64_t last = out.packets();
+  for (int i = 0; i < 4; ++i) {  // 2 s
+    bp::sleep_ns(500'000'000);
+    const uint64_t now = out.packets();
+    CHECK(now > last);
+    last = now;
+  }
+  REQUIRE(wait_for([&] { return aes67_of(engine, "s1").state == be::Aes67State::Holdover; }, 10000));
+  const be::Aes67Status s = aes67_of(engine, "s1");
+  CHECK(s.reason == "zegar podtrzymany (brak mastera PTP)");
+  const uint64_t in_holdover = out.packets();
+  bp::sleep_ns(500'000'000);
+  CHECK(out.packets() > in_holdover);
+  CHECK(log_lines_with("Wyjście AES67: zegar podtrzymany") == 1);
+}
+
+TEST_CASE("encoder engine: a stalled Stereo Tool gives silence on the AES67 output and counts gaps, then the bypass refills it") {
+  UseFake use;
+  StDir dir("aes67_stall");
+  const std::string group = "239.69.164.1";
+  constexpr uint16_t kInPort = 15264;
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  be::StationConfig st = aes67_station(group, kInPort);
+  st.processing = processing("Half.sts");
+  cfg.stations = {st};
+  cfg = ready(cfg);
+  be::EncoderEngine engine(aes67_options(st_options(dir)));
+  REQUIRE(engine.put_preset("Half.sts", fake_preset(0.5, 64)).ok());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  AesSender in(engine, group, kInPort, sig_a);
+  REQUIRE(processing_running(engine, "s1"));
+  constexpr double kDms = (960 + 480 + 64 + 240 + 480) / 48.0;
+  REQUIRE(wait_for([&] { return std::abs(aes67_of(engine, "s1").output_latency_ms - kDms) < 1e-6; }, 2000));
+  AesReceiver out(engine, aes67_of(engine, "s1").address);
+  REQUIRE(wait_for([&] { return out.packets() > 500; }, 10000));
+  const be::Aes67Status before = aes67_of(engine, "s1");
+
+  fake().set("process_sleep_us", 300000);  // stuck for 300 ms in every call
+  REQUIRE(wait_for([&] { return aes67_of(engine, "s1").gaps > before.gaps; }, 3000));
+  const uint64_t received = out.packets();
+  CHECK(aes67_of(engine, "s1").packets > before.packets);
+  // the worker bypasses after 200 ms behind: the content is back and the gaps stop
+  bool stopped = false;
+  uint64_t gaps = aes67_of(engine, "s1").gaps;
+  int64_t since = bp::monotonic_ns();
+  const int64_t deadline = since + 2'000'000'000;
+  while (!stopped && bp::monotonic_ns() < deadline + 500'000'000) {
+    bp::sleep_ns(50'000'000);
+    const uint64_t g = aes67_of(engine, "s1").gaps;
+    if (g != gaps) {
+      gaps = g;
+      since = bp::monotonic_ns();
+      if (since > deadline) break;
+    } else if (bp::monotonic_ns() - since >= 500'000'000) {
+      stopped = true;
+    }
+  }
+  CHECK_MESSAGE(stopped, "gaps still rising: " << gaps);
+  CHECK(out.packets() > received);
+  CHECK(processing_of(engine, "s1").state == be::ProcessingState::Bypass);
+  fake().set("process_sleep_us", 0);
+}
+
+TEST_CASE("encoder engine: disabling the AES67 output stops its packets; a station without one sends none") {
+  const std::string group = "239.69.165.1";
+  constexpr uint16_t kInPort = 15265;
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  cfg.stations = {aes67_station(group, kInPort), station("s2", "Radio Bez Wyjścia")};
+  cfg = ready(cfg);
+  be::EncoderEngine engine(aes67_options(no_ptp()));
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  AesSender in(engine, group, kInPort, sig_a);
+  REQUIRE(wait_for([&] { return aes67_of(engine, "s1").state == be::Aes67State::Sending; }, 5000));
+  const be::Aes67Status quiet = aes67_of(engine, "s2");
+  CHECK(quiet.state == be::Aes67State::Off);
+  REQUIRE(quiet.address != aes67_of(engine, "s1").address);
+  AesReceiver out(engine, aes67_of(engine, "s1").address);
+  AesReceiver none(engine, quiet.address);
+  REQUIRE(wait_for([&] { return out.packets() > 500; }, 10000));
+  CHECK(none.packets() == 0);
+  CHECK(aes67_of(engine, "s2").packets == 0);
+
+  cfg.stations[0].aes67_output.enabled = false;
+  engine.apply_config(ready(cfg));
+  const be::Aes67Status s = aes67_of(engine, "s1");
+  CHECK(s.state == be::Aes67State::Off);
+  CHECK(s.packets == 0);
+  bp::sleep_ns(100'000'000);
+  const uint64_t p = out.packets();
+  bp::sleep_ns(1'000'000'000);
+  CHECK(out.packets() == p);
+  CHECK(none.packets() == 0);
 }
 
 #endif  // BAM_FAKE_STEREOTOOL_PATH

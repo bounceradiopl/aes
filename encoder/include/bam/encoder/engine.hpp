@@ -15,7 +15,10 @@
 //  - a station with Stereo Tool processing (Bounce Encoder 1.1) copies its mix into the queue of
 //    its processing worker instead (two threads: output and Stereo Tool), which hands the result
 //    to the station's streams. A station without processing has no worker: its path is the 1.0
-//    one, bit for bit.
+//    one, bit for bit;
+//  - a station with an AES67 output (1.2) also writes what its streams get into the output's
+//    rings (the station thread, or its processing worker); one sender thread for every output
+//    wakes every 0.25 ms and sends their packets on the PTP media clock.
 //  Configuration changes are built on the calling thread (sockets, rings, 23 MB delay lines,
 //  encoders) and handed to the station thread as an immutable plan; only what changed is
 //  rebuilt, so editing one stream leaves the station and its other streams running.
@@ -62,6 +65,10 @@ struct EncoderEngineOptions {
   // save of that station (release_processing_hold) or a change of its processing settings; a
   // warning is logged. Empty: no marker, no guard (tests, unless they ask for it).
   std::string crash_marker_path;
+  // The AES67 outputs (spec §4) send nothing before the PTP clock has locked once since start().
+  // false: they send on the free-running clock at once (tests).
+  bool aes67_require_ptp = true;
+  bool enable_sap = true;  // false: no SAP announcements nor listening for them (tests)
 };
 
 struct InputStatus {
@@ -167,6 +174,35 @@ struct ProcessingStatus {
   int64_t retry_in_s = -1;  // seconds to the next automatic retry; -1 when none is due
 };
 
+// The AES67 output of a station (spec §3-§5).
+enum class Aes67State {
+  Off,            // switched off, or the station does not run
+  WaitingForPtp,  // the PTP clock has not locked since the start: nothing is sent
+  Sending,
+  Holdover,       // sending on the clock held since the PTP master was lost
+  Error,          // the sending socket is unusable (see reason)
+};
+inline const char* aes67_state_name(Aes67State s) {
+  switch (s) {
+    case Aes67State::WaitingForPtp: return "waiting_for_ptp";
+    case Aes67State::Sending: return "sending";
+    case Aes67State::Holdover: return "holdover";
+    case Aes67State::Error: return "error";
+    case Aes67State::Off: break;
+  }
+  return "off";
+}
+
+struct Aes67Status {
+  Aes67State state = Aes67State::Off;
+  std::string reason;  // Polish, empty when Sending
+  std::string address, name;  // effective (aes67_address, aes67_name)
+  uint32_t ptime_us = 1000;
+  double output_latency_ms = 0;  // D + the longest input delay of the station
+  uint64_t packets = 0, gaps = 0, send_errors = 0;
+  std::string conflict;  // "<name> (<origin>)" of another announcer of the address, else empty
+};
+
 struct StationStatus {
   std::string id;
   std::string name;
@@ -178,6 +214,7 @@ struct StationStatus {
   std::vector<InputStatus> inputs;
   std::vector<StreamStatus> streams;
   ProcessingStatus processing;  // state Off when the station has no processing running
+  Aes67Status aes67;
 };
 
 struct EncoderStatus {
@@ -237,6 +274,12 @@ class EncoderEngine {
   // change. A Stereo Tool too slow is retried automatically after 30 s, 2, 5 and 10 minutes (then
   // every 10 minutes; the count starts again after 10 minutes of processing); every retry and its
   // outcome is logged, like every change of the processing state.
+  //
+  // AES67 output (spec §3, §4): a running station with its output switched on sends what its
+  // streams get, delayed by D = receive latency + 10 ms + the processing delay + 10 ms (followed
+  // within 100 ms when the processing delay changes). A new address or name keeps the output
+  // running; a new packet time builds it anew. Nothing is sent before the PTP clock has locked once
+  // since start(); after that it keeps sending in holdover.
   void apply_config(const EncoderConfig& config);
 
   // Stereo Tool presets (preset_store.hpp) in EncoderEngineOptions::stereotool_dir. Names compare
@@ -262,6 +305,9 @@ class EncoderEngine {
   // never logged, never in the status. nullopt (Polish *error) when the station runs no
   // processing with a web interface.
   std::optional<std::string> processing_web_password(const std::string& station_id, int* web_port, std::string* error) const;
+
+  // The SDP of the station's AES67 output; nullopt (Polish *error) when it is switched off.
+  std::optional<std::string> aes67_sdp(const std::string& station_id, std::string* error) const;
 
   EncoderConfig config() const;
   EncoderStatus status() const;

@@ -78,6 +78,7 @@ void Aes67Output::align(uint64_t now, bool fresh) {
     sent_end_ = now >= cur_delay_ ? now - cur_delay_ : 0;
     gap_chunk_ = UINT64_MAX;
     started_ = false;
+    content_seen_ = false;
   } else {
     gate_ = Gate::Hold;  // fades in once the mapping reaches content not sent yet
   }
@@ -99,10 +100,13 @@ bool Aes67Output::content_missing(uint64_t p, size_t n) {
 
 void Aes67Output::copy(uint64_t t, size_t n) {
   const uint64_t p = t - cur_delay_;
-  if (content_missing(p, n) && t / fpp_ != gap_chunk_) {
+  // before the first content on this timeline the output is starting (or re-aligned): no gap
+  const bool missing = content_missing(p, n);
+  if (missing && content_seen_ && t / fpp_ != gap_chunk_) {
     gap_chunk_ = t / fpp_;
     gaps_.fetch_add(1, std::memory_order_relaxed);
   }
+  if (!missing) content_seen_ = true;
   int32_t* l = rbuf_[0].data();
   int32_t* r = rbuf_[1].data();
   content_.ring[0].read(p, l, n);
