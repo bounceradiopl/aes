@@ -1375,4 +1375,76 @@ TEST_CASE("encoder config: station numbers never wrap: ids past 17 digits are re
   CHECK(c.stations[1].id == "s6");
 }
 
+TEST_CASE("encoder config: AES67 output defaults, JSON round trip and effective address") {
+  be::EncoderConfig c = be::default_encoder_config();
+  be::StationConfig st;
+  st.name = "Radio Test";
+  c.stations = {st};
+  be::normalize_config(c);
+  const be::StationConfig& s = c.stations[0];
+  CHECK_FALSE(s.aes67_output.enabled);
+  CHECK(s.aes67_output.ptime_us == 1000);
+  CHECK(be::aes67_address(s) == "239.69.110." + std::to_string(s.processing.web_port_slot + 1));
+  CHECK(be::aes67_name(s) == "Radio Test");
+
+  c.stations[0].aes67_output = {true, "Nadajnik", "239.1.2.3", 1333};
+  std::string err;
+  const auto back = be::config_from_json(be::config_to_json(c), &err);
+  REQUIRE_MESSAGE(back, err);
+  const auto& o = back->stations[0].aes67_output;
+  CHECK(o.enabled);
+  CHECK(o.name == "Nadajnik");
+  CHECK(o.address == "239.1.2.3");
+  CHECK(o.ptime_us == 1333);
+}
+
+TEST_CASE("encoder config: a 1.1 file without aes67_output loads with the output off") {
+  std::string err;
+  const auto c = be::config_from_json(R"({"version":1,"stations":[{"id":"s1","name":"A"}]})", &err);
+  REQUIRE_MESSAGE(c, err);
+  CHECK_FALSE(c->stations[0].aes67_output.enabled);
+  CHECK(c->stations[0].aes67_output.address.empty());
+}
+
+TEST_CASE("encoder config: AES67 output validation") {
+  auto issues_for = [](be::EncoderConfig c) {
+    be::normalize_config(c);
+    std::string all;
+    for (const auto& i : be::validate_config(c)) all += i.field + ": " + i.message + "\n";
+    return all;
+  };
+  be::EncoderConfig c = be::default_encoder_config();
+  be::StationConfig a; a.name = "A";
+  be::StationConfig b; b.name = "B";
+  c.stations = {a, b};
+
+  auto bad = c;
+  bad.stations[0].aes67_output = {true, "", "10.0.0.1", 1000};
+  CHECK(issues_for(bad).find("stations[0].aes67_output.address") != std::string::npos);
+  bad.stations[0].aes67_output.address = "239.1.1";
+  CHECK(issues_for(bad).find("stations[0].aes67_output.address") != std::string::npos);
+
+  bad = c;
+  bad.stations[0].aes67_output = {true, "", "", 500};
+  CHECK(issues_for(bad).find("stations[0].aes67_output.ptime_us") != std::string::npos);
+
+  bad = c;  // the same address on two stations
+  bad.stations[0].aes67_output = {true, "", "239.5.5.5", 1000};
+  bad.stations[1].aes67_output = {true, "", "239.5.5.5", 1000};
+  CHECK(issues_for(bad).find("ten sam adres wyjścia AES67 co") != std::string::npos);
+
+  bad = c;  // an input that would receive this encoder's own output
+  bad.stations[0].aes67_output = {true, "", "239.5.5.6", 1000};
+  be::InputConfig in;
+  in.sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=x\r\nc=IN IP4 239.5.5.6/15\r\nt=0 0\r\n"
+           "m=audio 5004 RTP/AVP 98\r\na=rtpmap:98 L24/48000/2\r\na=ptime:1\r\n";
+  bad.stations[1].inputs = {in};
+  CHECK(issues_for(bad).find("pętla") != std::string::npos);
+
+  auto ok = c;  // an output that is off is not checked for duplicates or loops
+  ok.stations[0].aes67_output = {false, "", "239.5.5.6", 1000};
+  ok.stations[1].inputs = {in};
+  CHECK(issues_for(ok).find("aes67") == std::string::npos);
+}
+
 #endif  // BAM_WITH_CODECS

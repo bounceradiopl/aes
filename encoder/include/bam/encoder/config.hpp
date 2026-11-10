@@ -92,6 +92,16 @@ struct ProcessingConfig {
   int web_port_slot = -1;
 };
 
+// The station's AES67 output (Bounce Encoder 1.2): its finished signal, the one its streams get,
+// as one L24 48 kHz stereo multicast stream on the PTP clock ("aes67_output" in the JSON).
+inline constexpr uint32_t kAes67PtimesUs[] = {1000, 1333, 4000};
+struct Aes67OutputConfig {
+  bool enabled = false;
+  std::string name;     // empty = the station name
+  std::string address;  // empty = aes67_default_address(processing.web_port_slot)
+  uint32_t ptime_us = 1000;
+};
+
 struct StationConfig {
   std::string id;  // unique in the configuration; empty = new (normalize_config assigns one)
   std::string name;
@@ -99,6 +109,7 @@ struct StationConfig {
   std::vector<InputConfig> inputs;
   std::vector<StreamConfig> streams;
   ProcessingConfig processing;
+  Aes67OutputConfig aes67_output;
 };
 
 struct EncoderConfig {
@@ -131,6 +142,10 @@ EncoderConfig default_encoder_config();  // no stations, panel on 0.0.0.0:8070
 // COM0–9, LPT0–9, whatever follows the first '.'). Such a name is safe as a file name in the
 // presets folder on every system (no path separators, no drive, no "..", no trailing dot).
 bool valid_preset_name(std::string_view name);
+// "239.69.110.<slot+1>", "" for a slot < 0 (none yet).
+std::string aes67_default_address(int web_port_slot);
+std::string aes67_address(const StationConfig& st);  // explicit or default
+std::string aes67_name(const StationConfig& st);     // explicit or the station name
 // The key Stereo Tool gets for `st`: its own key, else the default key (may be empty).
 const std::string& effective_stereotool_key(const EncoderConfig& c, const StationConfig& st);
 
