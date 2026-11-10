@@ -69,11 +69,18 @@ Aes67Stats Aes67Output::stats() const {
   return Aes67Stats{s.packets, gaps_.load(std::memory_order_relaxed), s.errors};
 }
 
-void Aes67Output::align(uint64_t now) {
+void Aes67Output::align(uint64_t now, bool fresh) {
   out_ = now;
   cur_delay_ = delay_.load(std::memory_order_relaxed);
-  gate_ = Gate::FadeIn;
   level_ = 0;
+  if (fresh) {  // a new timeline: nothing on it was sent yet
+    gate_ = Gate::FadeIn;
+    sent_end_ = now >= cur_delay_ ? now - cur_delay_ : 0;
+    gap_chunk_ = UINT64_MAX;
+    started_ = false;
+  } else {
+    gate_ = Gate::Hold;  // fades in once the mapping reaches content not sent yet
+  }
   // TxStream starts with the newest complete packet, which lies before out_
   const uint64_t from = now >= 2 * uint64_t(fpp_) ? now - 2 * uint64_t(fpp_) : 0;
   txr_.ring[0].write(from, nullptr, now - from);
@@ -119,9 +126,9 @@ void Aes67Output::pump(uint64_t now, uint64_t generation, const PacketSink& send
   if (!aligned_ || generation != generation_ || out_ > end + kMaxFillFrames) {
     generation_ = generation;
     tx_->reset();
-    align(now);
+    align(now, true);
   } else if (end - std::min(end, out_) > kMaxFillFrames) {
-    align(now);  // the sender stalled: TxStream skips (and counts) the backlog itself
+    align(now, false);  // the sender stalled: TxStream skips (and counts) the backlog itself
   }
   while (out_ < end) {
     const uint32_t want = delay_.load(std::memory_order_relaxed);

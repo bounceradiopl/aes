@@ -48,7 +48,7 @@ class Aes67Output {
     std::array<ChannelRing, 2> ring;
   };
   static void alloc(Rings& r);
-  void align(uint64_t now);
+  void align(uint64_t now, bool fresh);
   bool content_missing(uint64_t p, size_t n);
   void copy(uint64_t t, size_t n);
 

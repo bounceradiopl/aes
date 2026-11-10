@@ -156,3 +156,36 @@ TEST_CASE("aes67 output: missing content counts at most one gap per packet") {
   CHECK(out.stats().gaps > 0);
   CHECK(out.stats().gaps <= pkts.size() + 2);  // the fill runs one packet ahead of the sending
 }
+
+TEST_CASE("aes67 output: after a clock step back a delay change holds only the difference") {
+  bd::Aes67Output out(1000, 1);
+  out.set_delay(1000);
+  feed(out, 98000, 112000);
+  run(out, 100000, 110000, 1);
+  feed(out, 18000, 40000);
+  run(out, 20000, 25000, 2);  // the clock stepped back 90000 frames
+  out.set_delay(1500);
+  const auto pkts = run(out, 25012, 35000, 2);
+  size_t silent = 0;
+  for (const auto& c : pkts)
+    for (size_t f = 0; f < c.left.size(); ++f) silent += c.left[f] == 0 && c.right[f] == 0;
+  CHECK(silent >= 500);
+  CHECK(silent < 1000);
+  const auto& last = pkts.back();
+  CHECK(carries(last, 0, last.timestamp - 1500));
+}
+
+TEST_CASE("aes67 output: a stalled sender with a longer delay pending never repeats content") {
+  bd::Aes67Output out(1000, 1);
+  out.set_delay(1000);
+  feed(out, 0, 60000);
+  run(out, 2000, 20000);  // sent up to source ~19048
+  out.set_delay(11000);
+  const auto pkts = run(out, 26000, 40000);  // the sender stalled 6000 frames
+  for (const auto& c : pkts)
+    if (c.timestamp < 30000)
+      for (size_t f = 0; f < c.left.size(); ++f) CHECK((c.left[f] == 0 && c.right[f] == 0));
+  const auto& last = pkts.back();
+  CHECK(carries(last, 0, last.timestamp - 11000));
+  CHECK(out.stats().gaps == 0);
+}
