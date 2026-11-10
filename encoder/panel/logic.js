@@ -258,7 +258,45 @@
   // web_port_slot -1: the server gives a new station the lowest free slot.
   L.newProcessing = () => ({ enabled: false, license_key: "", preset: "", web_port_slot: -1 });
 
-  L.newStation = () => ({ name: "", enabled: true, inputs: [L.newInput()], streams: [], processing: L.newProcessing() });
+  L.newAes67 = () => ({ enabled: false, name: "", address: "", ptime_us: 1000 });
+
+  L.newStation = () => ({ name: "", enabled: true, inputs: [L.newInput()], streams: [], processing: L.newProcessing(), aes67_output: L.newAes67() });
+
+  // ---------------------------------------------------------------- AES67 output (Bounce Encoder 1.2)
+  L.PTIMES = [[1000, "1 ms"], [1333, "1,333 ms"], [4000, "4 ms"]];
+
+  // The address the service picks when the field is empty: 239.69.110.<web_port_slot + 1>.
+  L.aes67DefaultAddress = (slot) => (Number.isInteger(slot) && slot >= 0 && slot < 254 ? `239.69.110.${slot + 1}` : "");
+
+  // "" for an empty field (default address) or an IPv4 address in 239.0.0.0/8.
+  L.aes67AddressError = (text) => {
+    const t = String(text ?? "").trim();
+    if (!t) return "";
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(t);
+    if (m && m.slice(1).every((o) => Number(o) <= 255) && Number(m[1]) === 239) return "";
+    return "Adres multicast musi być w zakresie 239.x.x.x (np. 239.69.110.1).";
+  };
+
+  // /api/live stations[].aes67 as a short Polish state.
+  L.aes67StateLabel = (a) => {
+    switch (a?.state) {
+      case "sending": return `nadaje · ${a.address}`;
+      case "waiting_for_ptp": return a.reason || "czeka na zegar PTP";
+      case "holdover": return a.reason || "zegar podtrzymany (brak mastera PTP)";
+      case "error": return `błąd: ${a.reason || "nie działa"}`;
+      default: return "wyłączone";
+    }
+  };
+
+  // The dot of that state: ok | warn | err | off (an address conflict is a warning).
+  L.aes67Dot = (a) => {
+    switch (a?.state) {
+      case "sending": return a.conflict ? "warn" : "ok";
+      case "waiting_for_ptp": case "holdover": return "warn";
+      case "error": return "err";
+      default: return "off";
+    }
+  };
 
   // ---------------------------------------------------------------- live states (/api/live)
   // { kind: "" | "on" | "warn" | "err", text }: the dot colour and the Polish state (a stream on air

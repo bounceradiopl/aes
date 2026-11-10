@@ -31,6 +31,7 @@ const state = {
   st: null,           // GET /api/stereotool: library, presets, limits (loaded only when Stereo Tool is shown)
   stLoad: null,       // the request under way
   stError: "",        // why the last GET /api/stereotool failed ("" = fine)
+  aes67View: null,    // { id, update(liveStation) } of the AES67 output block in the editor
   procView: null,     // { id, update(liveStation) } of the processing block in the editor
   settingsKeyClear: false,  // "Usuń klucz" pressed in the settings dialog
   savePresetFor: null,      // the station id of the "Zapisz jako preset…" dialog
@@ -131,6 +132,14 @@ function setState(box, s, tally = false) {
   mark.className = onAir ? "tally" : `dot ${s.kind}`;
   mark.textContent = onAir ? "NA ANTENIE" : "";
   txt.textContent = onAir ? L.fmtKbps(s.kbps) : s.text;
+}
+
+// An AES67 output as a state ({ kind, text }) for the dot and text of stateBox.
+function aes67State(st) {
+  const v = st?.aes67;
+  if (!st?.enabled || !v) return { kind: "", text: "—" };
+  const dot = L.aes67Dot(v);
+  return { kind: dot === "ok" ? "on" : dot === "off" ? "" : dot, text: L.aes67StateLabel(v) };
 }
 
 function setPill(id, text, kind, title) {
@@ -375,6 +384,8 @@ function stationCard(st, i) {
       el("div", { class: "station-title" },
         el("h2", {}, stationLabel(st, i)),
         stateBox(`st:${st.id}`)),
+      st.aes67_output?.enabled ? el("span", { class: "state aes67-badge", dataset: { aes67badge: st.id }, title: "Wyjście AES67" },
+        el("span", { class: "dot" }), el("span", { class: "txt" }, "AES67")) : null,
       el("div", { class: "station-meter" }, meter(`st:${st.id}`), meterScale()),
       el("span", { class: "peak", dataset: { peak: st.id } }, ""),
       el("div", { class: "head-tools" },
@@ -462,6 +473,7 @@ async function openEditor(id, force = false) {
   state.draft = saved ? clone(saved) : L.newStation();
   state.draft.inputs.forEach((inp, j) => { inp._k = j; });  // the saved input it was (live meters)
   state.draft.processing ||= L.newProcessing();
+  state.draft.aes67_output ||= L.newAes67();
   state.original = L.draftJson(state.draft);
   state.issues = { fields: {}, general: [] };
   renderEditor();
@@ -566,6 +578,7 @@ function renderEditor() {
   $("#edit-streams").replaceChildren(...d.streams.map((_, k) => streamBlock(k)));
   if (!d.streams.length) $("#edit-streams").append(el("p", { class: "hint" }, "Brak strumieni. „Dodaj strumień” ustawia kodek, bitrate i serwer Icecast."));
   $("#edit-processing").replaceChildren(processingBlock());
+  $("#edit-aes67").replaceChildren(aes67Block());
   renderEquivalents();
   renderGeneralIssues();
   updateSavebar();
@@ -962,6 +975,112 @@ const KEY_FIELD = { autocomplete: "off", name: "stereotool-licence", spellcheck:
   "data-lpignore": "true", "data-1p-ignore": "true", "data-bwignore": "true", "data-form-type": "other" };
 
 function megabytes(bytes) { return `${L.fmtNum(bytes / (1024 * 1024))} MB`; }
+
+// The editor's AES67 output section: the switch, name, address and packet time (part of the draft,
+// saved with the station) and, for the saved station, its live state and the SDP actions.
+function aes67Block() {
+  const d = state.draft;
+  const a = d.aes67_output;
+  const sid = state.saved?.id || null;
+  const set = (key, value) => { a[key] = value; markDirty(); };
+  state.aes67View = null;
+
+  const enabled = el("input", { type: "checkbox", checked: a.enabled, "aria-label": "Wyjście AES67 włączone",
+    onchange: (e) => { set("enabled", e.target.checked); $("#edit-aes67").replaceChildren(aes67Block()); } });
+  const head = el("div", { class: "block-head" },
+    el("label", { class: "toggle" }, enabled, "włączone"),
+    el("div", { class: "block-title" }, el("span", {}, "Nadawanie do sieci")),
+    sid && state.saved.aes67_output?.enabled ? stateBox(`a67:${sid}`) : el("span", { class: "hint" }, sid ? "wyłączone" : "nowa stacja: stan po zapisaniu"));
+  const block = el("div", { class: "block" + (a.enabled ? "" : " off") }, head);
+
+  const defAddr = L.aes67DefaultAddress(d.processing?.web_port_slot);
+  const name = checkField(el("input", { type: "text", value: a.name, maxLength: 64, placeholder: d.name || "nazwa stacji",
+    "aria-label": "Nazwa strumienia AES67", dataset: { field: "aes67_name" } }), "aes67_output.name");
+  name.addEventListener("input", () => set("name", name.value));
+  const address = checkField(el("input", { type: "text", value: a.address, placeholder: defAddr || "239.69.110.x (wg numeru stacji)",
+    inputMode: "decimal", autocomplete: "off", spellcheck: false, "aria-label": "Adres multicast AES67", dataset: { field: "aes67_address" } }), "aes67_output.address");
+  const addrError = el("p", { class: "field-error", dataset: { err: "aes67_output.address" } }, issue("aes67_output.address").join(" · "));
+  const checkAddr = () => {
+    const why = L.aes67AddressError(address.value);
+    addrError.textContent = why || issue("aes67_output.address").join(" · ");
+    address.classList.toggle("invalid", !!why);
+    if (why) address.setAttribute("aria-invalid", "true"); else address.removeAttribute("aria-invalid");
+  };
+  address.addEventListener("input", () => { set("address", address.value.trim()); if (!L.aes67AddressError(address.value)) checkAddr(); });
+  address.addEventListener("change", checkAddr);
+  const ptime = checkField(el("select", { "aria-label": "Czas pakietu AES67", dataset: { field: "aes67_ptime" } },
+    ...L.PTIMES.map(([us, label]) => el("option", { value: String(us), selected: a.ptime_us === us }, label))), "aes67_output.ptime_us");
+  ptime.addEventListener("change", () => set("ptime_us", Number(ptime.value)));
+
+  const body = el("div", { class: "block-body aes67-body" },
+    el("label", {}, "Nazwa", name, el("small", {}, "Pusta: nazwa stacji."), fieldError("aes67_output.name")),
+    el("label", {}, "Adres multicast", address, el("small", {}, "Pusty: adres domyślny stacji."), addrError),
+    el("label", {}, "Czas pakietu", ptime, el("small", {}, "1 ms to standard; 4 ms obciąża sieć mniej.")));
+  block.append(body);
+  if (!sid || !state.saved.aes67_output?.enabled) {
+    body.append(el("p", { class: "hint s6" }, a.enabled
+      ? "Wyjście zacznie nadawać po zapisaniu stacji."
+      : "Wyjście wyłączone: stacja nie ogłasza sygnału w sieci."));
+    return block;
+  }
+
+  // live: state, address, latency, counters, conflict; SDP of the running output
+  const facts = el("dl", { class: "facts" });
+  const conflict = el("p", { class: "hint warn-text", hidden: true });
+  const sdpUrl = `/api/stations/${encodeURIComponent(sid)}/aes67.sdp`;
+  const copy = el("button", { type: "button", class: "mini", dataset: { icon: "copy" } }, "Kopiuj SDP");
+  const download = el("button", { type: "button", class: "mini", dataset: { icon: "download" } }, "Pobierz SDP");
+  download.addEventListener("click", () => {  // the route answers with Content-Disposition: attachment
+    const link = el("a", { href: sdpUrl, download: `${sid}.sdp` });
+    document.body.append(link);
+    link.click();
+    link.remove();
+  });
+  const sdpText = el("textarea", { class: "sdp-text", readOnly: true, rows: 8, hidden: true, "aria-label": "SDP wyjścia AES67" });
+  copy.addEventListener("click", async () => {
+    let r;
+    try {
+      r = await api(sdpUrl);
+    } catch (e) {
+      if (!(e instanceof AuthRequired)) toast("Brak połączenia z usługą: nie pobrano SDP", "err");
+      return;
+    }
+    if (!r.ok) { toast(r.data?.error || `Nie można pobrać SDP (HTTP ${r.status})`, "err"); return; }
+    const sdp = String(r.data ?? "");
+    try {
+      await navigator.clipboard.writeText(sdp);
+      sdpText.hidden = true;
+      toast("SDP skopiowane do schowka");
+    } catch {
+      sdpText.value = sdp;  // no clipboard (e.g. http:// from another computer): selected for Ctrl+C
+      sdpText.hidden = false;
+      sdpText.select();
+      toast("SDP zaznaczone: skopiuj je skrótem Ctrl+C", "warn");
+    }
+  });
+  body.append(el("div", { class: "s6 proc-live" }, facts, conflict,
+    el("div", { class: "proc-actions" }, copy, download), sdpText));
+
+  const update = (lst) => {
+    const v = lst?.aes67;
+    const on = !!lst?.enabled && v && v.state !== "off";
+    const rows = [
+      ["Stan", on ? L.aes67StateLabel(v) : lst?.enabled ? "wyłączone" : "stacja wyłączona"],
+      ["Adres", on && v.address ? `${v.address}:5004` : "—"],
+      ["Opóźnienie wyjścia", on && v.state === "sending" ? `${L.fmtNum(v.output_latency_ms, 1)} ms` : "—"],
+      ["Pakiety · Luki", on ? `${L.fmtNum(v.packets)} · ${L.fmtNum(v.gaps)}` : "—"],
+    ];
+    facts.replaceChildren(...rows.flatMap(([k, val]) => [el("dt", {}, k), el("dd", {}, val)]));
+    const why = on && v.conflict ? `Ten sam adres ogłasza ${v.conflict}.` : "";
+    conflict.textContent = why;
+    conflict.hidden = !why;
+    copy.disabled = !on;
+    download.disabled = !on;
+  };
+  state.aes67View = { id: sid, update };
+  update(state.live?.stations.find((x) => x.id === sid));
+  return block;
+}
 
 // The editor's processing section: the switch, the preset and the key (part of the draft, saved with
 // the station), the live state, and the actions on the running processing of the saved station
@@ -1509,6 +1628,7 @@ function applyLive() {
     setState(box, kind === "st" ? L.stationState(st)
       : kind === "in" ? L.inputState(st?.inputs[Number(x)], on)
         : kind === "proc" ? L.processingState(st?.processing, on)
+          : kind === "a67" ? aes67State(st)
           : L.streamState(st?.streams.find((s) => s.id === x), on), kind === "str");
   }
   // processing: the rows of the station list, the editor's block and the library line
@@ -1527,7 +1647,17 @@ function applyLive() {
     td.textContent = url ? `127.0.0.1:${st.processing.web_port}` : "—";
     td.title = url ? `Interfejs WWW Stereo Tool: ${url} (tylko na komputerze z usługą)` : "";
   }
+  for (const b of $$("[data-aes67badge]")) {
+    const st = stations.get(b.dataset.aes67badge);
+    const v = st?.enabled ? st.aes67 : null;
+    const kind = L.aes67Dot(v);
+    b.classList.remove("on", "warn", "err");
+    if (kind !== "off") b.classList.add(kind === "ok" ? "on" : kind);
+    b.firstChild.className = `dot ${kind === "ok" ? "on" : kind === "off" ? "" : kind}`;
+    b.title = `Wyjście AES67: ${v ? L.aes67StateLabel(v) : "stacja wyłączona"}`;
+  }
   if (state.procView) state.procView.update(stations.get(state.procView.id));
+  if (state.aes67View) state.aes67View.update(stations.get(state.aes67View.id));
   setLibraryText($("#proc-library"), live.stereotool);
   if ($("#dlg-presets").open) setLibraryText($("#presets-library"), libraryState());
   for (const span of $$("[data-peak]")) {
@@ -1581,6 +1711,14 @@ function renderStats() {
   $("#stats-station-rows").replaceChildren(...live.stations.map((st, i) => el("tr", {},
     name(st, i), stateCell(L.stationState(st)), el("td", {}, st.running ? L.fmtUptime(st.uptime_s) : "—"), num(st.skipped_frames, st.skipped_frames > 0))));
   if (!live.stations.length) $("#stats-station-rows").append(el("tr", {}, el("td", { class: "l hint", colSpan: 4 }, "Brak stacji.")));
+  const outs = live.stations.map((st, i) => ({ st, i })).filter(({ st }) => st.aes67 && st.aes67.state !== "off");
+  $("#stats-aes67-rows").replaceChildren(...outs.map(({ st, i }) => {
+    const v = st.aes67;
+    return el("tr", {},
+      name(st, i), stateCell(aes67State(st)), el("td", { class: "l mono" }, v.address ? `${v.address}:5004` : "—"),
+      num(v.packets), num(v.gaps, v.gaps > 0), num(v.send_errors, v.send_errors > 0));
+  }));
+  if (!outs.length) $("#stats-aes67-rows").append(el("tr", {}, el("td", { class: "l hint", colSpan: 6 }, "Żadna stacja nie nadaje wyjścia AES67.")));
   $("#stats-input-rows").replaceChildren(...live.stations.flatMap((st, i) => st.inputs.map((x, j) => {
     const r = x.rx;
     return el("tr", {},
