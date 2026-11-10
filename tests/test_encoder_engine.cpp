@@ -52,6 +52,7 @@
 #include "bam/sdp.hpp"
 #include "bam/timeline.hpp"
 #include "test_util.hpp"
+#include "../encoder/src/aes67_sap.hpp"
 #include "../encoder/src/aes67_sender.hpp"     // the failing-interface seam
 #include "../encoder/src/engine_internal.hpp"  // AudioQueue (the station -> stream handover)
 #include "../encoder/src/stereotool_api.hpp"   // the web interface parameter index
@@ -3079,4 +3080,102 @@ TEST_CASE("AES67 output: the SDP") {
   CHECK(parsed.stream->frames_per_packet == 192);
   CHECK(parsed.stream->ptime_ms == doctest::Approx(4.0));
   CHECK(sdp->find("a=ts-refclk:") != std::string::npos);
+}
+
+namespace {
+
+std::string foreign_sdp(const std::string& name, const std::string& origin, const std::string& address, uint64_t session_id) {
+  bam::SdpStream f;
+  f.session_name = name;
+  f.origin_address = origin;
+  f.multicast_address = address;
+  f.ttl = 15;
+  f.port = bam::kRtpPort;
+  f.payload_type = 98;
+  f.encoding = bam::Encoding::L24;
+  f.sample_rate = 48000;
+  f.channels = 2;
+  f.frames_per_packet = 48;
+  f.ptime_ms = 1.0;
+  return bam::generate_sdp(f, session_id, 1);
+}
+
+}  // namespace
+
+TEST_CASE("AES67 output: a foreign stream from the same computer (same origin, other session id) is a conflict") {
+  be::EncoderConfig cfg = sap_config("239.69.173.1", 15273);
+  be::EncoderEngine engine(sap_options());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  const std::string address = aes67_of(engine, "s1").address;
+  std::string serr;
+  auto tx = bp::UdpSocket::open(bam::kSapPort, &serr);
+  REQUIRE_MESSAGE(tx, serr);
+  tx->set_multicast_out(kLoopback, 1, true);
+  const auto pkt = bam::build_sap(false, 0x2222, {127, 0, 0, 1}, foreign_sdp("Master na tym komputerze", kLoopback, address, 0x1234));
+  REQUIRE(wait_for(
+      [&] {
+        tx->send_to(pkt, bam::kSapGroup, bam::kSapPort);
+        return aes67_of(engine, "s1").conflict.find("Master na tym komputerze") != std::string::npos;
+      },
+      2000));
+  CHECK(aes67_of(engine, "s1").conflict.find("127.0.0.1") != std::string::npos);
+}
+
+TEST_CASE("AES67 output: its own announcement is not a conflict") {
+  SapListener sap;
+  be::EncoderConfig cfg = sap_config("239.69.174.1", 15274);
+  const size_t warnings = log_lines_with("ten sam adres ogłasza");
+  be::EncoderEngine engine(sap_options());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  bam::SapPacket ann;
+  REQUIRE(sap.wait_for_packet(false, "Radio AES67", 0, &ann));  // it looped back to every listener
+  bp::sleep_ns(1'000'000'000);
+  CHECK(aes67_of(engine, "s1").conflict.empty());
+  CHECK(log_lines_with("ten sam adres ogłasza") == warnings);
+}
+
+TEST_CASE("AES67 output: waiting for PTP, nothing is announced") {
+  SapListener sap;
+  be::EncoderConfig cfg = sap_config("239.69.175.1", 15275);
+  be::EncoderEngineOptions o = sap_options();
+  o.aes67_require_ptp = true;  // no PTP master on loopback
+  be::EncoderEngine engine(o);
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  REQUIRE(wait_for([&] { return aes67_of(engine, "s1").state == be::Aes67State::WaitingForPtp; }, 2000));
+  bam::SapPacket p;
+  CHECK_FALSE(sap.wait_for_packet(false, "Radio AES67", 0, &p, 1500));
+}
+
+TEST_CASE("AES67 output: without an AES67 output the encoder sends no SAP") {
+  SapListener sap;
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  cfg.stations = {station("s1", "Radio 1.1")};
+  cfg.stations[0].inputs = {};
+  be::InputConfig a;
+  a.sdp = make_sdp("Wejście", "239.69.176.1", 15276);
+  cfg.stations[0].inputs = {a};
+  cfg = ready(cfg);
+  be::EncoderEngine engine(sap_options());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  bp::sleep_ns(1'500'000'000);
+  sap.poll();
+  CHECK(sap.got.empty());
+}
+
+TEST_CASE("AES67 output: after an interface change its own old announcement is not a conflict") {
+  SapListener sap;
+  const std::string sdp1 = foreign_sdp("Własny", kLoopback, "239.69.177.1", 0x42454E01);
+  const std::string sdp2 = foreign_sdp("Własny", "127.0.0.2", "239.69.177.1", 0x42454E01);
+  be::detail::Aes67Sap own;
+  own.set_announcements(kLoopback, {{"s1", sdp1}});
+  // the entry exists: seen from another origin it reads as foreign
+  REQUIRE(wait_for([&] { return !own.conflict("239.69.177.1", "127.0.0.2").empty(); }, 2000));
+  own.set_announcements("127.0.0.2", {{"s1", sdp2}});
+  bp::sleep_ns(1'000'000'000);
+  CHECK(own.conflict("239.69.177.1", "127.0.0.2").empty());
 }

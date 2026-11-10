@@ -104,6 +104,11 @@ void Aes67Sap::run() {
     if (!sock || sock_iface != iface) {
       if (sock) announced.clear();  // the old card is not reachable any more: receivers expire it
       sock.reset();
+      {
+        // our earlier announcements carry the old origin: they would read as another device
+        std::lock_guard lock(m_);
+        directory_ = SapDirectory();
+      }
       if (now < retry_at) {
         platform::sleep_ns(50'000'000);
         continue;
