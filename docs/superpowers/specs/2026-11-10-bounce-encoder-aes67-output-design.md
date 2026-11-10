@@ -8,11 +8,13 @@
 
 Każda stacja może oprócz strumieni Icecast nadawać swój gotowy sygnał jako strumień AES67 do sieci AoIP, np. do nadajnika FM albo kodeka linku. Wyjście jest opcjonalne. Stacje bez wyjścia AES67 działają jak w 1.1.
 
+Stereo Tool zostaje tym, czym jest w 1.1: **opcją stacji**. Wyjście AES67 niczego w nim nie zmienia i go nie wymaga. Stacja z włączonym processingiem wysyła na AES67 sygnał przetworzony, stacja bez processingu wysyła swój miks.
+
 Decyzje z rozmowy (2026-11-10):
 
 | Pytanie | Decyzja |
 |---|---|
-| Do czego | **nadajnik / link FM**: gotowy sygnał stacji (po Stereo Tool i opóźnieniu, ten sam co w strumieniach) |
+| Do czego | **nadajnik / link FM**: gotowy sygnał stacji, ten sam co w strumieniach (z opóźnieniem; po Stereo Tool tylko wtedy, gdy stacja ma włączony processing) |
 | Zegar | enkoder zostaje **slave'em PTP**; masterem jest Orban, który działa 24/7. Enkoder nie zostaje masterem |
 | Postać | **osobna sekcja „Wyjście AES67” w stacji** (wariant A), nie kolejny typ strumienia Icecast |
 | Liczba | **jedno wyjście na stację**; kilka urządzeń odbiera ten sam multicast |
@@ -44,9 +46,9 @@ Druga prośba z tego samego zgłoszenia (BounceAES: kilka źródeł ASIO na kart
 ## 3. Tor sygnału i oś czasu
 
 ```
-wejścia → opóźnienie → miks stacji → [Stereo Tool] ─┬─► strumienie Icecast (bez zmian)
-                                                    └─► pierścienie wyjścia AES67 stacji
-                                                          └─► wątek nadawczy (co 1 ms, TxStream) → multicast
+wejścia → opóźnienie → miks stacji → [Stereo Tool, opcja stacji] ─┬─► strumienie Icecast (bez zmian)
+                                                                  └─► pierścienie wyjścia AES67 stacji
+                                                                        └─► wątek nadawczy (co 1 ms, TxStream) → multicast
 ```
 
 - **Ten sam sygnał co strumienie.** Wyjście dostaje dokładnie to, co dziś trafia do `StreamWorker::push`: z processingiem — wynik workera processingu (także jego wyrównane obejście); bez processingu — miks stacji. Bez resamplingu i kodeka: float → 24 bit z przycięciem do pełnej skali, bez ditheringu. Przy 0 dB i bez processingu tor wejście → wyjście jest bit w bit.
