@@ -48,13 +48,13 @@ Druga prośba z tego samego zgłoszenia (BounceAES: kilka źródeł ASIO na kart
 ```
 wejścia → opóźnienie → miks stacji → [Stereo Tool, opcja stacji] ─┬─► strumienie Icecast (bez zmian)
                                                                   └─► pierścienie wyjścia AES67 stacji
-                                                                        └─► wątek nadawczy (co 1 ms, TxStream) → multicast
+                                                                        └─► wątek nadawczy (co 0,25 ms, TxStream) → multicast
 ```
 
 - **Ten sam sygnał co strumienie.** Wyjście dostaje dokładnie to, co dziś trafia do `StreamWorker::push`: z processingiem — wynik workera processingu (także jego wyrównane obejście); bez processingu — miks stacji. Bez resamplingu i kodeka: float → 24 bit z przycięciem do pełnej skali, bez ditheringu. Przy 0 dB i bez processingu tor wejście → wyjście jest bit w bit.
 - **Oś czasu.** Każdy blok oddawany wyjściu niesie swoją pozycję na zegarze mediów: pozycję miksu, z którego powstał (wątek stacji zna ją jako `pos_`; worker processingu przenosi ją przez swoje opóźnienie `L + 240`). Wyjście zapisuje próbkę o pozycji miksu `p` w pierścieniach (`ChannelRing`, oś czasu jak w BounceAES) pod pozycją `p + D`.
 - **Stałe opóźnienie wyjścia `D`** (od pozycji miksu do znacznika czasu RTP) = opóźnienie odbioru stacji + takt stacji (10 ms) + opóźnienie processingu (`L + 240` ramek, gdy processing włączony; 0 bez processingu) + zapas 10 ms. Wartość jest stała, dopóki obsługa nie zmieni opóźnienia odbioru albo nie włączy/wyłączy processingu. Panel pokazuje opóźnienie wyjścia względem wejścia: `D` + opóźnienia wejść stacji.
-- **Wysyłanie.** Jeden wątek nadawczy dla wszystkich stacji, budzony co 1 ms z priorytetem MMCSS „Pro Audio” (jak `tx_loop` BounceAES), pompuje `TxStream` każdego włączonego wyjścia (`bam_core`, bez zmian) i wysyła przez jedno gniazdo UDP związane z kartą AoIP (`interface_ip`). Pakiet o znaczniku `T` wychodzi, gdy zegar mediów minie `T + P`.
+- **Wysyłanie.** Jeden wątek nadawczy dla wszystkich stacji, budzony co 0,25 ms (jak `tx_loop` BounceAES) z priorytetem MMCSS „Pro Audio”, pompuje `TxStream` każdego włączonego wyjścia (`bam_core`, bez zmian) i wysyła przez jedno gniazdo UDP związane z kartą AoIP (`interface_ip`). Pakiet o znaczniku `T` wychodzi, gdy zegar mediów minie `T + P`.
 - **Brakujące próbki** (wątek stacji spóźniony, stacja zatrzymana, luka w workerze): pierścień zwraca ciszę dla pozycji niezapisanych (znaczniki `ChannelRing`), więc pakiety wychodzą dalej w rytmie zegara; wyjście liczy takie pakiety („luki”).
 - **Ponowne ustawienie** z wyciszeniem 5 ms przed i rampą 5 ms po: zmiana `D` (włączenie/wyłączenie processingu, zmiana opóźnienia odbioru), skok zegara PTP (`TxStream::reset`). Przy włączeniu processingu przerwa trwa około opóźnienia Stereo Tool (≈ 90 ms), jak dziś w strumieniach.
 
@@ -119,5 +119,5 @@ Ręczne (ENCODER-TESTING.md): odbiór w BounceAES Master na tym samym komputerze
 ## 11. Ryzyka
 
 - **Odbiornik nadajnika wymaga innego czasu pakietu albo formatu.** Mitigacja: 1 / 1,333 / 4 ms do wyboru; inne formaty poza zakresem, do dodania, jeśli konkretne urządzenie tego wymaga.
-- **Opóźnienie linku w odbiorniku za małe** względem rytmu wysyłania enkodera (wątek 1 ms + jitter Windows). Mitigacja: instrukcja podaje zalecany link offset odbiornika (co najmniej 3 × czas pakietu); licznik spóźnionych pakietów w Statystykach.
+- **Opóźnienie linku w odbiorniku za małe** względem rytmu wysyłania enkodera (wątek 0,25 ms + jitter Windows). Mitigacja: instrukcja podaje zalecany link offset odbiornika (co najmniej 3 × czas pakietu); licznik spóźnionych pakietów w Statystykach.
 - **Podtrzymany zegar bez Orbana dryfuje** względem innych urządzeń. Mitigacja: ostrzeżenie w panelu i logu; po powrocie mastera ponowne ustawienie.
