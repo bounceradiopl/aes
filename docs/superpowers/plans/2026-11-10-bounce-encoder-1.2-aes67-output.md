@@ -723,7 +723,7 @@ Steps:
   L.PTIMES = [[1000, "1 ms"], [1333, "1,333 ms"], [4000, "4 ms"]]
   ```
 
-Section content (spec §7): switch „Wyjście AES67”, Nazwa (placeholder = station name), Adres multicast (placeholder = default address; inline error from `aes67AddressError`), Czas pakietu (select from `PTIMES`), live fields Stan / Adres / Opóźnienie wyjścia („N ms”) / Pakiety · Luki, conflict line in warning colour („ten sam adres ogłasza …”), buttons **Kopiuj SDP** (fetch `aes67.sdp`, `navigator.clipboard.writeText`, fallback: select text in a read-only textarea, as the Stereo Tool password does) and **Pobierz SDP** (link to the route). Station card: badge „AES67” with a dot class from `aes67Dot`. Save: the station PUT includes `aes67_output`.
+Section content (spec §7): switch „Wyjście AES67”, Nazwa (placeholder = station name), Adres multicast (placeholder = default address; inline error from `aes67AddressError`), Czas pakietu (select from `PTIMES`), live fields Stan / Adres / Opóźnienie wyjścia („N ms”) / Pakiety · Luki, conflict line in warning colour („ten sam adres ogłasza …”), buttons **Kopiuj SDP** (fetch `aes67.sdp`, `navigator.clipboard.writeText`, fallback: select text in a read-only textarea, as the Stereo Tool password does) and **Pobierz SDP** (link to the route). Station card: badge „AES67” with a dot class from `aes67Dot`. Save: the station PUT includes `aes67_output`. Statistics tab: per station with an output, a row „Wyjście AES67” with Pakiety, Luki and Błędy wysyłania (from `status.stations[].aes67`), next to the existing per-station counters.
 
 Steps:
 - [ ] **Step 1: failing logic tests** (append to `tests/panel/encoder_panel_logic.test.js`):
