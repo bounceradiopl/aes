@@ -30,6 +30,8 @@ namespace bam::encoder::detail {
 // Linear level (1.0 = full scale) -> dBFS, floored at -120.
 float level_db(float linear);
 
+class Aes67Output;  // aes67_output.hpp
+
 // ---- inputs (inputs.cpp) ----
 
 // One received AES67 input: its socket (joined to the SDP group, with the source filter when
@@ -139,18 +141,32 @@ class PtpClient {
 // The bounded handover from a station thread to one stream worker: interleaved float stereo
 // frames, at most `capacity` of them; a push that does not fit drops the oldest frames and
 // counts them. Both sides hold the lock only to copy.
+// With positions (the processing worker): each push says the mix position of its first frame,
+// and a pop never spans a jump in it and says the position of its first frame. A push without
+// one follows on from the last.
 class AudioQueue {
  public:
   explicit AudioQueue(size_t capacity_frames);
-  void push(const float* stereo, size_t frames);
+  void push(const float* stereo, size_t frames) { put(stereo, frames, false, 0); }
+  void push(const float* stereo, size_t frames, uint64_t pos) { put(stereo, frames, true, pos); }
   // Waits up to wait_ms for frames, then takes up to max_frames; 0 when none (or woken).
-  size_t pop(float* out, size_t max_frames, int wait_ms);
+  size_t pop(float* out, size_t max_frames, int wait_ms, uint64_t* pos = nullptr);
   void wake();  // makes a waiting pop() return
   size_t size_frames() const;  // frames waiting now
   uint64_t dropped_frames() const { return dropped_.load(std::memory_order_relaxed); }
   size_t capacity_frames() const { return capacity_; }
 
  private:
+  // From frame number `index` on (frames numbered as they entered the ring, dropped ones too),
+  // the positions go on from `pos`.
+  struct Jump {
+    uint64_t index = 0, pos = 0;
+  };
+  static constexpr size_t kJumps = 32;  // more waiting drops the frames before the oldest
+  void put(const float* stereo, size_t frames, bool has_pos, uint64_t pos);
+  void drop_oldest(size_t frames);  // under m_
+  void advance(size_t frames);      // under m_: the head moved on
+
   mutable std::mutex m_;
   std::condition_variable cv_;
   std::vector<float> ring_;
@@ -159,6 +175,11 @@ class AudioQueue {
   size_t size_ = 0;
   bool woken_ = false;
   std::atomic<uint64_t> dropped_{0};
+  uint64_t head_index_ = 0;  // the oldest frame's number
+  uint64_t head_pos_ = 0;    // and its position
+  uint64_t tail_pos_ = 0;    // the position a push that follows on starts at
+  std::array<Jump, kJumps> jumps_{};  // after the head, oldest first
+  size_t jump_first_ = 0, jumps_n_ = 0;
 };
 
 std::string stream_key(const StreamConfig& s, const std::string& station_name);
@@ -234,8 +255,9 @@ struct ProcessingSettings {
   // stop timeout + 1 s (an instance stuck in the library keeps its port: then it is refused,
   // logged); meanwhile the streams get the unprocessed mix, as during any setup.
   std::vector<std::shared_ptr<const std::atomic<bool>>> wait_for_gone;
-  // Tests: sees every block handed to the streams, on the output thread (must not allocate).
-  std::function<void(const float* stereo, size_t frames)> output_tap;
+  // Tests: sees every block handed to the streams, with the mix position of its first frame, on
+  // the output thread (must not allocate).
+  std::function<void(const float* stereo, size_t frames, uint64_t pos)> output_tap;
   // Tests: called on the Stereo Tool thread after each block it processed.
   std::function<void()> st_block_tap;
 };
@@ -288,11 +310,12 @@ struct ProcessingEvent {
 // Threads: the station thread only copies its mix into the bounded queue (push). The output
 // thread takes it in blocks of 10 ms, keeps the unprocessed signal in a ring (the bypass), hands
 // each block to the Stereo Tool thread and waits for it, then crossfades processed and
-// unprocessed and hands the result to the streams. The Stereo Tool thread owns the instance: it
-// creates it, loads the preset, measures the latency and processes the blocks. Neither audio
-// thread allocates per block, and no lock is held across a Stereo Tool call; the output thread
-// never waits on Stereo Tool for more than kMaxBehindNs, so a stuck or slow Stereo Tool ends in
-// the bypass, not in silence.
+// unprocessed and hands the result to the streams and the AES67 output. Output frame j is made
+// of input frame j and carries the mix position input frame j was pushed with. The Stereo Tool
+// thread owns the instance: it creates it, loads the preset, measures the latency and processes
+// the blocks. Neither audio thread allocates per block, and no lock is held across a Stereo Tool
+// call; the output thread never waits on Stereo Tool for more than kMaxBehindNs, so a stuck or
+// slow Stereo Tool ends in the bypass, not in silence.
 //
 // Timing: both paths are delayed by the same delay_frames() = Stereo Tool latency + kRampFrames
 // (the margin lets every switch away from Stereo Tool crossfade over kRampFrames, even when the
@@ -339,11 +362,16 @@ class ProcessingWorker {
   ProcessingWorker(const ProcessingWorker&) = delete;
   ProcessingWorker& operator=(const ProcessingWorker&) = delete;
 
-  // Station thread: hands over a block of the mix (copies only, never waits on Stereo Tool).
-  void push(const float* stereo, size_t frames) { in_.push(stereo, frames); }
+  // Station thread: hands over a block of the mix (copies only, never waits on Stereo Tool);
+  // `pos` is the mix position of its first frame.
+  void push(const float* stereo, size_t frames, uint64_t pos) { in_.push(stereo, frames, pos); }
   // Any thread: the streams the output goes to, taken by the output thread at its next block;
   // lists it let go of are released here (on the caller's thread), or by stop().
   void set_streams(std::vector<std::shared_ptr<StreamWorker>> streams);
+  // Any thread: the station's AES67 output (null: none), taken like the streams. This worker is
+  // its one writer from then until it faded out (or stopped): a switch away from the worker goes
+  // through fade_out()/faded_out() before the station writes the output itself.
+  void set_aes67(std::shared_ptr<Aes67Output> out);
   // Any thread: leaves the bypass and tries again (a failed or missing instance is built anew,
   // a working one is kept with its settings). After a crash nothing is created until the
   // service restarts; while Stereo Tool is stuck in a call, the restart waits for it to return.
@@ -361,8 +389,8 @@ class ProcessingWorker {
   // restart). false with a Polish *error; *busy is set when another save was under way.
   bool save_preset(const std::string& sts_path, int timeout_ms, std::string* error, bool* busy = nullptr);
   // Any thread: fades the output out over kRampFrames of the next frames emitted, then hands
-  // nothing more to the streams (faded_out()). For a switch away from this worker: the station's
-  // new path fades in once faded_out() (the engine waits for it, bounded).
+  // nothing more to the streams nor the AES67 output (faded_out()). For a switch away from this
+  // worker: the station's new path fades in once faded_out() (the engine waits for it, bounded).
   void fade_out() { fade_wanted_.store(true, std::memory_order_relaxed); }
   bool faded_out() const { return faded_out_.load(std::memory_order_acquire); }
   ProcessingStatus status() const;
@@ -396,7 +424,7 @@ class ProcessingWorker {
   using Reason = ProcessingReason;
   enum class Pending { None, Setup, Job };
   void run();
-  void take_streams();
+  void take_outputs();
   void begin_restart();
   void resume_session();
   bool preset_pending() const;
@@ -407,23 +435,27 @@ class ProcessingWorker {
   std::string reason_text(Reason why, uint64_t failure_id) const;
   bool falling_behind(int64_t now);
   void emit();
-  void deliver(const float* stereo, size_t frames);
+  void deliver(const float* stereo, size_t frames, uint64_t pos);
 
   const std::string station_id_;
   AudioQueue in_;
   std::shared_ptr<Core> core_;
-  std::function<void(const float*, size_t)> output_tap_;
+  std::function<void(const float*, size_t, uint64_t)> output_tap_;
 
   std::mutex streams_m_;
   std::shared_ptr<const std::vector<std::shared_ptr<StreamWorker>>> pending_streams_;
-  // At most the one list the output thread let go of since the last set_streams() (it takes one
-  // pending list at a time); released by set_streams()/stop().
+  std::shared_ptr<Aes67Output> pending_aes67_;
+  bool aes67_pending_ = false;  // pending_aes67_ is set (null removes the output)
+  // At most one list and one AES67 output the output thread let go of since the last
+  // set_streams()/set_aes67() (it takes one pending of each at a time); released by those or stop().
   std::vector<std::shared_ptr<const void>> graveyard_;
-  std::atomic<bool> has_pending_streams_{false};
+  std::atomic<bool> has_pending_outputs_{false};
 
   // output thread only
   std::shared_ptr<const std::vector<std::shared_ptr<StreamWorker>>> streams_;
+  std::shared_ptr<Aes67Output> aes67_;
   std::vector<float> block_, dry_, proc_, out_;  // dry_/proc_: rings indexed by input frame
+  std::vector<uint64_t> at_;   // ring indexed by input frame: its mix position
   int64_t written_ = 0;        // input frames in dry_ so far (the next input frame's index)
   int64_t emitted_ = 0;        // the next input frame to emit
   int64_t proc_end_ = 0;       // proc_ holds processed frames [session_start_, proc_end_)
@@ -479,6 +511,9 @@ struct StationPlan {
   // straight to the streams (the 1.0 path, bit for bit).
   std::shared_ptr<ProcessingWorker> processing;
   std::vector<std::shared_ptr<StreamWorker>> streams;
+  // The station's AES67 output, null: none (the 1.1 path). Written here only without processing
+  // (else by the worker, ProcessingWorker::set_aes67).
+  std::shared_ptr<Aes67Output> aes67;
   uint32_t latency_frames = 0;  // the station reads every input this far behind "now"
   // A value other than the last plan's fades the station's output in over kRampFrames: the
   // engine's switch away from a processing worker that faded out (ProcessingWorker::fade_out).

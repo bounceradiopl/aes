@@ -1133,6 +1133,43 @@ TEST_CASE("encoder engine: the stream queue keeps the newest frames and counts w
   CHECK(be::detail::StreamWorker::kQueueFrames == 5 * 48000);  // spec 4.4: 5 s
 }
 
+TEST_CASE("encoder engine: with positions the queue never pops across a jump and keeps them across drops") {
+  be::detail::AudioQueue q(8);
+  std::vector<float> in(20 * 2, 0.0f), out(16 * 2);
+  uint64_t pos = 0;
+  q.push(in.data(), 3, 1000);
+  q.push(in.data(), 3, 1003);  // follows on
+  q.push(in.data(), 2, 5000);  // a jump
+  REQUIRE(q.pop(out.data(), 16, 0, &pos) == 6);
+  CHECK(pos == 1000);
+  REQUIRE(q.pop(out.data(), 16, 0, &pos) == 2);
+  CHECK(pos == 5000);
+  q.push(in.data(), 4, 200);
+  q.push(in.data(), 4, 300);
+  q.push(in.data(), 3, 204);  // 11 > 8: the 3 oldest (200..202) go
+  CHECK(q.dropped_frames() == 3);
+  REQUIRE(q.pop(out.data(), 16, 0, &pos) == 1);
+  CHECK(pos == 203);
+  REQUIRE(q.pop(out.data(), 16, 0, &pos) == 4);
+  CHECK(pos == 300);
+  REQUIRE(q.pop(out.data(), 16, 0, &pos) == 3);
+  CHECK(pos == 204);
+  q.push(in.data(), 2, 10);
+  q.push(in.data(), 20, 50);  // larger than the queue: only 62..69 stay
+  CHECK(q.dropped_frames() == 3 + 12 + 2);
+  REQUIRE(q.pop(out.data(), 16, 0, &pos) == 8);
+  CHECK(pos == 62);
+  // more jumps waiting than it keeps: the frames before the oldest one go
+  be::detail::AudioQueue many(100);
+  for (uint64_t k = 0; k < 40; ++k) many.push(in.data(), 1, k * 10);
+  const uint64_t dropped = many.dropped_frames();
+  CHECK(dropped > 0);
+  for (uint64_t k = dropped; k < 40; ++k) {
+    REQUIRE(many.pop(out.data(), 16, 0, &pos) == 1);
+    CHECK(pos == k * 10);
+  }
+}
+
 TEST_CASE("encoder engine: the PTP slave follows a master on loopback") {
   // A BounceAES Master engine on 127.0.0.1 is the PTP master, on a domain nothing else uses.
   constexpr int kDomain = 87;

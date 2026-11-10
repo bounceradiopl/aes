@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstdio>
 
+#include "aes67_output.hpp"
 #include "bam/auth.hpp"  // random_hex: the web interface password
 #include "bam/encoder/stereotool.hpp"
 #include "bam/log.hpp"
@@ -38,7 +39,7 @@ static_assert(kRingFrames >= PW::kMaxLatencyFrames + kRampFrames + 2 * PW::kBloc
 constexpr int kPopWaitMs = 20;                         // the output thread looks at its flags this often
 constexpr auto kWaitSlice = std::chrono::milliseconds(5);  // and at the queue while Stereo Tool works
 constexpr int kDefaultStopTimeoutMs = 5000;
-constexpr size_t kGraveyardSlots = 1;  // see ProcessingWorker::graveyard_
+constexpr size_t kGraveyardSlots = 2;  // see ProcessingWorker::graveyard_
 constexpr size_t kFailureTexts = 8;    // failure texts kept for the events (Core::failures)
 
 std::atomic<int> g_stop_timeout_ms{0};
@@ -413,6 +414,7 @@ ProcessingWorker::ProcessingWorker(const ProcessingSettings& s, std::string stat
   out_.assign(kBlockFrames * 2, 0.0f);
   dry_.assign(size_t(kRingFrames) * 2, 0.0f);
   proc_.assign(size_t(kRingFrames) * 2, 0.0f);
+  at_.assign(kRingFrames, 0);
   graveyard_.reserve(kGraveyardSlots);
   c.cmd = Cmd::Setup;  // the first thing the Stereo Tool thread does
   pending_ = Pending::Setup;
@@ -441,9 +443,23 @@ void ProcessingWorker::set_streams(std::vector<std::shared_ptr<StreamWorker>> st
     unused = std::move(pending_streams_);  // a list the output thread never took
     pending_streams_ = std::move(list);
     graveyard_.swap(dead);  // reserved here, so the output thread's next retire never allocates
-    has_pending_streams_.store(true, std::memory_order_release);
+    has_pending_outputs_.store(true, std::memory_order_release);
   }
   // `dead` and `unused` are released here, on the caller's thread
+}
+
+void ProcessingWorker::set_aes67(std::shared_ptr<Aes67Output> out) {
+  std::shared_ptr<Aes67Output> unused;
+  std::vector<std::shared_ptr<const void>> dead;
+  dead.reserve(kGraveyardSlots);
+  {
+    std::lock_guard lock(streams_m_);
+    unused = std::move(pending_aes67_);  // one the output thread never took
+    pending_aes67_ = std::move(out);
+    aes67_pending_ = true;
+    graveyard_.swap(dead);
+    has_pending_outputs_.store(true, std::memory_order_release);
+  }
 }
 
 void ProcessingWorker::restart() { restart_.store(true); }
@@ -528,9 +544,11 @@ void ProcessingWorker::stop() {
     st_thread_.detach();
   }
   streams_.reset();  // what the output thread held, released on the caller's thread
+  aes67_.reset();
   {
     std::lock_guard lock(streams_m_);
     pending_streams_.reset();
+    pending_aes67_.reset();
     graveyard_.clear();
   }
   set_state(ProcessingState::Off, Reason::None);
@@ -648,13 +666,21 @@ void ProcessingWorker::set_state(ProcessingState state, Reason why) {
   events_.push(packed);  // one writer at a time (the output thread; the constructor before it, stop() after it)
 }
 
-void ProcessingWorker::take_streams() {
-  if (!has_pending_streams_.load(std::memory_order_acquire)) return;
+void ProcessingWorker::take_outputs() {
+  if (!has_pending_outputs_.load(std::memory_order_acquire)) return;
   std::lock_guard lock(streams_m_);
-  has_pending_streams_.store(false, std::memory_order_relaxed);
-  // one take per set_streams(), so the slot reserved there is free (else released here after all)
-  if (streams_ && graveyard_.size() < graveyard_.capacity()) graveyard_.push_back(std::move(streams_));
-  streams_ = std::move(pending_streams_);
+  has_pending_outputs_.store(false, std::memory_order_relaxed);
+  // at most one take of each per set_streams()/set_aes67(), so the slots reserved there are free
+  // (else released here after all)
+  if (pending_streams_) {
+    if (streams_ && graveyard_.size() < graveyard_.capacity()) graveyard_.push_back(std::move(streams_));
+    streams_ = std::move(pending_streams_);
+  }
+  if (aes67_pending_) {
+    aes67_pending_ = false;
+    if (aes67_ && graveyard_.size() < graveyard_.capacity()) graveyard_.push_back(std::move(aes67_));
+    aes67_ = std::move(pending_aes67_);
+  }
 }
 
 bool ProcessingWorker::falling_behind(int64_t now) {
@@ -823,10 +849,11 @@ void ProcessingWorker::wait_job() {
   }
 }
 
-void ProcessingWorker::deliver(const float* stereo, size_t frames) {
-  if (output_tap_) output_tap_(stereo, frames);
+void ProcessingWorker::deliver(const float* stereo, size_t frames, uint64_t pos) {
+  if (output_tap_) output_tap_(stereo, frames, pos);
   if (streams_)
     for (const auto& s : *streams_) s->push(stereo, frames);
+  if (aes67_) aes67_->write(stereo, frames, pos);
 }
 
 void ProcessingWorker::emit() {
@@ -838,7 +865,10 @@ void ProcessingWorker::emit() {
     set_state(ProcessingState::Running, Reason::None);
   }
   const int64_t end = written_ - int64_t(delay_.load(std::memory_order_relaxed));
-  if (faded_) {  // faded out (fade_out()): nothing more for the streams
+  // Faded out (fade_out()): nothing more for the streams nor the AES67 output. faded_out() is
+  // stored (release) after the last delivery, and the engine sees it (or stops this thread)
+  // before the station writes the AES67 output itself: one writer at a time.
+  if (faded_) {
     emitted_ = std::max(emitted_, end);
     return;
   }
@@ -873,7 +903,13 @@ void ProcessingWorker::emit() {
         }
       }
     }
-    deliver(o, out_n);
+    // in runs of contiguous positions (a jump in the station's position splits a block)
+    for (size_t from = 0, k = 1; k <= out_n; ++k) {
+      const uint64_t first = at_[size_t((emitted_ + int64_t(from)) & kRingMask)];
+      if (k < out_n && at_[size_t((emitted_ + int64_t(k)) & kRingMask)] == first + (k - from)) continue;
+      deliver(o + from * 2, k - from, first);
+      from = k;
+    }
     emitted_ += int64_t(n);
     if (fading_ && !fade_.ramping()) {
       fading_ = false;
@@ -887,7 +923,7 @@ void ProcessingWorker::emit() {
 
 void ProcessingWorker::run() {
   while (running_.load(std::memory_order_relaxed)) {
-    take_streams();
+    take_outputs();
     if (restart_.exchange(false)) restart_wanted_ = true;
     if (preset_change_.exchange(false)) reload_wanted_ = true;
     if (pending_ != Pending::None) take_result(false);
@@ -905,13 +941,15 @@ void ProcessingWorker::run() {
         set_state(ProcessingState(status_.load() >> kStateShift), Reason::RestartWaits);  // a block stuck in Stereo Tool
     }
 
-    const size_t n = in_.pop(block_.data(), kBlockFrames, kPopWaitMs);
+    uint64_t pos = 0;
+    const size_t n = in_.pop(block_.data(), kBlockFrames, kPopWaitMs, &pos);
     if (n == 0) continue;
-    take_streams();  // a list set while it waited goes with this block already
+    take_outputs();  // outputs set while it waited go with this block already
     for (size_t k = 0; k < n; ++k) {
-      const size_t i = size_t((written_ + int64_t(k)) & kRingMask) * 2;
-      dry_[i] = block_[k * 2];
-      dry_[i + 1] = block_[k * 2 + 1];
+      const size_t f = size_t((written_ + int64_t(k)) & kRingMask);
+      dry_[f * 2] = block_[k * 2];
+      dry_[f * 2 + 1] = block_[k * 2 + 1];
+      at_[f] = pos + k;
     }
     const int64_t start = written_;
     written_ += int64_t(n);
