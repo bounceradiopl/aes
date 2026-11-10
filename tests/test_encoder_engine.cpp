@@ -48,6 +48,7 @@
 #include "bam/platform/time.hpp"
 #include "bam/platform/udp.hpp"
 #include "bam/rtp.hpp"
+#include "bam/sap.hpp"
 #include "bam/sdp.hpp"
 #include "bam/timeline.hpp"
 #include "test_util.hpp"
@@ -2931,3 +2932,151 @@ TEST_CASE("encoder engine: disabling the AES67 output stops its packets; a stati
 #endif  // BAM_FAKE_STEREOTOOL_PATH
 
 #endif  // BAM_WITH_CODECS
+
+// ---- SAP announcements of the AES67 output, on 127.0.0.1 ----
+
+namespace {
+
+// Listens on the SAP group (loopback): every packet received so far.
+struct SapListener {
+  std::optional<bp::UdpSocket> sock;
+  std::vector<bam::SapPacket> got;
+  SapListener() {
+    std::string err;
+    sock = bp::UdpSocket::open(bam::kSapPort, &err);
+    REQUIRE_MESSAGE(sock, err);
+    REQUIRE_MESSAGE(sock->join(bam::kSapGroup, kLoopback, "", &err), err);
+  }
+  void poll() {
+    std::vector<uint8_t> buf(4096);
+    int n;
+    while ((n = sock->recv(buf, nullptr)) >= 0)
+      if (auto p = bam::parse_sap(std::span<const uint8_t>(buf.data(), size_t(n)))) got.push_back(*p);
+  }
+  // A packet (announcement or deletion) of the SDP's session name, not seen before `from`.
+  bool wait_for_packet(bool deletion, const std::string& name, size_t from, bam::SapPacket* out, int ms = 2000) {
+    return wait_for(
+        [&] {
+          poll();
+          for (size_t i = from; i < got.size(); ++i) {
+            const auto s = bam::parse_sdp(got[i].sdp);
+            if (got[i].deletion == deletion && s.stream && s.stream->session_name == name) {
+              *out = got[i];
+              return true;
+            }
+          }
+          return false;
+        },
+        ms);
+  }
+};
+
+be::EncoderEngineOptions sap_options() {
+  be::EncoderEngineOptions o = no_ptp();
+  o.aes67_require_ptp = false;
+  o.enable_sap = true;
+  return o;
+}
+
+be::EncoderConfig sap_config(const std::string& group, uint16_t port) {
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  cfg.stations = {aes67_station(group, port)};
+  return ready(cfg);
+}
+
+}  // namespace
+
+TEST_CASE("AES67 output: announced by SAP with its SDP, withdrawn when disabled and at stop") {
+  SapListener sap;
+  be::EncoderConfig cfg = sap_config("239.69.170.1", 15270);
+  be::EncoderEngine engine(sap_options());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  bam::SapPacket ann;
+  REQUIRE(sap.wait_for_packet(false, "Radio AES67", 0, &ann));
+  const auto parsed = bam::parse_sdp(ann.sdp);
+  REQUIRE(parsed.stream);
+  CHECK(parsed.stream->multicast_address == be::aes67_default_address(cfg.stations[0].processing.web_port_slot));
+  CHECK(parsed.stream->frames_per_packet == 48);
+  CHECK(parsed.stream->ptime_ms == doctest::Approx(1.0));
+  CHECK(ann.hash == bam::sap_hash(ann.sdp));
+  // disabled: a deletion with the same hash
+  size_t from = sap.got.size();
+  cfg.stations[0].aes67_output.enabled = false;
+  engine.apply_config(cfg);
+  bam::SapPacket del;
+  REQUIRE(sap.wait_for_packet(true, "Radio AES67", from, &del));
+  CHECK(del.hash == ann.hash);
+  // enabled again, then stop: announced, then withdrawn
+  from = sap.got.size();
+  cfg.stations[0].aes67_output.enabled = true;
+  engine.apply_config(cfg);
+  REQUIRE(sap.wait_for_packet(false, "Radio AES67", from, &ann));
+  from = sap.got.size();
+  engine.stop();
+  REQUIRE(sap.wait_for_packet(true, "Radio AES67", from, &del));
+  CHECK(del.hash == ann.hash);
+}
+
+TEST_CASE("AES67 output: another device announcing the same address is reported, the address stays") {
+  be::EncoderConfig cfg = sap_config("239.69.171.1", 15271);
+  be::EncoderEngine engine(sap_options());
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  const be::Aes67Status before = aes67_of(engine, "s1");
+  CHECK(before.conflict.empty());
+  // a foreign device (another origin) announces the same address
+  bam::SdpStream f;
+  f.session_name = "Obcy nadajnik";
+  f.origin_address = "127.0.0.2";
+  f.multicast_address = before.address;
+  f.ttl = 15;
+  f.port = bam::kRtpPort;
+  f.payload_type = 98;
+  f.encoding = bam::Encoding::L24;
+  f.sample_rate = 48000;
+  f.channels = 2;
+  f.frames_per_packet = 48;
+  f.ptime_ms = 1.0;
+  const std::string sdp = bam::generate_sdp(f, 0x1234, 1);
+  std::string serr;
+  auto tx = bp::UdpSocket::open(bam::kSapPort, &serr);
+  REQUIRE_MESSAGE(tx, serr);
+  tx->set_multicast_out(kLoopback, 1, true);
+  const auto pkt = bam::build_sap(false, 0x1111, {127, 0, 0, 2}, sdp);
+  REQUIRE(wait_for(
+      [&] {
+        tx->send_to(pkt, bam::kSapGroup, bam::kSapPort);
+        return aes67_of(engine, "s1").conflict.find("Obcy nadajnik") != std::string::npos;
+      },
+      2000));
+  const be::Aes67Status after = aes67_of(engine, "s1");
+  CHECK(after.address == before.address);
+  CHECK(after.state == be::Aes67State::Sending);
+  CHECK(logged("ten sam adres ogłasza"));
+  CHECK(after.conflict.find("127.0.0.2") != std::string::npos);
+}
+
+TEST_CASE("AES67 output: the SDP") {
+  be::EncoderConfig cfg = sap_config("239.69.172.1", 15272);
+  cfg.stations[0].aes67_output.ptime_us = 4000;
+  cfg.stations[0].aes67_output.address = "239.69.172.9";
+  cfg.stations[0].aes67_output.name = "Nazwa SDP";
+  cfg = ready(cfg);
+  be::EncoderEngine engine(aes67_options(no_ptp()));
+  std::string err;
+  CHECK_FALSE(engine.aes67_sdp("s1", &err));  // not running
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  const auto sdp = engine.aes67_sdp("s1", &err);
+  REQUIRE_MESSAGE(sdp, err);
+  const auto parsed = bam::parse_sdp(*sdp);
+  REQUIRE_MESSAGE(parsed.stream, parsed.error);
+  CHECK(parsed.stream->multicast_address == "239.69.172.9");
+  CHECK(parsed.stream->session_name == "Nazwa SDP");
+  CHECK(parsed.stream->channels == 2);
+  CHECK(parsed.stream->encoding == bam::Encoding::L24);
+  CHECK(parsed.stream->frames_per_packet == 192);
+  CHECK(parsed.stream->ptime_ms == doctest::Approx(4.0));
+  CHECK(sdp->find("a=ts-refclk:") != std::string::npos);
+}

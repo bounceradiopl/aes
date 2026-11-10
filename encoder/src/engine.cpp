@@ -19,6 +19,7 @@
 #include <thread>
 
 #include "aes67_output.hpp"
+#include "aes67_sap.hpp"
 #include "aes67_sender.hpp"
 #include "bam/auth.hpp"  // random_hex: the RTP SSRC of an AES67 output
 #include "bam/config.hpp"  // ptime_us_to_frames
@@ -33,6 +34,7 @@
 namespace bam::encoder {
 
 using detail::Aes67Output;
+using detail::Aes67Sap;
 using detail::Aes67Sender;
 using detail::InputRx;
 using detail::ProcessingEvent;
@@ -205,6 +207,7 @@ struct StationRuntime {
   uint32_t aes67_ptime_us = 0;  // as built
   std::string aes67_address;    // as last given to the sender
   uint32_t aes67_ssrc = random_ssrc();  // one per station runtime: edits keep the RTP identity
+  std::string aes67_conflict;  // another announcer of the address (housekeeping), else empty
 };
 
 struct EncoderEngine::Impl {
@@ -226,6 +229,7 @@ struct EncoderEngine::Impl {
   int64_t iface_checked_ns = 0;  // the automatic interface was last looked up (housekeeping)
   // AES67 outputs: one sender while any station has one
   std::unique_ptr<Aes67Sender> aes67_sender;
+  std::unique_ptr<Aes67Sap> aes67_sap;  // while any output is announced
   int64_t aes67_iface_tried_ns = 0;  // the last retry of a failed multicast interface
   bool ptp_ever_locked = false;  // since start(): the outputs may send (spec §4)
   bool ptp_holdover = false;     // locked once, not now
@@ -270,6 +274,8 @@ struct EncoderEngine::Impl {
   void update_aes67(StationRuntime& rt);
   void update_aes67_sender();
   void aes67_housekeeping();
+  void update_aes67_sap();
+  std::string build_aes67_sdp(const StationConfig& st) const;
   bool aes67_allowed() const { return ptp_ever_locked || !opts.aes67_require_ptp; }
   static uint32_t aes67_base(const StationRuntime& rt);  // the delay without the worker's own
   static uint32_t aes67_delay(const StationRuntime& rt);
@@ -681,6 +687,7 @@ void EncoderEngine::Impl::aes67_housekeeping() {
       if (aes67_sender->error().empty()) log_info("Wyjście AES67: nadawanie przez kartę " + iface + " działa");
     }
   }
+  update_aes67_sap();
   const bool holdover = ptp_ever_locked && !locked;
   if (holdover != ptp_holdover) {
     ptp_holdover = holdover;
@@ -690,6 +697,53 @@ void EncoderEngine::Impl::aes67_housekeeping() {
       else
         log_info("Wyjście AES67: zegar PTP znów podąża za masterem");
     }
+  }
+}
+
+std::string EncoderEngine::Impl::build_aes67_sdp(const StationConfig& st) const {
+  const Aes67OutputConfig& o = st.aes67_output;
+  SdpStream s;
+  s.session_name = aes67_name(st);
+  s.origin_address = iface.empty() ? "0.0.0.0" : iface;
+  s.multicast_address = aes67_address(st);
+  s.ttl = kMulticastTtl;
+  s.port = kRtpPort;
+  s.payload_type = 98;
+  s.encoding = Encoding::L24;
+  s.sample_rate = 48000;
+  s.channels = 2;
+  s.frames_per_packet = ptime_us_to_frames(o.ptime_us);
+  s.ptime_ms = s.frames_per_packet * 1000.0 / 48000;
+  const PtpStatus ps = ptp ? ptp->status() : PtpStatus{};
+  if (ps.has_master) {
+    s.ptp_gmid = ps.grandmaster.to_string();
+    s.ptp_domain = ps.domain;
+  } else {
+    s.ptp_domain = config.ptp_domain;
+  }
+  // "BEN\0" + slot; the version only changes with this output's own stream
+  const uint16_t version =
+      sap_hash(s.session_name + "|" + s.multicast_address + "|" + std::to_string(o.ptime_us) + "|" + s.ptp_gmid + "|" + s.origin_address);
+  return generate_sdp(s, 0x42454E00u + static_cast<uint64_t>(st.processing.web_port_slot), version);
+}
+
+// Announced: the outputs that are switched on and allowed to send (not waiting for PTP, no
+// socket error). The SAP thread exists only while there is one; also notes address conflicts.
+void EncoderEngine::Impl::update_aes67_sap() {
+  std::map<std::string, std::string> sdps;
+  if (opts.enable_sap && aes67_sender && aes67_sender->error().empty() && aes67_allowed() && !iface.empty())
+    for (const auto& [id, rt] : stations)
+      if (rt->aes67) sdps[id] = build_aes67_sdp(rt->cfg);
+  if (sdps.empty()) aes67_sap.reset();
+  else {
+    if (!aes67_sap) aes67_sap = std::make_unique<Aes67Sap>();
+    aes67_sap->set_announcements(iface, std::move(sdps));
+  }
+  for (const auto& [id, rt] : stations) {
+    const std::string c = aes67_sap && rt->aes67 ? aes67_sap->conflict(rt->aes67_address, iface) : std::string();
+    if (c != rt->aes67_conflict && !c.empty())
+      log_warning("Wyjście AES67 stacji „" + rt->cfg.name + "”: ten sam adres ogłasza " + c);
+    rt->aes67_conflict = c;
   }
 }
 
@@ -801,6 +855,7 @@ void EncoderEngine::Impl::apply(const EncoderConfig& next) {
   update_aes67_sender();
   update_rx_set();
   config = next;
+  update_aes67_sap();
   // after the new plans: a station may still push into an old worker until its next tick (a copy
   // into a queue nobody reads); the worker itself goes once the station let go of the plan
   stop_workers(std::move(finished));
@@ -914,6 +969,7 @@ void EncoderEngine::Impl::processing_housekeeping(StationRuntime& rt, int64_t no
 }
 
 void EncoderEngine::Impl::shutdown() {
+  aes67_sap.reset();  // withdraws the announcements
   aes67_sender.reset();  // before the stations: nothing is sent from a station being torn down
   std::vector<std::shared_ptr<StreamWorker>> workers;
   std::vector<std::shared_ptr<ProcessingWorker>> processing;
@@ -1029,9 +1085,13 @@ void EncoderEngine::apply_config(const EncoderConfig& config) {
 }
 
 std::optional<std::string> EncoderEngine::aes67_sdp(const std::string& station_id, std::string* error) const {
-  (void)station_id;  // the SDP comes with the SAP announcement of the output
-  if (error) *error = "wyjście AES67 stacji jest wyłączone";
-  return std::nullopt;
+  std::lock_guard lock(impl_->m);
+  auto it = impl_->stations.find(station_id);
+  if (it == impl_->stations.end() || !it->second->aes67) {
+    if (error) *error = "wyjście AES67 stacji jest wyłączone";
+    return std::nullopt;
+  }
+  return impl_->build_aes67_sdp(it->second->cfg);
 }
 
 EncoderConfig EncoderEngine::config() const {
@@ -1127,6 +1187,7 @@ Aes67Status EncoderEngine::Impl::aes67_status(const StationConfig& sc, const Sta
   a.name = aes67_name(sc);
   a.ptime_us = sc.aes67_output.ptime_us;
   if (!rt || !rt->aes67) return a;  // Off
+  a.conflict = rt->aes67_conflict;
   const detail::Aes67Stats stats = rt->aes67->stats();
   a.packets = stats.packets;
   a.gaps = stats.gaps;
