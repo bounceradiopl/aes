@@ -176,6 +176,30 @@ TEST_CASE("aes67 output: content missing before the first content is the start, 
   CHECK(out.stats().gaps > 0);
 }
 
+TEST_CASE("aes67 output: a hole between the old path and the new one after a shorter delay is no gap") {
+  // switching processing off: the worker's output ends at 14800, the station's own path starts
+  // later, at 15500
+  bd::Aes67Output out(1000, 1);
+  out.set_delay(3000);
+  feed(out, 0, 14800);
+  run(out, 3000, 15000);
+  out.set_delay(1000);
+  run(out, 15012, 16600);  // fades out, maps with the shorter delay, reaches the hole
+  feed(out, 15500, 40000);
+  const auto pkts = run(out, 16612, 30000);
+  CHECK(out.stats().gaps == 0);
+  const auto& last = pkts.back();
+  CHECK(carries(last, 0, last.timestamp - 1000));
+  // the same hole in the middle of the content, with no delay change in progress, is a gap
+  bd::Aes67Output plain(1000, 1);
+  plain.set_delay(1000);
+  feed(plain, 0, 14800);
+  run(plain, 1000, 15000);
+  feed(plain, 15500, 40000);
+  run(plain, 15012, 30000);
+  CHECK(plain.stats().gaps > 0);
+}
+
 TEST_CASE("aes67 output: after a clock step back a delay change holds only the difference") {
   bd::Aes67Output out(1000, 1);
   out.set_delay(1000);

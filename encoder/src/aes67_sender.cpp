@@ -12,7 +12,12 @@ namespace {
 constexpr int64_t kPeriodNs = 250'000;
 constexpr int kSendAttempts = 4;  // the first and 3 retries
 constexpr int64_t kRetryNs = 20'000;
+std::atomic<int> g_fail_interfaces{0};
 }  // namespace
+
+namespace testing {
+void fail_next_aes67_interfaces(int n) { g_fail_interfaces.store(n); }
+}  // namespace testing
 
 Aes67Sender::Aes67Sender(const ClockSource& clock) : clock_(clock) {
   std::string err;
@@ -51,7 +56,10 @@ void Aes67Sender::set_interface(const std::string& iface_ip) {
     error_ = "nie znaleziono aktywnej karty sieciowej IPv4";
     return;
   }
-  if (!socket_->set_multicast_out(iface_ip, kMulticastTtl, true)) {
+  bool failed = false;
+  for (int n = g_fail_interfaces.load(); n > 0 && !failed;)
+    failed = g_fail_interfaces.compare_exchange_weak(n, n - 1);
+  if (failed || !socket_->set_multicast_out(iface_ip, kMulticastTtl, true)) {
     error_ = "nie można nadawać multicastu przez kartę " + iface_ip;
     return;
   }

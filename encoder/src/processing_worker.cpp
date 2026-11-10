@@ -448,7 +448,7 @@ void ProcessingWorker::set_streams(std::vector<std::shared_ptr<StreamWorker>> st
   // `dead` and `unused` are released here, on the caller's thread
 }
 
-void ProcessingWorker::set_aes67(std::shared_ptr<Aes67Output> out) {
+void ProcessingWorker::set_aes67(std::shared_ptr<Aes67Output> out, uint32_t base_frames) {
   std::shared_ptr<Aes67Output> unused;
   std::vector<std::shared_ptr<const void>> dead;
   dead.reserve(kGraveyardSlots);
@@ -456,6 +456,7 @@ void ProcessingWorker::set_aes67(std::shared_ptr<Aes67Output> out) {
     std::lock_guard lock(streams_m_);
     unused = std::move(pending_aes67_);  // one the output thread never took
     pending_aes67_ = std::move(out);
+    pending_aes67_base_ = base_frames;
     aes67_pending_ = true;
     graveyard_.swap(dead);
     has_pending_outputs_.store(true, std::memory_order_release);
@@ -680,7 +681,13 @@ void ProcessingWorker::take_outputs() {
     aes67_pending_ = false;
     if (aes67_ && graveyard_.size() < graveyard_.capacity()) graveyard_.push_back(std::move(aes67_));
     aes67_ = std::move(pending_aes67_);
+    aes67_base_ = pending_aes67_base_;
+    sync_aes67_delay();
   }
+}
+
+void ProcessingWorker::sync_aes67_delay() {
+  if (aes67_ && aes67_base_ != kNoAes67Base) aes67_->set_delay(aes67_base_ + delay_.load(std::memory_order_relaxed));
 }
 
 bool ProcessingWorker::falling_behind(int64_t now) {
@@ -783,8 +790,10 @@ bool ProcessingWorker::take_result(bool wait) {
       session_latency_ = latency;
       session_start_ = written_;
       proc_end_ = written_;
-      if (latency + kRampFrames > delay_.load(std::memory_order_relaxed))
+      if (latency + kRampFrames > delay_.load(std::memory_order_relaxed)) {
         delay_.store(latency + kRampFrames, std::memory_order_relaxed);
+        sync_aes67_delay();  // before the first block emitted under it
+      }
       mode_ = Mode::Probation;
       licence_ok_ = false;
       set_state(ProcessingState::Bypass, Reason::LicenceCheck);

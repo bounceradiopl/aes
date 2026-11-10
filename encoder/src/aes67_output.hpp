@@ -71,6 +71,11 @@ class Aes67Output {
   uint32_t level_ = 0;      // gain = level_ / kRampFrames
   uint64_t sent_end_ = 0;   // highest source position copied + 1
   uint64_t gap_chunk_ = UINT64_MAX;  // TX chunk (t / fpp_) last counted as a gap
+  // a delay change in progress: a hole in the content (the old path ends, the new one starts later)
+  // is not a gap, until content is there again (or settle_end_)
+  bool settling_ = false;
+  bool settle_missing_ = false;
+  uint64_t settle_end_ = 0;
   bool content_seen_ = false;  // content was there since the last fresh alignment: holes count as gaps
 };
 

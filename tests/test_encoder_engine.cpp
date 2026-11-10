@@ -51,6 +51,7 @@
 #include "bam/sdp.hpp"
 #include "bam/timeline.hpp"
 #include "test_util.hpp"
+#include "../encoder/src/aes67_sender.hpp"     // the failing-interface seam
 #include "../encoder/src/engine_internal.hpp"  // AudioQueue (the station -> stream handover)
 #include "../encoder/src/stereotool_api.hpp"   // the web interface parameter index
 #include "bam/log.hpp"
@@ -2639,25 +2640,73 @@ TEST_CASE("encoder engine: switching processing on and off never repeats audio o
   cfg.stations = {st};
   cfg = ready(cfg);
   be::EncoderEngine engine(aes67_options(st_options(dir)));
-  REQUIRE(engine.put_preset("Unity.sts", fake_preset(1.0, 64)).ok());
+  // a latency longer than what the worker has written ahead of the sending (as the real ~90 ms)
+  REQUIRE(engine.put_preset("Unity.sts", fake_preset(1.0, 2048)).ok());
   std::string err;
   REQUIRE_MESSAGE(engine.start(cfg, &err), err);
   AesSender in(engine, group, kInPort, sig_a);
   REQUIRE(wait_for([&] { return aes67_of(engine, "s1").state == be::Aes67State::Sending; }, 5000));
   AesReceiver out(engine, aes67_of(engine, "s1").address);
   REQUIRE(wait_for([&] { return out.packets() > 500; }, 10000));
+  const uint64_t gaps_before = aes67_of(engine, "s1").gaps;
 
   out.start_recording(media_now(engine));
+  // like the real library, Stereo Tool is ready only after the worker started unprocessed: its
+  // delay then grows while it runs
+  fake().set("create_sleep_us", 300000);
   cfg.stations[0].processing.enabled = true;
   engine.apply_config(ready(cfg));
   REQUIRE(processing_running(engine, "s1"));
+  const uint64_t pd = uint64_t(std::lround(processing_of(engine, "s1").latency_ms * 48.0));
   wait_media(engine, 48000);
+  const uint64_t off = media_now(engine);
+  const uint64_t gaps_on = aes67_of(engine, "s1").gaps;
   cfg.stations[0].processing.enabled = false;
   engine.apply_config(ready(cfg));
   wait_media(engine, 3 * 48000 + 4800);
   uint64_t from = 0;
   const auto rec = out.stop_recording(&from);
   REQUIRE(rec.size() > 3 * 48000);
+  REQUIRE(off > from);
+  REQUIRE(off - from < rec.size());
+
+  // both switches re-map the output with a fade: no gap, and the output pauses only about as
+  // long as the delay changes (the processing delay, plus the ramps and a station tick)
+  MESSAGE("gaps after on: " << gaps_on - gaps_before);
+  CHECK(aes67_of(engine, "s1").gaps == gaps_before);
+  struct Silence {
+    size_t at = 0, len = 0;
+  };
+  auto longest_silence = [&](size_t a, size_t b) {
+    Silence longest, run;
+    for (size_t i = a; i < b; ++i) {
+      if (rec[i][0] != 0 || rec[i][1] != 0) {
+        run = Silence{};
+        continue;
+      }
+      if (run.len++ == 0) run.at = i;
+      if (run.len > longest.len) longest = run;
+    }
+    return longest;
+  };
+  auto loudest = [&](size_t a, size_t b) {
+    int64_t m = 0;
+    for (size_t i = a; i < b; ++i) m = std::max({m, std::llabs(rec[i][0]), std::llabs(rec[i][1])});
+    return m;
+  };
+  const Silence on = longest_silence(0, size_t(off - from));
+  const Silence quiet = longest_silence(size_t(off - from), rec.size());
+  MESSAGE("longest silence: switch on " << on.len << ", switch off " << quiet.len << " frames (processing delay " << pd << ")");
+  CHECK(on.len <= pd + 720);
+  CHECK(quiet.len <= pd + 720);
+  // no hard cut: the 24 frames on either side of each pause are within a 5 ms ramp of the ±0.5 FS signal
+  constexpr int64_t kRampEdge = (int64_t(1) << 30) * 24 / 240;
+  for (const Silence& z : {on, quiet}) {
+    REQUIRE(z.at >= 24);
+    REQUIRE(z.at + z.len + 24 <= rec.size());
+    CHECK(loudest(z.at - 24, z.at) <= kRampEdge);
+    CHECK(loudest(z.at + z.len, z.at + z.len + 24) <= kRampEdge);
+  }
 
   // source positions by their (left, right) pair over the range the output can carry
   constexpr uint64_t kAmbiguous = UINT64_MAX;
@@ -2813,6 +2862,37 @@ TEST_CASE("encoder engine: a stalled Stereo Tool gives silence on the AES67 outp
   CHECK(out.packets() > received);
   CHECK(processing_of(engine, "s1").state == be::ProcessingState::Bypass);
   fake().set("process_sleep_us", 0);
+}
+
+TEST_CASE("encoder engine: an AES67 multicast interface that failed is tried again") {
+  // like a card that is not up yet when the service starts (an explicit interface_ip at boot)
+  struct Seams {
+    Seams() {
+      be::detail::testing::fail_next_aes67_interfaces(1);
+      be::detail::testing::set_input_retry_ms(300);
+    }
+    ~Seams() {
+      be::detail::testing::fail_next_aes67_interfaces(0);
+      be::detail::testing::set_input_retry_ms(0);
+    }
+  } seams;
+  be::EncoderConfig cfg = be::default_encoder_config();
+  cfg.interface_ip = kLoopback;
+  be::StationConfig st = station("s1", "Radio Późna Karta");
+  st.aes67_output.enabled = true;
+  cfg.stations = {st};
+  cfg = ready(cfg);
+  be::EncoderEngine engine(aes67_options(no_ptp()));
+  std::string err;
+  REQUIRE_MESSAGE(engine.start(cfg, &err), err);
+  const be::Aes67Status failed = aes67_of(engine, "s1");
+  CHECK(failed.state == be::Aes67State::Error);
+  CHECK(failed.reason == "nie można nadawać multicastu przez kartę 127.0.0.1");
+  AesReceiver out(engine, failed.address);
+  REQUIRE(wait_for([&] { return aes67_of(engine, "s1").state == be::Aes67State::Sending; }, 3000));
+  CHECK(aes67_of(engine, "s1").reason.empty());
+  CHECK(wait_for([&] { return out.packets() > 100; }, 5000));
+  CHECK(log_lines_with("Wyjście AES67: nadawanie przez kartę 127.0.0.1 działa") == 1);
 }
 
 TEST_CASE("encoder engine: disabling the AES67 output stops its packets; a station without one sends none") {

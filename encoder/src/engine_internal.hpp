@@ -371,7 +371,11 @@ class ProcessingWorker {
   // Any thread: the station's AES67 output (null: none), taken like the streams. This worker is
   // its one writer from then until it faded out (or stopped): a switch away from the worker goes
   // through fade_out()/faded_out() before the station writes the output itself.
-  void set_aes67(std::shared_ptr<Aes67Output> out);
+  // `base_frames` (kNoAes67Base: the caller sets the output's delay) is what the output's delay is
+  // above this worker's own delay_frames(): the output thread sets base + delay_frames() itself,
+  // when it takes the output and at every growth of the delay, before it emits under the new one.
+  static constexpr uint32_t kNoAes67Base = UINT32_MAX;
+  void set_aes67(std::shared_ptr<Aes67Output> out, uint32_t base_frames = kNoAes67Base);
   // Any thread: leaves the bypass and tries again (a failed or missing instance is built anew,
   // a working one is kept with its settings). After a crash nothing is created until the
   // service restarts; while Stereo Tool is stuck in a call, the restart waits for it to return.
@@ -425,6 +429,7 @@ class ProcessingWorker {
   enum class Pending { None, Setup, Job };
   void run();
   void take_outputs();
+  void sync_aes67_delay();  // output thread: the AES67 output's delay = base + delay_frames()
   void begin_restart();
   void resume_session();
   bool preset_pending() const;
@@ -481,6 +486,8 @@ class ProcessingWorker {
   uint64_t failure_id_ = 0;    // the failure text of the last failed Stereo Tool command (Core)
 
   std::atomic<uint32_t> delay_{0};
+  uint32_t pending_aes67_base_ = kNoAes67Base;  // under streams_m_
+  uint32_t aes67_base_ = kNoAes67Base;          // the output thread's
   // state << 56 | reason << 48 | failure id: read together; the failure id names the text the
   // state was set with (Core keeps the last few), so a later failure does not change it
   std::atomic<uint64_t> status_{0};

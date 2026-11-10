@@ -18,6 +18,10 @@
 
 namespace bam::encoder::detail {
 
+namespace testing {
+void fail_next_aes67_interfaces(int n);  // the next n set_interface() calls fail (0 = off)
+}  // namespace testing
+
 class Aes67Sender {
  public:
   using Outputs = std::vector<std::pair<std::string, std::shared_ptr<Aes67Output>>>;  // multicast address, output

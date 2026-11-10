@@ -226,6 +226,7 @@ struct EncoderEngine::Impl {
   int64_t iface_checked_ns = 0;  // the automatic interface was last looked up (housekeeping)
   // AES67 outputs: one sender while any station has one
   std::unique_ptr<Aes67Sender> aes67_sender;
+  int64_t aes67_iface_tried_ns = 0;  // the last retry of a failed multicast interface
   bool ptp_ever_locked = false;  // since start(): the outputs may send (spec §4)
   bool ptp_holdover = false;     // locked once, not now
 
@@ -270,6 +271,7 @@ struct EncoderEngine::Impl {
   void update_aes67_sender();
   void aes67_housekeeping();
   bool aes67_allowed() const { return ptp_ever_locked || !opts.aes67_require_ptp; }
+  static uint32_t aes67_base(const StationRuntime& rt);  // the delay without the worker's own
   static uint32_t aes67_delay(const StationRuntime& rt);
   Aes67Status aes67_status(const StationConfig& sc, const StationRuntime* rt) const;
   void update_rx_set();
@@ -582,19 +584,19 @@ void EncoderEngine::Impl::publish(StationRuntime& rt) {
     latency = std::max(latency, e->rx->latency_frames);
   }
   plan->latency_frames = latency ? latency : kDefaultLatencyFrames;
+  rt.latency_frames = plan->latency_frames;
   std::vector<std::shared_ptr<StreamWorker>> streams = active_streams(rt);
   if (rt.proc.worker) {
     // the worker feeds the streams and the AES67 output (taken at its next block, before the
     // station's first push); a worker that went has faded out before this (update_processing)
     rt.proc.worker->set_streams(std::move(streams));
-    rt.proc.worker->set_aes67(rt.aes67);
+    rt.proc.worker->set_aes67(rt.aes67, aes67_base(rt));
     plan->processing = rt.proc.worker;
   } else {
     plan->streams = std::move(streams);
     plan->aes67 = rt.aes67;
   }
   plan->fade_in = rt.fade_in;
-  rt.latency_frames = plan->latency_frames;
   if (rt.aes67) rt.aes67->set_delay(aes67_delay(rt));
   if (rt.station) {
     rt.station->publish(std::move(plan));
@@ -604,8 +606,12 @@ void EncoderEngine::Impl::publish(StationRuntime& rt) {
   }
 }
 
+uint32_t EncoderEngine::Impl::aes67_base(const StationRuntime& rt) {
+  return rt.latency_frames + kAes67TickFrames + kAes67MarginFrames;
+}
+
 uint32_t EncoderEngine::Impl::aes67_delay(const StationRuntime& rt) {
-  return rt.latency_frames + kAes67TickFrames + (rt.proc.worker ? rt.proc.worker->delay_frames() : 0) + kAes67MarginFrames;
+  return aes67_base(rt) + (rt.proc.worker ? rt.proc.worker->delay_frames() : 0);
 }
 
 // The station's AES67 output from rt.cfg: built when switched on, rebuilt for another packet time,
@@ -647,6 +653,7 @@ void EncoderEngine::Impl::update_aes67_sender() {
   if (!aes67_sender) {
     aes67_sender = std::make_unique<Aes67Sender>(clock);
     aes67_sender->set_interface(iface);
+    aes67_iface_tried_ns = platform::monotonic_ns();
     if (const std::string err = aes67_sender->error(); !err.empty()) log_warning("Wyjście AES67: " + err);
     if (!aes67_allowed())
       log_info(opts.enable_ptp ? "Wyjście AES67: czeka na zegar PTP (nie nadaje przed pierwszą synchronizacją)"
@@ -665,6 +672,15 @@ void EncoderEngine::Impl::aes67_housekeeping() {
     if (aes67_sender && opts.aes67_require_ptp) log_info("Wyjście AES67: zegar PTP zsynchronizowany, wyjścia nadają");
   }
   if (aes67_sender) aes67_sender->set_allowed(aes67_allowed());
+  // a card that was not up yet at start: tried again like the inputs
+  if (aes67_sender && !aes67_sender->error().empty() && !iface.empty()) {
+    const int64_t now = platform::monotonic_ns();
+    if (now - aes67_iface_tried_ns >= detail::input_retry_ns()) {
+      aes67_iface_tried_ns = now;
+      aes67_sender->set_interface(iface);
+      if (aes67_sender->error().empty()) log_info("Wyjście AES67: nadawanie przez kartę " + iface + " działa");
+    }
+  }
   const bool holdover = ptp_ever_locked && !locked;
   if (holdover != ptp_holdover) {
     ptp_holdover = holdover;
@@ -714,6 +730,7 @@ void EncoderEngine::Impl::apply(const EncoderConfig& next) {
   if (next_iface != iface) log_info("Bounce Encoder: karta sieciowa " + (next_iface.empty() ? std::string("(brak)") : next_iface));
   if (next_iface != iface && aes67_sender) {
     aes67_sender->set_interface(next_iface);
+    aes67_iface_tried_ns = platform::monotonic_ns();
     if (const std::string err = aes67_sender->error(); !err.empty()) log_warning("Wyjście AES67: " + err);
   }
   iface = next_iface;

@@ -73,6 +73,7 @@ void Aes67Output::align(uint64_t now, bool fresh) {
   out_ = now;
   cur_delay_ = delay_.load(std::memory_order_relaxed);
   level_ = 0;
+  settling_ = settle_missing_ = false;
   if (fresh) {  // a new timeline: nothing on it was sent yet
     gate_ = Gate::FadeIn;
     sent_end_ = now >= cur_delay_ ? now - cur_delay_ : 0;
@@ -102,7 +103,14 @@ void Aes67Output::copy(uint64_t t, size_t n) {
   const uint64_t p = t - cur_delay_;
   // before the first content on this timeline the output is starting (or re-aligned): no gap
   const bool missing = content_missing(p, n);
-  if (missing && content_seen_ && t / fpp_ != gap_chunk_) {
+  if (settling_) {
+    if (missing)
+      settle_missing_ = true;
+    else if (settle_missing_ || t >= settle_end_)
+      settling_ = settle_missing_ = false;
+    if (t >= settle_end_) settling_ = settle_missing_ = false;
+  }
+  if (missing && content_seen_ && !settling_ && t / fpp_ != gap_chunk_) {
     gap_chunk_ = t / fpp_;
     gaps_.fetch_add(1, std::memory_order_relaxed);
   }
@@ -137,6 +145,11 @@ void Aes67Output::pump(uint64_t now, uint64_t generation, const PacketSink& send
   while (out_ < end) {
     const uint32_t want = delay_.load(std::memory_order_relaxed);
     if (want != cur_delay_) {
+      if (!settling_) {
+        settling_ = true;
+        settle_missing_ = false;
+        settle_end_ = out_ + 5 * kStationRate;
+      }
       if (!started_ || gate_ == Gate::Hold) {
         cur_delay_ = want;
       } else if (gate_ != Gate::FadeOut) {
