@@ -103,6 +103,8 @@ json station_json(const std::string& name, bool enabled, const std::string& pass
 be::EncoderEngineOptions http_engine_options(const std::string& stereotool_dir, const std::string& crash_marker = "") {
   be::EncoderEngineOptions o;
   o.enable_ptp = false;
+  o.aes67_require_ptp = false;  // tests send at once, on loopback only
+  o.enable_sap = false;
   o.stereotool_dir = stereotool_dir;  // empty: no presets folder
   o.crash_marker_path = crash_marker;  // empty: no crash-loop guard
   return o;
@@ -2378,3 +2380,74 @@ TEST_CASE("encoder HTTP: a login with a 100 KB password is answered within a sec
 }
 
 #endif  // BAM_WITH_CODECS
+
+TEST_CASE("encoder HTTP: AES67 output in the station API, the status and the SDP download") {
+  Fixture f;
+  f.setup_and_login();
+  httplib::Client anon(kLoopback, f.server->port());
+
+  json st = station_json("Radio Źródło", true, "zrodlo123");
+  st["aes67_output"] = {{"enabled", false}, {"name", "Wyjście"}, {"address", "239.69.110.9"}, {"ptime_us", 4000}};
+  auto r = f.post("/api/stations", st);
+  REQUIRE_MESSAGE(r->status == 200, r->body);
+  const std::string id = json::parse(r->body)["id"];
+
+  SUBCASE("a PUT without aes67_output keeps the stored one, with it replaces it") {
+    json body = station_json("Radio Źródło 2", true, "zrodlo123");
+    r = f.put("/api/stations/" + id, body);
+    REQUIRE_MESSAGE(r->status == 200, r->body);
+    json a = f.file()["stations"][0]["aes67_output"];
+    CHECK(a["name"] == "Wyjście");
+    CHECK(a["address"] == "239.69.110.9");
+    CHECK(a["ptime_us"] == 4000);
+    CHECK(a["enabled"] == false);
+
+    body["aes67_output"] = {{"enabled", false}, {"name", "Inne"}, {"address", "239.69.110.10"}, {"ptime_us", 1333}};
+    r = f.put("/api/stations/" + id, body);
+    REQUIRE_MESSAGE(r->status == 200, r->body);
+    a = f.file()["stations"][0]["aes67_output"];
+    CHECK(a["name"] == "Inne");
+    CHECK(a["address"] == "239.69.110.10");
+    CHECK(a["ptime_us"] == 1333);
+  }
+
+  SUBCASE("output off: status says off, the SDP is refused") {
+    json s;
+    REQUIRE(wait_for([&] { s = f.get("/api/status"); return s["stations"].size() == 1 && s["stations"][0]["running"] == true; }, 10000));
+    CHECK(s["stations"][0]["aes67"]["state"] == "off");
+
+    CHECK(anon.Get(("/api/stations/" + id + "/aes67.sdp").c_str())->status == 401);
+    CHECK(f.client->Get("/api/stations/nope/aes67.sdp", f.auth)->status == 404);
+    auto sdp = f.client->Get("/api/stations/" + id + "/aes67.sdp", f.auth);
+    REQUIRE(sdp);
+    CHECK(sdp->status == 409);
+    const json e = json::parse(sdp->body);
+    CHECK(e["code"] == "not_running");
+    CHECK(!e["error"].get<std::string>().empty());
+  }
+
+  SUBCASE("output on: full status object and the SDP file") {
+    st["aes67_output"]["enabled"] = true;
+    r = f.put("/api/stations/" + id, st);
+    REQUIRE_MESSAGE(r->status == 200, r->body);
+    json a;
+    REQUIRE(wait_for(
+        [&] {
+          a = f.get("/api/status")["stations"][0]["aes67"];
+          return a["state"] == "sending";
+        },
+        10000));
+    for (const char* k : {"state", "reason", "address", "name", "ptime_us", "output_latency_ms", "packets", "gaps", "send_errors", "conflict"})
+      CHECK_MESSAGE(a.contains(k), k);
+    CHECK(a["address"] == "239.69.110.9");
+    CHECK(a["name"] == "Wyjście");
+    CHECK(a["ptime_us"] == 4000);
+
+    auto sdp = f.client->Get("/api/stations/" + id + "/aes67.sdp", f.auth);
+    REQUIRE(sdp);
+    CHECK_MESSAGE(sdp->status == 200, sdp->body);
+    CHECK(sdp->get_header_value("Content-Type").rfind("application/sdp", 0) == 0);
+    CHECK(sdp->get_header_value("Content-Disposition") == "attachment; filename=\"Radio Zrodlo.sdp\"");
+    CHECK(sdp->body.rfind("v=0", 0) == 0);
+  }
+}

@@ -281,7 +281,17 @@ json status_json(const EncoderStatus& s) {
                         {"skipped_frames", st.skipped_frames},
                         {"inputs", std::move(inputs)},
                         {"streams", std::move(streams)},
-                        {"processing", processing_json(st.processing)}});
+                        {"processing", processing_json(st.processing)},
+                        {"aes67", {{"state", aes67_state_name(st.aes67.state)},
+                                   {"reason", st.aes67.reason},
+                                   {"address", st.aes67.address},
+                                   {"name", st.aes67.name},
+                                   {"ptime_us", st.aes67.ptime_us},
+                                   {"output_latency_ms", round1(st.aes67.output_latency_ms)},
+                                   {"packets", st.aes67.packets},
+                                   {"gaps", st.aes67.gaps},
+                                   {"send_errors", st.aes67.send_errors},
+                                   {"conflict", st.aes67.conflict}}}});
   }
   return {{"product", kEncoderProductName},
           {"version", kEncoderVersion},
@@ -479,8 +489,11 @@ std::string station_name(const StationConfig& st, size_t i) {
 // A station update without "processing" keeps the stored block; a partial one changes only the
 // keys it has (e.g. {"enabled": false} keeps the preset, the slot and the key). `stored` is the
 // station's object of the API form.
-void keep_processing(json& station, const json& stored) {
-  if (!stored.is_object() || !stored.contains("processing")) return;
+void keep_station_parts(json& station, const json& stored) {
+  if (!stored.is_object()) return;
+  // "aes67_output" is replaced as a whole when sent (config_from_json fills what it lacks)
+  if (stored.contains("aes67_output") && !station.contains("aes67_output")) station["aes67_output"] = stored["aes67_output"];
+  if (!stored.contains("processing")) return;
   if (!station.contains("processing")) {
     station["processing"] = stored["processing"];
     return;
@@ -490,6 +503,30 @@ void keep_processing(json& station, const json& stored) {
   json merged = stored["processing"];
   for (const auto& [key, value] : p.items()) merged[key] = value;
   p = std::move(merged);
+}
+
+// A file name for a Content-Disposition header: Polish letters folded to ASCII, anything else
+// outside printable ASCII (and quotes, slashes) becomes "_".
+std::string ascii_file_name(const std::string& name) {
+  static const std::pair<const char*, char> kFold[] = {{"ą", 'a'}, {"ć", 'c'}, {"ę", 'e'}, {"ł", 'l'}, {"ń", 'n'}, {"ó", 'o'}, {"ś", 's'}, {"ź", 'z'}, {"ż", 'z'},
+                                                       {"Ą", 'A'}, {"Ć", 'C'}, {"Ę", 'E'}, {"Ł", 'L'}, {"Ń", 'N'}, {"Ó", 'O'}, {"Ś", 'S'}, {"Ź", 'Z'}, {"Ż", 'Z'}};
+  std::string out;
+  for (size_t i = 0; i < name.size();) {
+    const unsigned char c = static_cast<unsigned char>(name[i]);
+    if (c >= 0x80) {
+      char folded = '_';
+      size_t len = 1;
+      while (i + len < name.size() && (static_cast<unsigned char>(name[i + len]) & 0xC0) == 0x80) ++len;
+      for (const auto& [from, to] : kFold)
+        if (name.compare(i, len, from) == 0) folded = to;
+      out += folded;
+      i += len;
+      continue;
+    }
+    out += (c < 0x20 || c == 0x7F || c == '"' || c == '\\' || c == '/' || c == ':') ? '_' : static_cast<char>(c);
+    ++i;
+  }
+  return out;
 }
 
 std::string station_path(size_t i) { return "stations[" + std::to_string(i) + "]"; }
@@ -839,7 +876,7 @@ struct EncoderHttpServer::Impl {
           for (json& st : doc["stations"]) {
             if (!st.is_object() || text(st, "id").empty()) continue;
             for (const json& old : stored)
-              if (text(old, "id") == text(st, "id")) keep_processing(st, old);
+              if (text(old, "id") == text(st, "id")) keep_station_parts(st, old);
           }
         return true;
       });
@@ -875,7 +912,7 @@ struct EncoderHttpServer::Impl {
               send_error(res, 404, "brak stacji „" + id + "”");
               return false;
             }
-            keep_processing(*body, doc["stations"][*i]);
+            keep_station_parts(*body, doc["stations"][*i]);
             doc["stations"][*i] = *body;
             return true;
           },
@@ -1024,6 +1061,22 @@ struct EncoderHttpServer::Impl {
       const auto password = engine.processing_web_password(id, &port, &err);
       if (!password) return send_refusal(res, 409, "not_running", err);
       send_json(res, {{"user", "Admin"}, {"password", *password}, {"web_port", port}});
+    });
+
+    // The SDP of the station's AES67 output, as a file to hand to a receiver.
+    get(R"(/api/stations/([A-Za-z0-9_-]+)/aes67\.sdp)", kSession, [this](const httplib::Request& req, httplib::Response& res) {
+      const std::string id = req.matches[1];
+      if (!has_station(id)) return send_refusal(res, 404, "no_station", "brak stacji „" + id + "”");
+      std::string err;
+      const auto sdp = engine.aes67_sdp(id, &err);
+      if (!sdp) return send_refusal(res, 409, "not_running", err);
+      std::string name;
+      for (const StationConfig& st : engine.config().stations)
+        if (st.id == id) name = ascii_file_name(st.name);
+      if (name.find_first_not_of(" _.") == std::string::npos) name = id;
+      res.set_header("Content-Disposition", "attachment; filename=\"" + name + ".sdp\"");
+      res.set_header("Cache-Control", "no-store");
+      res.set_content(*sdp, "application/sdp");
     });
 
     get("/api/logs", kSession, [](const httplib::Request&, httplib::Response& res) {
