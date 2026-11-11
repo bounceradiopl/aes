@@ -384,7 +384,7 @@ Na liście stacji stacja z włączonym wyjściem ma znaczek **AES67** z kropką:
 - **BounceAES Master** na tym samym komputerze albo w sieci: **Dodaj źródło…** otwiera okno „Dodaj źródło”, które pokazuje ogłoszenia SAP; przycisk **Dodaj** przy strumieniu stacji tworzy subskrypcję (albo **Wklej SDP…**). **Axia** i **Orban**: dodaj strumień z SDP (albo z ogłoszenia SAP, jeśli urządzenie je pokazuje) i ustaw u odbiorcy opóźnienie linku (niżej).
 
 ### Opóźnienie wyjścia i opóźnienie linku odbiornika
-Wyjście niesie dźwięk ze stałym opóźnieniem względem miksu stacji: opóźnienie odbioru stacji + 10 ms (takt stacji) + opóźnienie Stereo Tool (około 90 ms, tylko gdy stacja ma processing) + 10 ms zapasu. Dochodzi do tego opóźnienie wejścia stacji (pole **Opóźnienie**). Pole **Opóźnienie wyjścia** pokazuje całość w ms, np. około 25 ms bez processingu przy opóźnieniu odbioru 5 ms i około 115 ms z processingiem. Wartość jest stała, dopóki nie zmienisz opóźnienia odbioru albo nie włączysz lub wyłączysz processingu.
+Wyjście niesie dźwięk ze stałym opóźnieniem względem miksu stacji: opóźnienie odbioru stacji + 10 ms (takt stacji) + 10 ms zapasu; stacja z processingiem dostaje dodatkowo opóźnienie Stereo Tool (około 90 ms) i jeszcze 10 ms zapasu na pracę wątku processingu (razem 20 ms zapasu). Dochodzi do tego opóźnienie wejścia stacji (pole **Opóźnienie**). Pole **Opóźnienie wyjścia** pokazuje całość w ms, np. około 25 ms bez processingu przy opóźnieniu odbioru 5 ms (5 + 10 + 10) i około 125 ms z processingiem (5 + 10 + 90 + 10 + 10). Wartość jest stała, dopóki nie zmienisz opóźnienia odbioru albo nie włączysz lub wyłączysz processingu.
 
 **Zalecane opóźnienie linku odbiornika (link offset): co najmniej 3 × czas pakietu**, czyli 3 ms przy 1 ms, 4 ms przy 1,333 ms i 12 ms przy 4 ms. Enkoder pracuje w Windows, a jego wątek wysyłający ma jitter większy niż sprzęt AoIP; zbyt małe opóźnienie linku w odbiorniku daje trzaski albo „spóźnione pakiety” po stronie odbiornika.
 
@@ -395,18 +395,23 @@ Wyjście niesie dźwięk ze stałym opóźnieniem względem miksu stacji: opóź
 - **PTP wyłączony** w Ustawieniach…: wyjście nie nadaje (stan „PTP wyłączony — wyjście AES67 wymaga zegara PTP”).
 
 ### Włączenie i wyłączenie processingu, restart Stereo Tool
-Wyjście ma stałe opóźnienie, więc zmiana processingu stacji (włączenie, wyłączenie) i ponowne uruchomienie Stereo Tool ustawiają je na nowo: **5 ms wyciszenia, przerwa o długości opóźnienia Stereo Tool (około 90 ms), narastanie 5 ms**. Żaden dźwięk nie jest powtarzany. Taka przerwa nie jest liczona jako luka. Odbiornik słyszy jedną krótką przerwę, podobnie jak strumienie Icecast. To samo dotyczy zmiany opóźnienia odbioru i skoku zegara PTP.
+Wyjście ma stałe opóźnienie, więc zmiana opóźnienia ustawia je na nowo: dźwięk ściszany jest w 5 ms, potem cisza, a potem narasta w 5 ms. Żaden dźwięk nie jest powtarzany, a taka przerwa nie jest liczona jako luka. Odbiornik słyszy jedną krótką przerwę, podobnie jak strumienie Icecast.
+- **Włączenie processingu**: przerwa mniej więcej tak długa jak opóźnienie Stereo Tool (około 90 ms; plus zapas, który processing dokłada).
+- **Wyłączenie processingu**: krótkie ciche przekazanie wyjścia stacji (około 15–20 ms), a z sygnału znika mniej więcej tyle programu, ile wynosiło opóźnienie Stereo Tool (około 90 ms jest pominięte, nie powtórzone).
+- **Ponowne uruchomienie Stereo Tool** zwykle nie wymaga ponownego ustawienia (opóźnienie Stereo Tool się nie zmienia); jeśli się zmieni, przerwa jest taka jak przy włączeniu.
+- **Skok zegara PTP** tylko wyłania dźwięk od nowa (narastanie 5 ms), bez przerwy o długości opóźnienia.
+- Zmiana opóźnienia odbioru stacji działa tak samo jak włączenie processingu.
 
 ### Konflikt adresu
 Enkoder słucha ogłoszeń SAP na karcie AoIP. Gdy **inne urządzenie ogłasza ten sam adres multicast** co włączone wyjście (także BounceAES Master na tym samym komputerze), stan wyjścia dostaje ostrzeżenie „Ten sam adres ogłasza …” (nazwa i adres nadawcy), kropka robi się żółta, a log ma wpis. To tylko ostrzeżenie: wyjście nadaje dalej, a **adresu nigdy nie zmienia samo**, bo nadajnik jest zapisany na ten adres. Zmianę (adresu tego wyjścia albo drugiego urządzenia) robi obsługa. Ostrzeżenie znika od razu, gdy drugie urządzenie wycofa swoje ogłoszenie (np. zostanie wyłączone w sposób zwykły), a w przeciwnym razie najpóźniej około 5 minut po jego ostatnim ogłoszeniu (ogłoszenie bez odświeżenia wygasa po 5 minutach, sprawdzane co 10 s). Po zmianie adresu własnego wyjścia ostrzeżenie przelicza się przy najbliższym sprawdzeniu (do 10 s). Konflikt wykrywa się tylko wtedy, gdy wyjście jest ogłaszane, czyli nie w stanie „czeka na zegar PTP” ani w stanie błędu.
 
 ### Karta sieciowa i zapora
-Wyjście nadaje przez kartę AoIP wybraną w Ustawieniach…. Gdy karta przy starcie usługi jest rozłączona, usługa ponawia próbę sama (tak jak dla wejść) i do tego czasu wyjście ma stan błędu. Instalator dodaje regułę zapory dla programu `BounceEncoder.exe`; wyjście potrzebuje tylko **ruchu wychodzącego multicast**: UDP 5004 na adres grupy i SAP (UDP 9875 na `239.255.255.255`). Nie otwiera żadnych nowych portów przychodzących. Przełącznik musi przenosić multicast (IGMP snooping z querierem: odbiorniki dołączają do grupy same).
+Wyjście nadaje przez kartę AoIP wybraną w Ustawieniach…. **Przy włączonym wyjściu ustaw kartę jawnie** (nie „Automatycznie”): wyjście nie powinno zmieniać karty samo. Jedno wyjście wysyła około **1,2 Mbit/s** na stację (L24 stereo, 48 kHz). Gdy karta przy starcie usługi jest rozłączona, usługa ponawia próbę sama (tak jak dla wejść) i do tego czasu wyjście ma stan błędu. Instalator dodaje regułę zapory dla programu `BounceEncoder.exe`; wyjście potrzebuje tylko **ruchu wychodzącego multicast**: UDP 5004 na adres grupy i SAP (UDP 9875 na `239.255.255.255`). Nie otwiera żadnych nowych portów przychodzących. Przełącznik musi przenosić multicast (IGMP snooping z querierem: odbiorniki dołączają do grupy same).
 
 ### Statystyki
 **Statystyki → Wyjście AES67** pokazują dla każdej stacji z wyjściem: stan, adres (`adres:5004`), **Pakiety**, **Luki** i **Błędy wysyłania**. W edycji stacji ta sama para jako „Pakiety · Luki”.
 - **Luki** to pakiety, które wyszły z ciszą, bo dźwięku stacji zabrakło na czas (komputer nie nadążył albo stacja stała). **Powinny zostać na 0** (jak „Pominięte ramki” stacji). Ponowne ustawienie po zmianie processingu (wyżej) luką nie jest.
-- **Błędy wysyłania** to pakiety, których gniazdo nie przyjęło (karta rozłączona, brak trasy). Powinny zostać na 0.
+- **Błędy wysyłania** to pakiety, których gniazdo nie przyjęło (karta rozłączona, brak trasy) oraz pakiety pominięte po zatrzymaniu wątku wysyłającego albo przerwie w pracy karty. Powinny zostać na 0.
 
 ### Rozwiązywanie problemów
 | Objaw | Sprawdź |

@@ -53,7 +53,7 @@ wejścia → opóźnienie → miks stacji → [Stereo Tool, opcja stacji] ─┬
 
 - **Ten sam sygnał co strumienie.** Wyjście dostaje dokładnie to, co dziś trafia do `StreamWorker::push`: z processingiem — wynik workera processingu (także jego wyrównane obejście); bez processingu — miks stacji. Bez resamplingu i kodeka: float → 24 bit z przycięciem do pełnej skali, bez ditheringu. Przy 0 dB i bez processingu tor wejście → wyjście jest bit w bit.
 - **Oś czasu.** Każdy blok oddawany wyjściu niesie swoją pozycję na zegarze mediów: pozycję miksu, z którego powstał (wątek stacji zna ją jako `pos_`; worker processingu przenosi ją przez swoje opóźnienie `L + 240`). Wyjście zapisuje próbkę o pozycji miksu `p` w pierścieniach (`ChannelRing`, oś czasu jak w BounceAES) pod pozycją `p + D`.
-- **Stałe opóźnienie wyjścia `D`** (od pozycji miksu do znacznika czasu RTP) = opóźnienie odbioru stacji + takt stacji (10 ms) + opóźnienie processingu (`L + 240` ramek, gdy processing włączony; 0 bez processingu) + zapas 10 ms. Wartość jest stała, dopóki obsługa nie zmieni opóźnienia odbioru albo nie włączy/wyłączy processingu. Panel pokazuje opóźnienie wyjścia względem wejścia: `D` + opóźnienia wejść stacji.
+- **Stałe opóźnienie wyjścia `D`** (od pozycji miksu do znacznika czasu RTP) = opóźnienie odbioru stacji + takt stacji (10 ms) + opóźnienie processingu (`L + 240` ramek, gdy processing włączony; 0 bez processingu) + zapas 10 ms; stacja z processingiem dostaje jeszcze jeden zapas 10 ms (wątek wyjściowy workera pracuje blok za stacją), czyli `D` = `latency_frames` + 480 + opóźnienie processingu + 480 + 480 ramek z processingiem, a `latency_frames` + 480 + 480 bez. Wartość jest stała, dopóki obsługa nie zmieni opóźnienia odbioru albo nie włączy/wyłączy processingu. Panel pokazuje opóźnienie wyjścia względem wejścia: `D` + opóźnienia wejść stacji.
 - **Wysyłanie.** Jeden wątek nadawczy dla wszystkich stacji, budzony co 0,25 ms (jak `tx_loop` BounceAES) z priorytetem MMCSS „Pro Audio”, pompuje `TxStream` każdego włączonego wyjścia (`bam_core`, bez zmian) i wysyła przez jedno gniazdo UDP związane z kartą AoIP (`interface_ip`). Pakiet o znaczniku `T` wychodzi, gdy zegar mediów minie `T + P`.
 - **Brakujące próbki** (wątek stacji spóźniony, stacja zatrzymana, luka w workerze): pierścień zwraca ciszę dla pozycji niezapisanych (znaczniki `ChannelRing`), więc pakiety wychodzą dalej w rytmie zegara; wyjście liczy takie pakiety („luki”).
 - **Ponowne ustawienie** z wyciszeniem 5 ms przed i rampą 5 ms po: zmiana `D` (włączenie/wyłączenie processingu, zmiana opóźnienia odbioru), skok zegara PTP (`TxStream::reset`). Przy włączeniu processingu przerwa trwa około opóźnienia Stereo Tool (≈ 90 ms), jak dziś w strumieniach.
@@ -72,9 +72,11 @@ wejścia → opóźnienie → miks stacji → [Stereo Tool, opcja stacji] ─┬
 - Walidacja (`validate_config`, komunikaty po polsku):
   - adres spoza `239.0.0.0/8` albo niepoprawny: błąd;
   - ten sam efektywny adres na dwóch stacjach: błąd z nazwami stacji;
+  - adres `239.255.255.255` (grupa SAP): błąd; jawny adres jest zapisywany w postaci kanonicznej (bez zer wiodących);
+  - nazwa wyjścia dłuższa niż 64 bajty albo ze znakami sterującymi: błąd (jak nazwa stacji);
   - `ptime_us` spoza {1000, 1333, 4000}: błąd;
   - wejście stacji, którego SDP ma adres multicast równy efektywnemu adresowi wyjścia którejkolwiek stacji tego enkodera: błąd „to wyjście AES67 tego enkodera (stacja …): pętla”.
-- Stan stacji (`StationStatus::aes67`): `state` (`Off`, `WaitingForPtp`, `Sending`, `Holdover`, `Error`), `reason`, efektywny adres i nazwa, `output_latency_ms`, liczniki (`packets`, `gaps`, `send_errors`), `conflict` (nazwa i adres urządzenia z SAP albo puste), `sdp`.
+- Stan stacji (`StationStatus::aes67`): `state` (`Off`, `WaitingForPtp`, `Sending`, `Holdover`, `Error`), `reason`, efektywny adres i nazwa, `output_latency_ms`, liczniki (`packets`, `gaps`, `send_errors`), `conflict` (nazwa i adres urządzenia z SAP albo puste). SDP nie jest polem stanu: serwuje go wyłącznie `GET /api/stations/<id>/aes67.sdp` (niżej).
 - API: `GET /api/stations/<id>/aes67.sdp` (po zalogowaniu) zwraca SDP jako `application/sdp` z nazwą pliku `<nazwa stacji>.sdp`.
 
 ## 6. Konflikty adresów (SAP)
