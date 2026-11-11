@@ -480,8 +480,10 @@ using SampleFn = std::function<int32_t(uint64_t, int)>;
 uint64_t media_now(const be::EncoderEngine& e) { return e.media_clock().sample_at(bp::monotonic_ns()); }
 
 // Receives an AES67 stream on 127.0.0.1 into its own rings (the encoder's output under test).
-// While recording, it also copies every position from the start on (50 ms behind the clock, so
-// the packets are in) into `rec`, for checks longer than the rings hold.
+// While recording, it also copies every position from the start on (`rec_lag` behind the clock, so
+// the packets are in) into `rec`, for checks longer than the rings hold. RxStream rejects a packet
+// that arrives more than `latency_frames` after its time, so a test that records on a loaded
+// machine (the receiver thread or the kernel stalled for tens of ms) gives it a long latency and lag.
 struct AesReceiver {
   std::array<std::vector<int32_t>, 2> samples;
   std::array<std::vector<uint32_t>, 2> tags;
@@ -495,8 +497,11 @@ struct AesReceiver {
   bool recording = false;
   uint64_t rec_from = 0, rec_next = 0;
   std::vector<std::array<int32_t, 2>> rec;
+  const uint64_t rec_lag;
 
-  AesReceiver(const be::EncoderEngine& e, const std::string& group, uint32_t latency_frames = 480) : engine(e) {
+  AesReceiver(const be::EncoderEngine& e, const std::string& group, uint32_t latency_frames = 480,
+              uint64_t lag_frames = 2400)
+      : engine(e), rec_lag(lag_frames) {
     for (int ch = 0; ch < 2; ++ch) {
       samples[ch].assign(bam::kRingFrames, 0);
       tags[ch].assign(bam::kBlocksPerRing, 0);
@@ -521,7 +526,7 @@ struct AesReceiver {
             rx->on_packet(std::span<const uint8_t>(buf.data(), size_t(n)), media_now(engine), bp::monotonic_ns());
         {
           std::lock_guard lock(rec_m);
-          const uint64_t upto = media_now(engine) - 2400;
+          const uint64_t upto = media_now(engine) - rec_lag;
           if (recording && upto > rec_next) {
             const size_t len = size_t(upto - rec_next);
             for (int ch = 0; ch < 2; ++ch) {
@@ -2648,7 +2653,10 @@ TEST_CASE("encoder engine: switching processing on and off never repeats audio o
   REQUIRE_MESSAGE(engine.start(cfg, &err), err);
   AesSender in(engine, group, kInPort, sig_a);
   REQUIRE(wait_for([&] { return aes67_of(engine, "s1").state == be::Aes67State::Sending; }, 5000));
-  AesReceiver out(engine, aes67_of(engine, "s1").address);
+  // 0.5 s of receive latency: the encoder sent every packet on time, but on a loaded runner the
+  // receiver (thread or kernel) can stall for tens of ms and RxStream would reject the late packets,
+  // which shows as silences with hard edges that the output never had
+  AesReceiver out(engine, aes67_of(engine, "s1").address, 24000, 26400);
   REQUIRE(wait_for([&] { return out.packets() > 500; }, 10000));
   const uint64_t gaps_before = aes67_of(engine, "s1").gaps;
 
@@ -2674,6 +2682,8 @@ TEST_CASE("encoder engine: switching processing on and off never repeats audio o
 
   // both switches re-map the output with a fade: no gap, and the output pauses only about as
   // long as the delay changes (the processing delay, plus the ramps and a station tick)
+  CHECK(out.rx->stats().overruns == 0);  // the receiver dropped nothing: a failure below is the encoder's
+  CHECK(aes67_of(engine, "s1").send_errors == 0);
   MESSAGE("gaps after on: " << gaps_on - gaps_before);
   CHECK(aes67_of(engine, "s1").gaps == gaps_before);
   struct Silence {
