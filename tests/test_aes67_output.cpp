@@ -240,3 +240,41 @@ TEST_CASE("aes67 output: content is read no earlier than the packet needs it (no
   run(out, 1000, 11000);
   CHECK(out.stats().gaps == 0);
 }
+
+TEST_CASE("aes67 output: a packet crossing the end of the written content carries the content, then silence") {
+  bd::Aes67Output out(1000, 1);
+  out.set_delay(1000);
+  feed(out, 0, 10020);  // ends inside a packet
+  const auto pkts = run(out, 1000, 12000);
+  bool seen = false;
+  for (const auto& c : pkts) {
+    if (c.timestamp > 11020 || c.timestamp + c.left.size() <= 11020) continue;
+    seen = true;
+    for (size_t f = 0; f < c.left.size(); ++f) {
+      const uint64_t src = uint64_t(c.timestamp) + f - 1000;
+      if (src < 10020) {
+        CHECK(carries(c, f, src));
+      } else {
+        CHECK(c.left[f] == 0);
+        CHECK(c.right[f] == 0);
+      }
+    }
+  }
+  CHECK(seen);
+}
+
+TEST_CASE("aes67 output: a hole announced with expect_hole() (a worker switched off) is no gap; an unannounced one is") {
+  auto hole = [](bool announced) {
+    bd::Aes67Output out(1000, 1);
+    out.set_delay(1000);
+    feed(out, 0, 10000);
+    run(out, 1000, 10000);
+    if (announced) out.expect_hole();
+    run(out, 10012, 12000);  // nothing was written for 10000 .. 11000 + : the hole
+    feed(out, 11000, 30000);  // the station's new path
+    run(out, 12012, 25000);
+    return out.stats().gaps;
+  };
+  CHECK(hole(false) > 0);
+  CHECK(hole(true) == 0);
+}

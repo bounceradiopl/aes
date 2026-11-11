@@ -687,6 +687,8 @@ void ProcessingWorker::take_outputs() {
 }
 
 void ProcessingWorker::sync_aes67_delay() {
+  // a faded-out worker is done: the output belongs to the station again, which sets its delay
+  if (faded_) return;
   if (aes67_ && aes67_base_ != kNoAes67Base) aes67_->set_delay(aes67_base_ + delay_.load(std::memory_order_relaxed));
 }
 

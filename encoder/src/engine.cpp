@@ -498,6 +498,7 @@ void EncoderEngine::Impl::update_processing(StationRuntime& rt, const EncoderCon
   std::shared_ptr<const std::atomic<bool>> old_instance;  // a replaced worker's: the same home folder
   if (replaces(p, w)) {
     p.worker->fade_out();  // apply() asked for it already and waited for every station at once
+    if (rt.aes67) rt.aes67->expect_hole();
     if (!p.worker->faded_out()) {
       // its output thread must be done before the station's new path hands anything to the streams
       log_warning(who + "wyjście processingu nie wyciszyło się w " + wait_text(kFadeOutWaitNs) + ", zatrzymane");
@@ -573,6 +574,7 @@ void EncoderEngine::Impl::fade_out_leaving_workers(const EncoderConfig& next) {
     auto it = stations.find(sc.id);
     if (!sc.enabled || it == stations.end() || !replaces(it->second->proc, processing_wanted(next, index))) continue;
     it->second->proc.worker->fade_out();
+    if (it->second->aes67) it->second->aes67->expect_hole();  // the hole until publish() is no gap
     leaving.push_back(it->second->proc.worker.get());
   }
   const int64_t until = platform::monotonic_ns() + kFadeOutWaitNs;
@@ -905,8 +907,8 @@ void EncoderEngine::Impl::housekeeping() {
     }
     rt->station->collect();
     processing_housekeeping(*rt, now);
-    // the processing delay changes after the start (Stereo Tool's latency, a restart): D follows
-    if (rt->aes67 && rt->aes67->delay() != aes67_delay(*rt)) rt->aes67->set_delay(aes67_delay(*rt));
+    // a station without a worker: D follows the input latency (the worker syncs its own D)
+    if (rt->aes67 && !rt->proc.worker && rt->aes67->delay() != aes67_base(*rt)) rt->aes67->set_delay(aes67_base(*rt));
   }
   if (rx_changed) update_rx_set();
   release_rx_sets();

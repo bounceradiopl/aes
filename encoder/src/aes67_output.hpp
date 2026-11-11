@@ -30,7 +30,11 @@ class Aes67Output {
   // Any thread: the delay D (mix position -> RTP timestamp). A change fades out, waits until the
   // new mapping reaches content not sent yet, fades in.
   void set_delay(uint32_t frames);
-  uint32_t delay() const { return delay_.load(std::memory_order_relaxed); }
+  uint32_t delay() const { return delay_.load(std::memory_order_acquire); }
+
+  // Any thread: a hole in the content is coming (the writer is being replaced): it is no gap until
+  // content is there again, like after a delay change.
+  void expect_hole() { hole_expected_.store(true, std::memory_order_release); }
 
   // Sender thread only: fill the TX ring up to now and send the due packets.
   // `generation` is the clock's step generation: a change re-aligns (fade-in, TxStream::reset).
@@ -60,6 +64,7 @@ class Aes67Output {
   std::atomic<uint32_t> delay_{0};
   std::atomic<uint64_t> written_end_{0};
   std::atomic<uint64_t> gaps_{0};
+  std::atomic<bool> hole_expected_{false};
 
   // gate, sender thread only
   bool aligned_ = false;

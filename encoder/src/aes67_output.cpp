@@ -71,7 +71,7 @@ Aes67Stats Aes67Output::stats() const {
 
 void Aes67Output::align(uint64_t now, bool fresh) {
   out_ = now;
-  cur_delay_ = delay_.load(std::memory_order_relaxed);
+  cur_delay_ = delay_.load(std::memory_order_acquire);
   level_ = 0;
   settling_ = settle_missing_ = false;
   if (fresh) {  // a new timeline: nothing on it was sent yet
@@ -100,9 +100,10 @@ bool Aes67Output::content_missing(uint64_t p, size_t n) {
 }
 
 void Aes67Output::copy(uint64_t t, size_t n) {
-  const uint64_t p = t - cur_delay_;
+  const bool before_start = t < cur_delay_;  // the mapping would reach before position 0
+  const uint64_t p = before_start ? 0 : t - cur_delay_;
   // before the first content on this timeline the output is starting (or re-aligned): no gap
-  const bool missing = content_missing(p, n);
+  const bool missing = !before_start && content_missing(p, n);
   if (settling_) {
     if (missing)
       settle_missing_ = true;
@@ -117,8 +118,16 @@ void Aes67Output::copy(uint64_t t, size_t n) {
   if (!missing) content_seen_ = true;
   int32_t* l = rbuf_[0].data();
   int32_t* r = rbuf_[1].data();
-  content_.ring[0].read(p, l, n);
-  content_.ring[1].read(p, r, n);
+  // only what the writer has finished is read (its ring must stay clear of the region being
+  // written); the rest is silence
+  const uint64_t avail = before_start ? 0 : written_end_.load(std::memory_order_acquire);
+  const size_t have = avail > p ? size_t(std::min<uint64_t>(avail - p, n)) : 0;
+  if (have) {
+    content_.ring[0].read(p, l, have);
+    content_.ring[1].read(p, r, have);
+  }
+  std::fill(l + have, l + n, 0);
+  std::fill(r + have, r + n, 0);
   if (gate_ != Gate::Run) {
     const bool in = gate_ == Gate::FadeIn;
     for (size_t f = 0; f < n; ++f) {
@@ -129,7 +138,7 @@ void Aes67Output::copy(uint64_t t, size_t n) {
   }
   txr_.ring[0].write(t, l, n);
   txr_.ring[1].write(t, r, n);
-  sent_end_ = std::max(sent_end_, p + n);
+  if (!before_start) sent_end_ = std::max(sent_end_, p + n);
   started_ = true;
 }
 
@@ -142,8 +151,13 @@ void Aes67Output::pump(uint64_t now, uint64_t generation, const PacketSink& send
   } else if (end - std::min(end, out_) > kMaxFillFrames) {
     align(now, false);  // the sender stalled: TxStream skips (and counts) the backlog itself
   }
+  if (hole_expected_.exchange(false, std::memory_order_acq_rel)) {
+    settling_ = true;
+    settle_missing_ = false;
+    settle_end_ = out_ + 5 * kStationRate;
+  }
   while (out_ < end) {
-    const uint32_t want = delay_.load(std::memory_order_relaxed);
+    const uint32_t want = delay_.load(std::memory_order_acquire);
     if (want != cur_delay_) {
       if (!settling_) {
         settling_ = true;

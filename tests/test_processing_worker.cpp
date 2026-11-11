@@ -1231,6 +1231,26 @@ TEST_CASE("processing: fade_out() ramps the output down over 240 frames, then ha
   CHECK(out.back() == 0.0f);
 }
 
+TEST_CASE("processing: a faded-out worker never moves the delay of the output the station owns again") {
+  UseFake use;
+  Collector col;
+  Input input;
+  input.dc = 0.5f;
+  PW w(settings(col), "fo2");
+  REQUIRE(feed_until(w, input, be::ProcessingState::Running));
+  feed(w, input, 4800);
+  w.fade_out();
+  feed(w, input, 4800);
+  REQUIRE(wait_until([&] { return w.faded_out(); }));
+  auto out = std::make_shared<bd::Aes67Output>(1000, 5);
+  out->set_delay(1234);
+  w.set_aes67(out, 5000);  // taken by the output thread, which must not sync
+  feed(w, input, 4800);
+  REQUIRE(wait_until([&] { return out.use_count() > 1; }));
+  bp::sleep_ns(100'000'000);
+  CHECK(out->delay() == 1234);
+}
+
 TEST_CASE("processing: key, station name, home folder, web port and preset reach the instance; no key in reasons") {
   UseFake use;
   TempDir dir("settings");
