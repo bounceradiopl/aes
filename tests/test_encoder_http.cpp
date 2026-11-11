@@ -2379,8 +2379,6 @@ TEST_CASE("encoder HTTP: a login with a 100 KB password is answered within a sec
   CHECK(bp::monotonic_ns() - t0 < 1'000'000'000);
 }
 
-#endif  // BAM_WITH_CODECS
-
 TEST_CASE("encoder HTTP: AES67 output in the station API, the status and the SDP download") {
   Fixture f;
   f.setup_and_login();
@@ -2466,3 +2464,5 @@ TEST_CASE("encoder HTTP: AES67 output in the station API, the status and the SDP
     CHECK(sdp->get_header_value("Content-Disposition") == "attachment; filename=\"Ra_d.._.._io.sdp\"");
   }
 }
+
+#endif  // BAM_WITH_CODECS

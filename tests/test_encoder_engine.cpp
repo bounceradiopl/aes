@@ -2693,7 +2693,7 @@ TEST_CASE("encoder engine: switching processing on and off never repeats audio o
   };
   auto loudest = [&](size_t a, size_t b) {
     int64_t m = 0;
-    for (size_t i = a; i < b; ++i) m = std::max({m, std::llabs(rec[i][0]), std::llabs(rec[i][1])});
+    for (size_t i = a; i < b; ++i) m = std::max<int64_t>({m, std::llabs(rec[i][0]), std::llabs(rec[i][1])});
     return m;
   };
   const Silence on = longest_silence(0, size_t(off - from));
@@ -2931,8 +2931,6 @@ TEST_CASE("encoder engine: disabling the AES67 output stops its packets; a stati
 }
 
 #endif  // BAM_FAKE_STEREOTOOL_PATH
-
-#endif  // BAM_WITH_CODECS
 
 // ---- SAP announcements of the AES67 output, on 127.0.0.1 ----
 
@@ -3179,3 +3177,5 @@ TEST_CASE("AES67 output: after an interface change its own old announcement is n
   bp::sleep_ns(1'000'000'000);
   CHECK(own.conflict("239.69.177.1", "127.0.0.2").empty());
 }
+
+#endif  // BAM_WITH_CODECS

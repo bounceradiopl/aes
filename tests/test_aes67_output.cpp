@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include <doctest/doctest.h>
 
+#ifdef BAM_WITH_CODECS  // bam_encoder (encoder/src/aes67_output.cpp) is built with the codecs only
+
 #include <algorithm>
 #include <cstdint>
 #include <span>
@@ -278,3 +280,5 @@ TEST_CASE("aes67 output: a hole announced with expect_hole() (a worker switched 
   CHECK(hole(false) > 0);
   CHECK(hole(true) == 0);
 }
+
+#endif  // BAM_WITH_CODECS
