@@ -32,7 +32,7 @@ class Aes67Output {
   void set_delay(uint32_t frames);
   uint32_t delay() const { return delay_.load(std::memory_order_relaxed); }
 
-  // Sender thread only: fill the TX ring up to now + one packet and send the due packets.
+  // Sender thread only: fill the TX ring up to now and send the due packets.
   // `generation` is the clock's step generation: a change re-aligns (fade-in, TxStream::reset).
   void pump(uint64_t now, uint64_t generation, const PacketSink& send);
   void count_send_error() { tx_->count_send_error(); }

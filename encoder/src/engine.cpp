@@ -613,7 +613,8 @@ void EncoderEngine::Impl::publish(StationRuntime& rt) {
 }
 
 uint32_t EncoderEngine::Impl::aes67_base(const StationRuntime& rt) {
-  return rt.latency_frames + kAes67TickFrames + kAes67MarginFrames;
+  // a station with processing gets one more block: the worker's output thread runs a block behind
+  return rt.latency_frames + kAes67TickFrames + kAes67MarginFrames + (rt.proc.worker ? kAes67MarginFrames : 0);
 }
 
 uint32_t EncoderEngine::Impl::aes67_delay(const StationRuntime& rt) {

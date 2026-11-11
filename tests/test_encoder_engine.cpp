@@ -2615,7 +2615,7 @@ TEST_CASE("encoder engine: the AES67 output follows Stereo Tool") {
   REQUIRE(processing_running(engine, "s1"));
   const uint64_t pd = uint64_t(std::lround(processing_of(engine, "s1").latency_ms * 48.0));
   CHECK(pd == 64 + 240);  // Stereo Tool's latency + the crossfade margin
-  const uint64_t kD = 960 + 480 + pd + 480;
+  const uint64_t kD = 960 + 480 + pd + 480 + 480;  // + one more block with processing
   // the housekeeping moves D once the worker's delay grew (it starts unprocessed, undelayed)
   REQUIRE(wait_for([&] { return std::abs(aes67_of(engine, "s1").output_latency_ms - kD / 48.0) < 1e-6; }, 2000));
   CHECK(aes67_of(engine, "s1").output_latency_ms == doctest::Approx(kD / 48.0));
@@ -2834,7 +2834,7 @@ TEST_CASE("encoder engine: a stalled Stereo Tool gives silence on the AES67 outp
   REQUIRE_MESSAGE(engine.start(cfg, &err), err);
   AesSender in(engine, group, kInPort, sig_a);
   REQUIRE(processing_running(engine, "s1"));
-  constexpr double kDms = (960 + 480 + 64 + 240 + 480) / 48.0;
+  constexpr double kDms = (960 + 480 + 64 + 240 + 480 + 480) / 48.0;
   REQUIRE(wait_for([&] { return std::abs(aes67_of(engine, "s1").output_latency_ms - kDms) < 1e-6; }, 2000));
   AesReceiver out(engine, aes67_of(engine, "s1").address);
   REQUIRE(wait_for([&] { return out.packets() > 500; }, 10000));

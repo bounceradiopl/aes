@@ -232,3 +232,11 @@ TEST_CASE("aes67 output: a stalled sender with a longer delay pending never repe
   CHECK(carries(last, 0, last.timestamp - 11000));
   CHECK(out.stats().gaps == 0);
 }
+
+TEST_CASE("aes67 output: content is read no earlier than the packet needs it (no read-ahead, no false gap)") {
+  bd::Aes67Output out(1000, 1);
+  out.set_delay(1000);
+  feed(out, 0, 10000);  // exactly what packets up to now = 11000 carry (T + 48 <= now, T - D < 10000)
+  run(out, 1000, 11000);
+  CHECK(out.stats().gaps == 0);
+}

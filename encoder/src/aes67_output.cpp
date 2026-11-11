@@ -134,7 +134,7 @@ void Aes67Output::copy(uint64_t t, size_t n) {
 }
 
 void Aes67Output::pump(uint64_t now, uint64_t generation, const PacketSink& send) {
-  const uint64_t end = now + fpp_;
+  const uint64_t end = now;  // TxStream sends packet T once now >= T + P: nothing is read earlier
   if (!aligned_ || generation != generation_ || out_ > end + kMaxFillFrames) {
     generation_ = generation;
     tx_->reset();
