@@ -51,6 +51,10 @@ Instrukcja: [docs/INSTALL.md](docs/INSTALL.md). W skrócie:
 5. W zakładce **Routing** połącz źródła z celami.
 6. W mAirList wybierz sterownik ASIO **BounceAES Master**.
 
+## Co nowego w 1.2.6
+
+Instalatory BounceAES Master i Bounce Encoder pokazują polskie litery poprawnie (wcześniej instalator zbudowany na Windows mógł wyświetlać w ich miejscu „krzaczki”). Program działa tak samo jak w 1.2.5.
+
 ## Co nowego w 1.2.5
 
 Poprawki bezpieczeństwa panelu: złośliwie zbudowane zapytania (bardzo głęboko zagnieżdżony albo ogromny JSON) są odrzucane jeszcze przed logowaniem, zanim usługa zacznie je przetwarzać, a bardzo długie hasło nie obciąża już procesora przy logowaniu. Zapisane hasła działają dalej, bez zmian w obsłudze. Te same poprawki ma Bounce Encoder 1.0.4.

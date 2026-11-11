@@ -99,6 +99,9 @@ Ten sam plik pobierzesz później przyciskiem **SDP** przy wyjściu albo z okna 
 ### Aktualizacja z wersji 1.0
 Konfiguracja 1.0 przenosi się sama przy pierwszym uruchomieniu 1.1 (kopia: `config.json.v1.bak`). Urządzenie N staje się wyjściem N (zasilanym z ASIO N), subskrypcją N (jeśli miało źródło, połączoną z wejściem ASIO N) i nazwą pary ASIO N, więc wszystko gra tak jak wcześniej.
 
+### Co nowego w 1.2.6: polskie litery w instalatorze
+Instalator pokazuje polskie litery poprawnie (wcześniej wersja zbudowana na Windows mogła wyświetlać w ich miejscu „krzaczki”). Program działa tak samo jak w 1.2.5.
+
 ### Co nowego w 1.2.5: poprawki bezpieczeństwa panelu
 Panel odrzuca złośliwie zbudowane zapytania, zanim ktokolwiek się zaloguje: JSON zagnieżdżony głębiej niż 16 poziomów, z więcej niż 10 000 obiektów i tablic, 20 000 wartości albo 2 000 pól w jednym obiekcie dostaje od razu błąd 400 (wcześniej takie zapytanie przed zalogowaniem zajmowało procesor na kilka sekund i dużo pamięci, a po zalogowaniu mogło zatrzymać usługę). Bardzo długie hasła nie obciążają już procesora przy logowaniu. Zapisane hasło działa dalej, konfiguracja zostaje bez zmian. Te same poprawki ma Bounce Encoder 1.0.4.
 

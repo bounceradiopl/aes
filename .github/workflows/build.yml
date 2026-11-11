@@ -329,6 +329,12 @@ jobs:
           $payload = Join-Path $PWD 'build\Release'
           $payload32 = Join-Path $PWD 'build32\Release'
           Set-Location installer\nsis
+          # makensis reads a script without a BOM in the Windows ANSI code page: the UTF-8 BOM keeps
+          # the Polish texts intact, so a script saved without it is an error here
+          foreach ($nsi in 'BounceAES-setup.nsi', 'BounceEncoder-setup.nsi') {
+            $head = [System.IO.File]::ReadAllBytes((Join-Path $PWD $nsi))[0..2]
+            if (-not ($head[0] -eq 0xEF -and $head[1] -eq 0xBB -and $head[2] -eq 0xBF)) { throw "$nsi has no UTF-8 BOM" }
+          }
           & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /V2 "/DPAYLOAD=$payload" "/DPAYLOAD32=$payload32" BounceAES-setup.nsi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build Bounce Encoder installer (without Stereo Tool)

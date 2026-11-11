@@ -1,4 +1,4 @@
-; SPDX-License-Identifier: GPL-3.0-or-later
+﻿; SPDX-License-Identifier: GPL-3.0-or-later
 ; NSIS: instalator "Bounce Encoder" (enkoder AES67 -> Icecast) z kreatorem Modern UI 2, w tym samym
 ; układzie i z tym samym brandingiem co BounceAES-setup.nsi. makensis działa natywnie na
 ; macOS/Linux/Windows.
