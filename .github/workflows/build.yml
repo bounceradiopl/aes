@@ -160,7 +160,7 @@ jobs:
         working-directory: build
         run: |
           set -o pipefail
-          ./bam_tests '--test-case=stereotool:*,processing:*,encoder engine:*,encoder HTTP:*,encoder config:*' 2>&1 | tee bam_tests.log
+          ./bam_tests '--test-case=stereotool:*,processing:*,encoder engine:*,encoder HTTP:*,encoder config:*,aes67 output*,AES67 output*' 2>&1 | tee bam_tests.log
       - name: Tests skipped on this runner (as warnings)
         if: always()
         working-directory: build
