@@ -118,6 +118,13 @@
         </div>
         <div class="card">
           <div class="card-head">
+            <h2>Wyjście AES67 <small>ten sam sygnał co strumienie</small></h2>
+          </div>
+          <p class="hint">Stacja ogłasza swój sygnał (24 bity, 48 kHz, stereo) jako strumień AES67, np. dla nadajnika FM albo kodeka linku. Przechodzi przez Stereo Tool tylko wtedy, gdy stacja ma włączony processing. Nadaje po zsynchronizowaniu zegara PTP.</p>
+          <div class="blocks" id="edit-aes67"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">
             <h2>Strumienie Icecast <small id="stream-count"></small></h2>
             <button type="button" class="ghost" id="add-stream" data-icon="plus">Dodaj strumień</button>
           </div>
@@ -149,6 +156,15 @@
             <table class="stats">
               <thead><tr><th class="l">Stacja</th><th class="l">Stan</th><th>Czas działania</th><th title="Ramki pominięte przy nadrabianiu opóźnienia">Pominięte ramki</th></tr></thead>
               <tbody id="stats-station-rows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Wyjście AES67</h2>
+          <div class="table-wrap">
+            <table class="stats">
+              <thead><tr><th class="l">Stacja</th><th class="l">Stan</th><th class="l">Adres</th><th>Pakiety</th><th title="Pakiety, których nie udało się nadać na czas">Luki</th><th>Błędy wysyłania</th></tr></thead>
+              <tbody id="stats-aes67-rows"></tbody>
             </table>
           </div>
         </div>

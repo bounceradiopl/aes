@@ -59,7 +59,7 @@ Unicode true
 
 !define APP "Bounce Encoder"
 !define PUBLISHER "BOUNCE SP. Z O.O."
-!define VER "1.1.0"
+!define VER "1.2.0"
 !define SERVICE "BounceEncoder"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\BounceEncoder"
 !define EVENTLOG_KEY "SYSTEM\CurrentControlSet\Services\EventLog\Application\Bounce Encoder"
@@ -82,7 +82,7 @@ RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 InstallColors F72868 050505
 
-VIProductVersion "1.1.0.0"
+VIProductVersion "1.2.0.0"
 VIAddVersionKey "ProductName" "${APP}"
 VIAddVersionKey "CompanyName" "${PUBLISHER}"
 VIAddVersionKey "FileDescription" "${APP} - instalator"
@@ -135,8 +135,8 @@ LangString FinishText ${LANG_POLISH} "Bounce Encoder został zainstalowany i dzi
 LangString FinishText ${LANG_ENGLISH} "Bounce Encoder has been installed and is running.$\r$\n$\r$\nAutostart: the service starts with Windows, the tray icon at every logon. A $\"Bounce Encoder$\" shortcut is on the desktop and in the Start menu.$\r$\n$\r$\nIn the panel select the AoIP network card (Ustawienia…) and add the first station."
 LangString Need64 ${LANG_POLISH} "Bounce Encoder wymaga 64-bitowego systemu Windows 10 lub 11."
 LangString Need64 ${LANG_ENGLISH} "Bounce Encoder requires 64-bit Windows 10 or 11."
-LangString PtpWarn ${LANG_POLISH} "Włączony jest klient PTP usługi czasu Windows (w32time). Zajmuje on porty 319/320 i uniemożliwi synchronizację Bounce Encoder z zegarem PTP.$\r$\n$\r$\nWyłącz go po instalacji (opis w INSTRUKCJA.md, rozdział 12)."
-LangString PtpWarn ${LANG_ENGLISH} "The Windows Time service PTP client (w32time) is enabled. It occupies ports 319/320 and prevents Bounce Encoder from synchronising to the PTP clock.$\r$\n$\r$\nDisable it after installation (see INSTRUKCJA.md, section 12)."
+LangString PtpWarn ${LANG_POLISH} "Włączony jest klient PTP usługi czasu Windows (w32time). Zajmuje on porty 319/320 i uniemożliwi synchronizację Bounce Encoder z zegarem PTP.$\r$\n$\r$\nWyłącz go po instalacji (opis w INSTRUKCJA.md, rozdział 13)."
+LangString PtpWarn ${LANG_ENGLISH} "The Windows Time service PTP client (w32time) is enabled. It occupies ports 319/320 and prevents Bounce Encoder from synchronising to the PTP clock.$\r$\n$\r$\nDisable it after installation (see INSTRUKCJA.md, section 13)."
 LangString AclWarn ${LANG_POLISH} "Nie udało się ustawić uprawnień folderu $APPDATA\Bounce Encoder (kod $1). Plik config.json z hasłami strumieni może być czytelny dla innych użytkowników tego komputera: ustaw uprawnienia ręcznie (INSTRUKCJA.md, rozdział 2)."
 LangString AclWarn ${LANG_ENGLISH} "Could not set the permissions of $APPDATA\Bounce Encoder (code $1). config.json with the stream passwords may be readable by other users of this computer: set the permissions by hand (INSTRUKCJA.md, section 2)."
 LangString InstAclWarn ${LANG_POLISH} "Nie udało się ustawić uprawnień folderu programu $INSTDIR (kod $1). Inni użytkownicy tego komputera mogą podmienić pliki usługi Bounce Encoder: zainstaluj program w Program Files albo ustaw uprawnienia ręcznie (administratorzy i SYSTEM: pełna kontrola, Użytkownicy: odczyt i wykonanie)."

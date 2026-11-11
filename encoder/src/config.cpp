@@ -18,6 +18,7 @@
 #include <unistd.h>  // fsync, fileno
 #endif
 
+#include "bam/constants.hpp"  // kSapGroup
 #include "bam/config.hpp"  // min_rx_latency_us, kMinRxLatencyUs, kMaxRxLatencyUs
 #include "bam/encoder/dsp.hpp"
 #include "bam/ipv4.hpp"
@@ -284,7 +285,12 @@ json to_json(const EncoderConfig& c, bool api) {
                         {"enabled", st.enabled},
                         {"inputs", std::move(inputs)},
                         {"streams", std::move(streams)},
-                        {"processing", std::move(processing)}});
+                        {"processing", std::move(processing)},
+                        {"aes67_output",
+                         {{"enabled", st.aes67_output.enabled},
+                          {"name", st.aes67_output.name},
+                          {"address", st.aes67_output.address},
+                          {"ptime_us", st.aes67_output.ptime_us}}}});
   }
   j["stations"] = std::move(stations);
   return j;
@@ -396,6 +402,13 @@ std::optional<EncoderConfig> config_from_json(std::string_view text, std::string
         read_field(pj, "license_key_clear", st.processing.license_key_clear, pp);
         read_field(pj, "web_port_slot", st.processing.web_port_slot, pp);
       });
+      read_object(sj, "aes67_output", sp, [&](const json& oj) {
+        const std::string op = sp + "aes67_output.";
+        read_field(oj, "enabled", st.aes67_output.enabled, op);
+        read_field(oj, "name", st.aes67_output.name, op);
+        read_field(oj, "address", st.aes67_output.address, op);
+        read_field(oj, "ptime_us", st.aes67_output.ptime_us, op);
+      });
       c.stations.push_back(std::move(st));
     });
     return c;
@@ -411,6 +424,14 @@ std::optional<EncoderConfig> config_from_json(std::string_view text, std::string
     return std::nullopt;
   }
 }
+
+std::string aes67_default_address(int web_port_slot) {
+  return web_port_slot < 0 ? std::string() : "239.69.110." + std::to_string(web_port_slot + 1);
+}
+std::string aes67_address(const StationConfig& st) {
+  return st.aes67_output.address.empty() ? aes67_default_address(st.processing.web_port_slot) : st.aes67_output.address;
+}
+std::string aes67_name(const StationConfig& st) { return st.aes67_output.name.empty() ? st.name : st.aes67_output.name; }
 
 std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
   std::vector<EncoderConfigIssue> issues;
@@ -439,6 +460,7 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
   std::map<std::string, size_t> station_ids;                       // id in lower case -> station index
   std::map<int, size_t> web_slots;                                 // web port slot -> station index
   std::map<std::string, std::pair<size_t, size_t>> targets;        // server + mount -> (station, stream)
+  std::map<std::string, size_t> aes67_addresses;                   // enabled AES67 output address -> station index
   for (size_t i = 0; i < c.stations.size(); ++i) {
     const auto& st = c.stations[i];
     const std::string sp = station_path(i);
@@ -615,7 +637,40 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
       if (effective_stereotool_key(c, st).empty())
         add(pf + "license_key", label + "processing wymaga klucza licencji Stereo Tool (klucza stacji albo domyślnego klucza w Ustawieniach)");
     }
+
+    // AES67 output (only checked while enabled)
+    const auto& ao = st.aes67_output;
+    const std::string of = station_path(i) + ".aes67_output.";
+    if (ao.enabled) {
+      const auto ip = parse_ipv4(ao.address);
+      if (!ao.address.empty() && (!ip || (*ip)[0] != 239))
+        add(of + "address", label + "adres wyjścia AES67 musi być adresem multicast 239.x.x.x");
+      else if (ip && ipv4_to_string(*ip) == kSapGroup)
+        add(of + "address", label + "adres 239.255.255.255 jest zarezerwowany dla ogłoszeń SAP, wybierz inny adres wyjścia AES67");
+      if (ao.name.size() > kMaxNameBytes) add(of + "name", label + "nazwa wyjścia AES67 może mieć najwyżej 64 bajty");
+      if (has_control(ao.name)) add(of + "name", label + "nazwa wyjścia AES67 nie może zawierać znaków sterujących");
+      if (std::find(std::begin(kAes67PtimesUs), std::end(kAes67PtimesUs), ao.ptime_us) == std::end(kAes67PtimesUs))
+        add(of + "ptime_us", label + "czas pakietu wyjścia AES67 musi wynosić 1, 1,333 albo 4 ms");
+      const std::string addr = aes67_address(st);
+      if (!addr.empty()) {
+        auto [it, inserted] = aes67_addresses.emplace(addr, i);
+        if (!inserted)
+          add(of + "address", label + "ten sam adres wyjścia AES67 co " + station_mention(c.stations[it->second], it->second));
+      }
+    }
   }
+
+  // an input receiving one of this encoder's own AES67 outputs would feed it back into itself
+  for (size_t i = 0; i < c.stations.size(); ++i)
+    for (size_t k = 0; k < c.stations[i].inputs.size(); ++k) {
+      const auto r = parse_sdp(c.stations[i].inputs[k].sdp);
+      if (!r.stream) continue;
+      const auto own = aes67_addresses.find(r.stream->multicast_address);
+      if (own == aes67_addresses.end()) continue;
+      add(input_path(i, k) + ".sdp", station_label(c.stations[i], i) + ", wejście " + std::to_string(k + 1) +
+                                         ": to wyjście AES67 tego enkodera (" + station_mention(c.stations[own->second], own->second) +
+                                         "): pętla");
+    }
   return issues;
 }
 
@@ -670,6 +725,7 @@ std::vector<std::string> normalize_config(EncoderConfig& c) {
     c.next_station_number = next_station;
     st.processing.license_key = trim_blanks(st.processing.license_key);
     st.processing.license_key_clear = false;
+    if (const auto ip = parse_ipv4(st.aes67_output.address)) st.aes67_output.address = ipv4_to_string(*ip);  // canonical
 
     for (size_t j = 0; j < st.inputs.size(); ++j) {
       auto& in = st.inputs[j];

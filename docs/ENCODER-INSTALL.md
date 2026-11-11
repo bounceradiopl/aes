@@ -1,6 +1,6 @@
 # Bounce Encoder: instalacja i konfiguracja
 
-Bounce Encoder to osobny program Windows, który odbiera strumienie **AES67**, sumuje je w sygnał stacji i wysyła do serwerów **Icecast** w wybranych kodekach (MP3, AAC-LC, HE-AAC, HE-AACv2, FLAC). Obsługuje do 16 stacji naraz. Od wersji 1.1 każda stacja może mieć własny **processing Stereo Tool** (Thimeo): kompresję, limiter, AGC i resztę toru z presetu Stereo Tool (rozdział 10). Bez processingu stacja wysyła swój miks bez zmian. Bounce Encoder nie wysyła metadanych ani RDS.
+Bounce Encoder to osobny program Windows, który odbiera strumienie **AES67**, sumuje je w sygnał stacji i wysyła do serwerów **Icecast** w wybranych kodekach (MP3, AAC-LC, HE-AAC, HE-AACv2, FLAC). Obsługuje do 16 stacji naraz. Od wersji 1.1 każda stacja może mieć własny **processing Stereo Tool** (Thimeo): kompresję, limiter, AGC i resztę toru z presetu Stereo Tool (rozdział 10). Bez processingu stacja wysyła swój miks bez zmian. Od wersji 1.2 stacja może też nadawać swój gotowy sygnał jako strumień **AES67** do sieci AoIP, np. do nadajnika FM albo kodeka linku (rozdział 11). Bounce Encoder nie wysyła metadanych ani RDS.
 
 ```
 AES67 ─► wejście 1 (gain, opóźnienie) ─┐
@@ -10,8 +10,11 @@ AES67 ─► wejście 3 (gain, opóźnienie) ─┘                            (
    ┌───────────────────────────────────────────────────────────────────┘
    ├─► strumień 1: gain → resampler → kodek → Icecast
    ├─► strumień 2: …
-   └─► … (do 8 strumieni)
+   ├─► … (do 8 strumieni)
+   └─► wyjście AES67 (opcjonalne): L24 48 kHz stereo → multicast (rozdział 11)
 ```
+
+Strumienie i wyjście AES67 dostają ten sam sygnał: przetworzony tylko wtedy, gdy stacja ma processing Stereo Tool.
 
 BounceAES Master (sterownik ASIO) i Bounce Encoder to dwa niezależne programy. Mogą działać na jednym komputerze: panel BounceAES Master ma port 8067, panel Bounce Encoder port 8070.
 
@@ -19,8 +22,9 @@ BounceAES Master (sterownik ASIO) i Bounce Encoder to dwa niezależne programy. 
 
 - Windows 10 lub 11, **64-bit**.
 - Karta sieciowa podłączona do sieci AoIP (najlepiej osobna, w VLAN-ie AoIP), a na przełączniku IGMP snooping z querierem.
-- Zegar PTPv2 w sieci (Orban, Omnia, konsola albo BounceAES Master w roli mastera), w tej samej domenie co źródła. Bez zsynchronizowanego PTP Bounce Encoder odbiera tylko źródła, które liczą czas tym samym zegarem co on, w praktyce prawie żadne (rozdział 12).
+- Zegar PTPv2 w sieci (Orban, Omnia, konsola albo BounceAES Master w roli mastera), w tej samej domenie co źródła. Bez zsynchronizowanego PTP Bounce Encoder odbiera tylko źródła, które liczą czas tym samym zegarem co on, w praktyce prawie żadne (rozdział 13).
 - Dostęp do serwera Icecast 2.4 (albo nowszego) z hasłem źródła.
+- Dla wyjścia AES67 stacji (rozdział 11): zegar PTP zsynchronizowany co najmniej raz od startu usługi i przełącznik przenoszący multicast (IGMP snooping z querierem); odbiornik (nadajnik, kodek linku, Axia, Orban) z opóźnieniem linku co najmniej 3 × czas pakietu.
 - Dla stacji z processingiem Stereo Tool: klucz licencji Stereo Tool na każdą taką stację, około jednego rdzenia procesora i 600 MB pamięci na stację (rozdział 10).
 
 ## 2. Instalacja
@@ -30,7 +34,7 @@ BounceAES Master (sterownik ASIO) i Bounce Encoder to dwa niezależne programy. 
    - kopiuje pliki do `C:\Program Files\Bounce Encoder`, razem z bibliotekami kodeków `libmp3lame.dll` (MP3) i `libfdk-aac-2.dll` (AAC) oraz (pełny instalator) biblioteką Stereo Tool `libStereoTool_64.dll` (processing, około 117 MB). Instalator zbudowany automatycznie na GitHubie nie zawiera biblioteki Stereo Tool (rozdział 10, „Instalator bez Stereo Tool”). Program ładuje te biblioteki **tylko ze swojego folderu**. Folder spoza `Program Files` (nowy, pusty albo z poprzednią instalacją) dostaje takie same uprawnienia jak `Program Files`: administratorzy i SYSTEM pełna kontrola, Użytkownicy tylko odczyt i uruchamianie, bez dziedziczenia, bo usługa działa jako SYSTEM i nikt inny nie może podmienić jej plików. Uprawnień istniejącego folderu, w którym są już inne pliki (a nie ma Bounce Encodera), instalator nie zmienia (ostrzega). Jeśli ustawienie uprawnień się nie uda, instalator też ostrzega. Katalog główny dysku nie może być folderem programu;
    - instaluje usługę **Bounce Encoder** (`BounceEncoder`): start automatyczny razem z Windows, restart po awarii po 5 s;
    - rejestruje źródło **Bounce Encoder** w Dzienniku zdarzeń Windows;
-   - dodaje regułę zapory dla programu `BounceEncoder.exe`: odbiór AES67 (RTP), PTP 319/320 i panel 8070. Reguła dotyczy tylko tego programu, nie otwiera portów dla innych, ale obowiązuje we **wszystkich profilach sieci** (także „Publiczna”: sieci AoIP Windows zwykle tak klasyfikuje, a bez tego odbiór AES67 by nie działał). Panel jest więc osiągalny z każdej sieci, w której nasłuchuje: ustaw jego adres na kartę sieci administracyjnej (rozdział 4);
+   - dodaje regułę zapory dla programu `BounceEncoder.exe`: odbiór AES67 (RTP), PTP 319/320 i panel 8070. Wyjście AES67 (rozdział 11) potrzebuje tylko ruchu wychodzącego multicast (UDP 5004 na adres grupy i SAP 9875), więc nie dokłada żadnych portów przychodzących. Reguła dotyczy tylko tego programu, nie otwiera portów dla innych, ale obowiązuje we **wszystkich profilach sieci** (także „Publiczna”: sieci AoIP Windows zwykle tak klasyfikuje, a bez tego odbiór AES67 by nie działał). Panel jest więc osiągalny z każdej sieci, w której nasłuchuje: ustaw jego adres na kartę sieci administracyjnej (rozdział 4);
    - zakłada folder `C:\ProgramData\Bounce Encoder` z uprawnieniami **tylko dla administratorów i usługi** (SYSTEM), bo `config.json` zawiera hasła strumieni i skrót hasła panelu. Podfolder `public` mogą czytać wszyscy użytkownicy: jest w nim tylko `panel.json` (adres i port panelu dla ikony w zasobniku);
    - dodaje ikonę w zasobniku do autostartu (przy każdym logowaniu);
    - tworzy skrót **Bounce Encoder** na pulpicie i w menu Start (uruchamia ikonę w zasobniku i otwiera panel) oraz w menu Start *Panel Bounce Encoder* (otwiera tylko panel), *Instrukcja* i *Odinstaluj Bounce Encoder*.
@@ -45,7 +49,7 @@ Pliki w `C:\ProgramData\Bounce Encoder\`:
 | `public\panel.json` | adres i port panelu dla ikony w zasobniku (bez danych poufnych), zapisywany przy każdym starcie usługi |
 | `stereotool\presets\*.sts` | presety Stereo Tool wgrane w panelu albo zapisane przyciskiem „Zapisz jako preset…” (rozdział 10) |
 | `stereotool\station-<id>\` | pliki Stereo Tool jednej stacji z processingiem (`<id>` to identyfikator stacji, np. `s3`); usuwane razem ze stacją |
-| `config.json.bad` | kopia pliku, którego nie dało się w całości wczytać (rozdział 13) |
+| `config.json.bad` | kopia pliku, którego nie dało się w całości wczytać (rozdział 14) |
 | `running.marker` | znacznik pracy usługi: jest, dopóki usługa działa; usuwa go już początek zatrzymania usługi (także gdy Windows przy restarcie nie czeka na koniec zatrzymania). Zostaje po awarii albo zabiciu procesu; wtedy następny start uruchamia stacje bez processingu (rozdział 10, „Po awarii usługi”) |
 
 Ostrzeżenia i błędy trafiają też do Dziennika zdarzeń Windows (Aplikacja, źródło „Bounce Encoder”).
@@ -114,7 +118,7 @@ Podpowiedź ikony pokazuje liczbę nadających strumieni, wejść z sygnałem i 
 
 Adres i port panelu zmieniają się po ponownym uruchomieniu usługi (`services.msc` → Bounce Encoder → Uruchom ponownie). Ikona w zasobniku i skrót *Panel Bounce Encoder* w menu Start same odczytają nowy adres (z `public\panel.json`). Link na ostatniej stronie instalatora prowadzi zawsze do `http://127.0.0.1:8070`.
 
-**Zalecenie:** ustaw adres panelu na kartę sieci administracyjnej (biurowej), a nie na kartę AoIP ani `0.0.0.0`. Panel ma logowanie, ale powinien być dostępny tylko z zaufanej sieci (rozdział 14).
+**Zalecenie:** ustaw adres panelu na kartę sieci administracyjnej (biurowej), a nie na kartę AoIP ani `0.0.0.0`. Panel ma logowanie, ale powinien być dostępny tylko z zaufanej sieci (rozdział 15).
 
 ## 5. Stacje (zakładka Stacje)
 
@@ -127,12 +131,13 @@ Lista pokazuje dla każdej stacji:
 - stan („działa” i czas działania), miernik sygnału stacji i szczyt w dBFS;
 - wejścia: nazwa, adres strumienia AES67, gain i opóźnienie, miernik, stan („sygnał”, „brak sygnału” albo błąd);
 - strumienie: kodek, bitrate i częstotliwość, serwer i mountpoint, gain, miernik, stan (lampka **NA ANTENIE** z bitrate'em, „łączenie…”, komunikat błędu z rozdziału 9);
-- processing (stacja z processingiem): stan Stereo Tool i zużycie procesora, np. „działa · CPU 12,3 %”, albo przyczyna, dla której stacja nadaje bez processingu (rozdział 10).
+- processing (stacja z processingiem): stan Stereo Tool i zużycie procesora, np. „działa · CPU 12,3 %”, albo przyczyna, dla której stacja nadaje bez processingu (rozdział 10);
+- wyjście AES67 (stacja z włączonym wyjściem): znaczek **AES67** z kropką stanu: zielona (nadaje), żółta (czeka na zegar PTP, zegar podtrzymany, konflikt adresu), czerwona (błąd) (rozdział 11).
 
 Przycisk **Presety Stereo Tool…** nad listą otwiera okno presetów (rozdział 10). **Dodaj stację** otwiera edytor nowej stacji. **Edytuj** otwiera edytor istniejącej, **Usuń** usuwa stację od razu (po potwierdzeniu) i rozłącza jej strumienie.
 
 ### Edycja stacji
-Zakładka **Edycja stacji** ma pole wyboru stacji, nazwę, przełącznik „stacja włączona”, wejścia, processing (rozdział 10) i strumienie. Zmiany wysyła przycisk **Zapisz stację** na dole ekranu (**Odrzuć** je cofa). Zapis dotyczy tylko edytowanej stacji, inne stacje grają dalej bez przerwy. W edytowanej stacji od nowa łączą się tylko strumienie, które się zmieniły. Wyjątek: **zmiana nazwy stacji** łączy od nowa wszystkie jej włączone strumienie (nazwa stacji jest nazwą strumienia `Ice-Name` na serwerze), więc słuchacze usłyszą krótką przerwę; panel ostrzega o tym na pasku zapisu. Błędy (np. mountpoint bez „/”) panel pokazuje czerwonym kolorem przy polu i nic nie zapisuje, dopóki ich nie poprawisz.
+Zakładka **Edycja stacji** ma pole wyboru stacji, nazwę, przełącznik „stacja włączona”, wejścia, processing (rozdział 10), wyjście AES67 (rozdział 11) i strumienie. Zmiany wysyła przycisk **Zapisz stację** na dole ekranu (**Odrzuć** je cofa). Zapis dotyczy tylko edytowanej stacji, inne stacje grają dalej bez przerwy. W edytowanej stacji od nowa łączą się tylko strumienie, które się zmieniły. Wyjątek: **zmiana nazwy stacji** łączy od nowa wszystkie jej włączone strumienie (nazwa stacji jest nazwą strumienia `Ice-Name` na serwerze), więc słuchacze usłyszą krótką przerwę; panel ostrzega o tym na pasku zapisu. Błędy (np. mountpoint bez „/”) panel pokazuje czerwonym kolorem przy polu i nic nie zapisuje, dopóki ich nie poprawisz.
 
 Jeśli ktoś w tym czasie zmieni tę samą stację w innym panelu, panel zapyta przed zapisem, czy zastąpić tamte zmiany.
 
@@ -303,7 +308,7 @@ Stereo Tool ma własne funkcje sieciowe: wyjście strumieniowe (Icecast/Shoutcas
 Żeby awaria wewnątrz Stereo Tool nie powtarzała się w kółko (usługa po awarii uruchamia się ponownie po 5 s), Bounce Encoder zapisuje przy starcie znacznik `C:\ProgramData\Bounce Encoder\running.marker`, który usuwa już początek zatrzymania usługi, więc zatrzymanie przerwane przez Windows przy restarcie (np. po aktualizacji) nie wyłącza processingu przy następnym starcie. Jeśli usługa przy starcie znajdzie znacznik z poprzedniego uruchomienia (awaria, zabicie procesu, wyłączenie zasilania), a wtedy działał processing, **każda stacja z processingiem startuje bez niego**: nadaje sygnał bez processingu, stan „wyłączony po awarii usługi · uruchom ponownie processing” (pełna przyczyna: „awaria przy poprzednim uruchomieniu — processing wyłączony, uruchom ponownie ręcznie”), a log ma ostrzeżenie z nazwami stacji. Processing stacji wraca po **Uruchom ponownie processing**, po zapisaniu tej stacji w panelu albo po zmianie jej ustawień processingu (preset, klucz). Przed ponownym włączeniem sprawdź log z poprzedniego uruchomienia; jeśli awaria wraca przy tym samym presecie, zgłoś go z logiem.
 
 ### Instalator bez Stereo Tool
-Repozytorium Bounce Encodera i pliki budowane na GitHubie (artefakty `BounceEncoder-setup` i `BounceEncoder-binaries`) są publiczne, więc nie zawierają niczego od Thimeo: ani `libStereoTool_64.dll`, ani noty `StereoTool-NOTICE.txt`. Z takim instalatorem processing pokazuje „brak biblioteki Stereo Tool …”, a reszta programu działa normalnie (stacje bez processingu). Instalacja takiego instalatora na miejscu wcześniejszej pełnej zostawia bibliotekę i notę na miejscu. Pełny instalator buduje się lokalnie z tych samych plików i biblioteki z SDK Thimeo (rozdział 16, „Budowanie ze źródeł”); tylko ten trafia do stacji.
+Repozytorium Bounce Encodera i pliki budowane na GitHubie (artefakty `BounceEncoder-setup` i `BounceEncoder-binaries`) są publiczne, więc nie zawierają niczego od Thimeo: ani `libStereoTool_64.dll`, ani noty `StereoTool-NOTICE.txt`. Z takim instalatorem processing pokazuje „brak biblioteki Stereo Tool …”, a reszta programu działa normalnie (stacje bez processingu). Instalacja takiego instalatora na miejscu wcześniejszej pełnej zostawia bibliotekę i notę na miejscu. Pełny instalator buduje się lokalnie z tych samych plików i biblioteki z SDK Thimeo (rozdział 17, „Budowanie ze źródeł”); tylko ten trafia do stacji.
 
 ### Stan processingu
 Stan widać w edycji stacji (pola **Stan**, **Procesor**, **Opóźnienie**, **Interfejs WWW**) i w skrócie na liście stacji. Pełna przyczyna jest w podpowiedzi i w logu.
@@ -338,24 +343,103 @@ Szacunek (1 rdzeń i około 600 MB na instancję Stereo Tool, 1 rdzeń na wejśc
 | 8 | około 18–20 rdzeni | 32 GB |
 | 16 | około 34–36 rdzeni | 32–64 GB, albo dwa komputery po 8 stacji |
 
-Jedna instancja Stereo Tool pracuje na jednym rdzeniu, więc **szybkość pojedynczego rdzenia jest ważniejsza niż liczba rdzeni**: lepiej sprawdzają się procesory z wysokim taktowaniem (np. stacjonarne). To szacunek: zużycie zależy od presetu. Przed pracą na antenie zmierz obciążenie na docelowym komputerze z docelowymi presetami i liczbą stacji (panel pokazuje CPU każdej stacji, TESTY.md) i plan zasilania ustaw na „Wysoka wydajność” (rozdział 12).
+Jedna instancja Stereo Tool pracuje na jednym rdzeniu, więc **szybkość pojedynczego rdzenia jest ważniejsza niż liczba rdzeni**: lepiej sprawdzają się procesory z wysokim taktowaniem (np. stacjonarne). To szacunek: zużycie zależy od presetu. Przed pracą na antenie zmierz obciążenie na docelowym komputerze z docelowymi presetami i liczbą stacji (panel pokazuje CPU każdej stacji, TESTY.md) i plan zasilania ustaw na „Wysoka wydajność” (rozdział 13).
 
 ### Identyfikatory stacji i porty
 - Nowa stacja zawsze dostaje nowy identyfikator (`s1`, `s2`, …), nigdy identyfikator usuniętej stacji, więc nie przejmie jej plików Stereo Tool (`stereotool\station-<id>\`, usuwane razem ze stacją).
 - Porty interfejsów WWW: port bazowy + numer stacji (0–15), domyślnie 8100–8115. Nie mogą obejmować portu panelu. Reguła zapory instalatora dotyczy całego programu `BounceEncoder.exe`, więc nie ogranicza tych portów; interfejsy są osiągalne tylko z tego komputera, bo nasłuchują wyłącznie na `127.0.0.1`, i pytają o hasło (wyżej). Innych portów Stereo Tool nie otwiera (funkcje sieciowe są wyłączone, wyżej).
 
-## 11. Statystyki i logi
+## 11. Wyjście AES67
+
+![Edycja stacji: sekcja Wyjście AES67 z nazwą, adresem multicast, czasem pakietu, stanem i przyciskami SDP](images/encoder/aes67-edycja.png)
+
+Stacja może oprócz strumieni Icecast nadawać swój gotowy sygnał jako strumień **AES67** do sieci AoIP, np. do nadajnika FM albo kodeka linku. Wyjście jest opcjonalne i domyślnie wyłączone (także po aktualizacji z 1.1). Stacje bez wyjścia AES67 działają jak w 1.1.
+
+### Co wyjście nadaje
+- **Ten sam sygnał co strumienie Icecast.** Bez processingu stacji to jej miks (wejścia po gainie i opóźnieniu); przy 0 dB tor wejście → wyjście jest bit w bit. **Stacja z włączonym processingiem Stereo Tool wysyła sygnał przetworzony, stacja bez processingu nie przechodzi przez Stereo Tool wcale.** Wyjście niczego w Stereo Tool nie zmienia i go nie wymaga.
+- Format jest stały: L24, 48 kHz, 2 kanały (stereo), payload type 98, UDP 5004. Bez resamplingu i kodeka. Gdy stacja nadaje sygnał bez processingu, bo Stereo Tool nie działa (rozdział 10), wyjście też niesie sygnał bez processingu: nigdy ciszę z tego powodu.
+- Wyjście nie ma własnego gainu. Poziom ustawia się w Stereo Tool albo w odbiorniku.
+- Jedno wyjście na stację. Kilka urządzeń może odbierać ten sam multicast.
+
+### Ustawienia (Edycja stacji → Wyjście AES67)
+| Pole | Znaczenie |
+|---|---|
+| przełącznik **Nadawanie do sieci** | włącza wyjście stacji; zacznie nadawać po zapisaniu stacji |
+| **Nazwa** | nazwa strumienia w ogłoszeniu SAP i w SDP; pusta: nazwa stacji |
+| **Adres multicast** | adres IPv4 z zakresu `239.x.x.x`, unikalny wśród stacji; pusty: adres domyślny |
+| **Czas pakietu** | 1 ms (standard), 1,333 ms albo 4 ms (mniejsze obciążenie sieci i procesora); odbiornik musi obsługiwać wybrany czas |
+
+**Adres domyślny** to `239.69.110.N`, gdzie N = stały numer stacji + 1 (ten sam numer, od którego liczy się port interfejsu WWW Stereo Tool, rozdział 10): stacja o numerze 0 dostaje `239.69.110.1`, o numerze 15 `239.69.110.16`. Adres zależy od numeru stacji, a nie od jej miejsca na liście, więc nie zmienia się po przestawieniu ani usunięciu innych stacji. BounceAES Master używa adresów `239.69.100.x`, więc oba programy na jednym komputerze się nie zderzają. Pole stanu pokazuje adres, na którym wyjście faktycznie nadaje.
+
+Panel odrzuca przy zapisie: adres spoza `239.x.x.x`, ten sam adres wyjścia na dwóch stacjach, czas pakietu spoza listy oraz **pętlę**: wejście stacji, którego SDP ma adres multicast równy adresowi wyjścia którejkolwiek stacji tego enkodera („to wyjście AES67 tego enkodera (…): pętla”).
+
+![Lista stacji: znaczek AES67 z kropką stanu przy stacji z włączonym wyjściem](images/encoder/aes67-stacje.png)
+
+Na liście stacji stacja z włączonym wyjściem ma znaczek **AES67** z kropką: zielona (nadaje), żółta (czeka na zegar PTP, zegar podtrzymany albo konflikt adresu), czerwona (błąd).
+
+### Ogłaszanie SAP i SDP
+- Enkoder ogłasza włączone wyjścia przez **SAP** (grupa `239.255.255.255`, port 9875) co 30 s, więc urządzenia i programy, które słuchają SAP, widzą strumień same. Ogłoszenie jest wycofywane po wyłączeniu wyjścia i przy zatrzymaniu usługi.
+- Ogłoszenia nie ma, dopóki wyjście czeka na pierwszy zegar PTP albo ma błąd.
+- Dla odbiorników, które SAP nie obsługują (większość nadajników i kodeków linku), użyj przycisków **Kopiuj SDP** (do schowka; gdy przeglądarka nie pozwala, SDP jest zaznaczone: Ctrl+C) i **Pobierz SDP** (plik `<nazwa stacji>.sdp`) i wczytaj SDP w odbiorniku. Przyciski działają, gdy wyjście jest włączone i zapisane. Ten sam plik daje `GET /api/stations/<id>/aes67.sdp` (po zalogowaniu). SDP zawiera tylko parametry strumienia (adres, port, format, zegar PTP), żadnych kluczy ani haseł.
+- **BounceAES Master** na tym samym komputerze albo w sieci: **Dodaj źródło…** otwiera okno „Dodaj źródło”, które pokazuje ogłoszenia SAP; przycisk **Dodaj** przy strumieniu stacji tworzy subskrypcję (albo **Wklej SDP…**). **Axia** i **Orban**: dodaj strumień z SDP (albo z ogłoszenia SAP, jeśli urządzenie je pokazuje) i ustaw u odbiorcy opóźnienie linku (niżej).
+
+### Opóźnienie wyjścia i opóźnienie linku odbiornika
+Wyjście niesie dźwięk ze stałym opóźnieniem względem miksu stacji: opóźnienie odbioru stacji + 10 ms (takt stacji) + 10 ms zapasu; stacja z processingiem dostaje dodatkowo opóźnienie Stereo Tool (około 90 ms) i jeszcze 10 ms zapasu na pracę wątku processingu (razem 20 ms zapasu). Dochodzi do tego opóźnienie wejścia stacji (pole **Opóźnienie**). Pole **Opóźnienie wyjścia** pokazuje całość w ms, np. około 25 ms bez processingu przy opóźnieniu odbioru 5 ms (5 + 10 + 10) i około 125 ms z processingiem (5 + 10 + 90 + 10 + 10). Wartość jest stała, dopóki nie zmienisz opóźnienia odbioru albo nie włączysz lub wyłączysz processingu.
+
+**Zalecane opóźnienie linku odbiornika (link offset): co najmniej 3 × czas pakietu**, czyli 3 ms przy 1 ms, 4 ms przy 1,333 ms i 12 ms przy 4 ms. Enkoder pracuje w Windows, a jego wątek wysyłający ma jitter większy niż sprzęt AoIP; zbyt małe opóźnienie linku w odbiorniku daje trzaski albo „spóźnione pakiety” po stronie odbiornika.
+
+### Zegar PTP
+- Enkoder jest zawsze **slave'em PTP** (rozdział 13); wyjście używa tego samego zegara co wejścia. Nie zostaje masterem.
+- **Zanim zegar PTP zsynchronizuje się po raz pierwszy od startu usługi, wyjście nie nadaje i nie ogłasza się** (stan „czeka na zegar PTP”). Zwykle trwa to kilka sekund po starcie.
+- **Po pierwszej synchronizacji wyjście nadaje dalej, także gdy master zniknie** (np. Orban wyłączony albo przerwa w sieci): zegar jest podtrzymywany na ostatniej częstotliwości, stan to „zegar podtrzymany (brak mastera PTP)” w kolorze ostrzeżenia, a log ma wpis. Odbiornik zsynchronizowany z innym zegarem może po dłuższym czasie odpłynąć. Po powrocie mastera wyjście wraca na jego zegar (z jednym krótkim ponownym ustawieniem, niżej).
+- **PTP wyłączony** w Ustawieniach…: wyjście nie nadaje (stan „PTP wyłączony — wyjście AES67 wymaga zegara PTP”).
+
+### Włączenie i wyłączenie processingu, restart Stereo Tool
+Wyjście ma stałe opóźnienie, więc zmiana opóźnienia ustawia je na nowo: dźwięk ściszany jest w 5 ms, potem cisza, a potem narasta w 5 ms. Żaden dźwięk nie jest powtarzany, a taka przerwa nie jest liczona jako luka. Odbiornik słyszy jedną krótką przerwę, podobnie jak strumienie Icecast.
+- **Włączenie processingu**: przerwa mniej więcej tak długa jak opóźnienie Stereo Tool (około 90 ms; plus zapas, który processing dokłada).
+- **Wyłączenie processingu**: krótkie ciche przekazanie wyjścia stacji (około 15–20 ms), a z sygnału znika mniej więcej tyle programu, ile wynosiło opóźnienie Stereo Tool (około 90 ms jest pominięte, nie powtórzone).
+- **Ponowne uruchomienie Stereo Tool** zwykle nie wymaga ponownego ustawienia (opóźnienie Stereo Tool się nie zmienia); jeśli się zmieni, przerwa jest taka jak przy włączeniu.
+- **Skok zegara PTP** tylko wyłania dźwięk od nowa (narastanie 5 ms), bez przerwy o długości opóźnienia.
+- Zmiana opóźnienia odbioru stacji działa tak samo jak włączenie processingu.
+
+### Konflikt adresu
+Enkoder słucha ogłoszeń SAP na karcie AoIP. Gdy **inne urządzenie ogłasza ten sam adres multicast** co włączone wyjście (także BounceAES Master na tym samym komputerze), stan wyjścia dostaje ostrzeżenie „Ten sam adres ogłasza …” (nazwa i adres nadawcy), kropka robi się żółta, a log ma wpis. To tylko ostrzeżenie: wyjście nadaje dalej, a **adresu nigdy nie zmienia samo**, bo nadajnik jest zapisany na ten adres. Zmianę (adresu tego wyjścia albo drugiego urządzenia) robi obsługa. Ostrzeżenie znika od razu, gdy drugie urządzenie wycofa swoje ogłoszenie (np. zostanie wyłączone w sposób zwykły), a w przeciwnym razie najpóźniej około 5 minut po jego ostatnim ogłoszeniu (ogłoszenie bez odświeżenia wygasa po 5 minutach, sprawdzane co 10 s). Po zmianie adresu własnego wyjścia ostrzeżenie przelicza się przy najbliższym sprawdzeniu (do 10 s). Konflikt wykrywa się tylko wtedy, gdy wyjście jest ogłaszane, czyli nie w stanie „czeka na zegar PTP” ani w stanie błędu.
+
+### Karta sieciowa i zapora
+Wyjście nadaje przez kartę AoIP wybraną w Ustawieniach…. **Przy włączonym wyjściu ustaw kartę jawnie** (nie „Automatycznie”): wyjście nie powinno zmieniać karty samo. Jedno wyjście wysyła około **1,2 Mbit/s** na stację (L24 stereo, 48 kHz). Gdy karta przy starcie usługi jest rozłączona, usługa ponawia próbę sama (tak jak dla wejść) i do tego czasu wyjście ma stan błędu. Instalator dodaje regułę zapory dla programu `BounceEncoder.exe`; wyjście potrzebuje tylko **ruchu wychodzącego multicast**: UDP 5004 na adres grupy i SAP (UDP 9875 na `239.255.255.255`). Nie otwiera żadnych nowych portów przychodzących. Przełącznik musi przenosić multicast (IGMP snooping z querierem: odbiorniki dołączają do grupy same).
+
+### Statystyki
+**Statystyki → Wyjście AES67** pokazują dla każdej stacji z wyjściem: stan, adres (`adres:5004`), **Pakiety**, **Luki** i **Błędy wysyłania**. W edycji stacji ta sama para jako „Pakiety · Luki”.
+- **Luki** to pakiety, które wyszły z ciszą, bo dźwięku stacji zabrakło na czas (komputer nie nadążył albo stacja stała). **Powinny zostać na 0** (jak „Pominięte ramki” stacji). Ponowne ustawienie po zmianie processingu (wyżej) luką nie jest.
+- **Błędy wysyłania** to pakiety, których gniazdo nie przyjęło (karta rozłączona, brak trasy) oraz pakiety pominięte po zatrzymaniu wątku wysyłającego albo przerwie w pracy karty. Powinny zostać na 0.
+
+### Rozwiązywanie problemów
+| Objaw | Sprawdź |
+|---|---|
+| „czeka na zegar PTP”, brak pakietów | PTP musi zsynchronizować się choć raz od startu usługi: pasek stanu „PTP: zsynchronizowany”, domena PTP i karta AoIP (rozdział 13), master w sieci (Orban), zapora UDP 319/320 |
+| „PTP wyłączony — wyjście AES67 wymaga zegara PTP” | włącz PTP w Ustawieniach… |
+| „błąd: nie można nadawać multicastu przez kartę …” albo „nie można otworzyć gniazda nadawczego AES67” | karta AoIP w Ustawieniach… (rozłączona, zły adres); usługa ponawia sama; adres karty w Statystykach (Usługa → Karta sieciowa) |
+| Enkoder nadaje (rosną pakiety), odbiornik cichy | adres i port w SDP odbiornika (Kopiuj SDP / Pobierz SDP, albo **Dodaj źródło…** w BounceAES Master przez SAP); czas pakietu obsługiwany przez odbiornik (spróbuj 1 ms); IGMP snooping z querierem na przełączniku (multicast dociera tylko do portów, które go zażądały); zapora odbiornika; odbiornik na tej samej podsieci i karcie |
+| Odbiornik trzeszczy albo zgłasza spóźnione pakiety | opóźnienie linku odbiornika: co najmniej 3 × czas pakietu (wyżej); zegar PTP odbiornika w tej samej domenie; po utracie mastera zegar podtrzymany dryfuje względem odbiornika |
+| Rosną **Luki** | komputer nie nadąża: obciążenie procesora (najwyżej 50 %), plan zasilania „Wysoka wydajność”, ustawienia karty sieciowej (rozdział 13), liczba stacji z processingiem (rozdział 10); sprawdź też, czy stacja nie została zatrzymana |
+| „Ten sam adres ogłasza …” | inne urządzenie (albo BounceAES Master) nadaje na tym samym adresie: zmień adres jednego z nich; enkoder sam adresu nie zmienia |
+| „zegar podtrzymany (brak mastera PTP)” | master PTP zniknął: sprawdź Orbana i sieć; wyjście nadaje dalej, wraca na zegar mastera samo |
+| Przy włączeniu processingu krótka przerwa na wyjściu | zamierzone: ponowne ustawienie (wyżej) |
+| Zapis stacji odrzucony: „pętla” albo „ten sam adres wyjścia AES67 co …” | wejście stacji odbiera wyjście tego enkodera: usuń je; dwie stacje na jednym adresie: zmień jeden adres |
+| Brak ogłoszenia SAP w odbiorniku, choć wyjście nadaje | SAP bywa niewidoczny przez przełącznik albo odbiornik go nie obsługuje: użyj SDP z przycisków; SAP idzie co 30 s |
+
+## 12. Statystyki i logi
 
 **Statystyki** (także z menu ikony w zasobniku):
 - **Zegar PTP**: stan, zegar (PTP albo własny), domena, grandmaster, odchyłka, opóźnienie ścieżki, korekta częstotliwości, utraty synchronizacji;
 - **Usługa**: wersja, czas działania, karta sieciowa, liczby stacji, wejść i strumieni;
 - **Stacje**: stan, czas działania, pominięte ramki (powinny zostać na 0);
-- **Wejścia**: pakiety, bajty, niedobory, przepełnienia (pakiety odrzucone, m.in. spoza okna czasu: bez synchronizacji PTP rosną stale, rozdział 12), błędy sekwencji, jitter, sygnał;
+- **Wejścia**: pakiety, bajty, niedobory, przepełnienia (pakiety odrzucone, m.in. spoza okna czasu: bez synchronizacji PTP rosną stale, rozdział 13), błędy sekwencji, jitter, sygnał;
 - **Strumienie**: stan, wysłane bajty, kb/s, ponowienia, odrzucone dane, ramki odrzucone w kolejce kodera („Ramki: kolejka”) i przez resampler („Ramki: resampler”: błąd albo brak miejsca przy przeliczaniu częstotliwości, powinny zostać na 0), czas obecnego połączenia z serwerem („Połączony”: liczony od nowa po każdym ponownym połączeniu).
 
 **Logi**: ostatnie 500 wpisów usługi, najnowsze na górze. Pełny log jest w `C:\ProgramData\Bounce Encoder\logs\bounce-encoder.log` (tylko dla administratorów).
 
-## 12. PTP, sieć i strojenie Windows
+## 13. PTP, sieć i strojenie Windows
 
 - Bounce Encoder jest zawsze **PTP slave**: podąża za grandmasterem w wybranej domenie i nigdy nie nadaje zegara. Pasek stanu na dole panelu pokazuje „PTP: zsynchronizowany”, „synchronizacja…” albo „zegar własny”.
 - **Bez synchronizacji PTP odbiór zwykle nie działa.** Bez mastera (albo zanim zegar się zsynchronizuje) program liczy czas mediów z własnego zegara komputera (czas systemowy w skali TAI, „zegar własny”). Pakiety AES67 niosą znaczniki czasu na zegarze nadawcy, a wejście przyjmuje tylko pakiety, których czas wypada w oknie od „teraz − opóźnienie odbioru” do „teraz + 0,5 s”. Nadawca na innym zegarze (urządzenie zsynchronizowane z grandmasterem, którego Bounce Encoder nie widzi, albo z własnym zegarem) jest więc odrzucany w całości: w Statystykach rosną **Przepełnienia**, wejście ma stan „brak sygnału”, a stacja nadaje ciszę.
@@ -366,18 +450,19 @@ Jedna instancja Stereo Tool pracuje na jednym rdzeniu, więc **szybkość pojedy
 - Karta sieciowa AoIP (Menedżer urządzeń → Właściwości → Zaawansowane): *Interrupt Moderation*, *Energy Efficient Ethernet* i *Flow Control* wyłączone; w zarządzaniu energią odznacz „Zezwalaj komputerowi na wyłączanie tego urządzenia”. Plan zasilania: „Wysoka wydajność”.
 - Wyłącz Wi-Fi i inne karty w tej samej podsieci co AoIP.
 
-## 13. Diagnostyka
+## 14. Diagnostyka
 
 | Objaw | Sprawdź |
 |---|---|
 | Ikona czerwona, panel się nie otwiera | `services.msc` → Bounce Encoder → Uruchom; log `C:\ProgramData\Bounce Encoder\logs\bounce-encoder.log`; Dziennik zdarzeń (Aplikacja, źródło „Bounce Encoder”) |
 | Ikona żółta | panel → Stacje: który strumień nie nadaje albo które wejście nie ma sygnału |
-| Wejście „brak sygnału” | czy źródło nadaje; SDP (adres, port); wybrana karta sieciowa AoIP (Ustawienia…); IGMP na przełączniku; zapora. Jeśli w Statystykach rosną **Przepełnienia** (pakiety przychodzą, ale są odrzucane): PTP niezsynchronizowany, więc czas źródła i Bounce Encodera się nie zgadza (rozdział 12): domena PTP, karta AoIP, w32time zajmujący porty 319/320, zapora |
+| Wejście „brak sygnału” | czy źródło nadaje; SDP (adres, port); wybrana karta sieciowa AoIP (Ustawienia…); IGMP na przełączniku; zapora. Jeśli w Statystykach rosną **Przepełnienia** (pakiety przychodzą, ale są odrzucane): PTP niezsynchronizowany, więc czas źródła i Bounce Encodera się nie zgadza (rozdział 13): domena PTP, karta AoIP, w32time zajmujący porty 319/320, zapora |
 | Wejście z błędem „nieprawidłowy SDP” | SDP musi opisywać L16/L24, 48 kHz, 1–2 kanały, adres multicast; wklej cały plik |
 | Wejście z błędem „dołączenie do grupy …” albo „gniazdo odbiorcze: …” | karta sieciowa AoIP (Ustawienia…) jest rozłączona albo ma inny adres; usługa ponawia próbę sama |
-| Trzaski, rośnie licznik niedoborów | zwiększ opóźnienie odbioru wejścia; ustawienia karty sieciowej (rozdział 12) |
-| PTP „zegar własny”, choć master jest w sieci | domena PTP (ta sama co w grandmasterze), karta AoIP (Ustawienia…), w32time zajmujący porty 319/320 (rozdział 12), zapora (UDP 319/320) |
+| Trzaski, rośnie licznik niedoborów | zwiększ opóźnienie odbioru wejścia; ustawienia karty sieciowej (rozdział 13) |
+| PTP „zegar własny”, choć master jest w sieci | domena PTP (ta sama co w grandmasterze), karta AoIP (Ustawienia…), w32time zajmujący porty 319/320 (rozdział 13), zapora (UDP 319/320) |
 | Strumień z komunikatem błędu | tabela w rozdziale 9 |
+| Wyjście AES67 nie nadaje, odbiornik cichy, rosną „Luki”, konflikt adresu | tabela „Rozwiązywanie problemów” w rozdziale 11 |
 | AAC niedostępny | brak `libfdk-aac-2.dll` w folderze programu: zainstaluj ponownie |
 | Rosną „Odrzucone” w strumieniu | serwer albo łącze nie nadąża: przepustowość wysyłania, obciążenie serwera |
 | Rosną „Pominięte ramki” stacji | komputer nie nadąża: obciążenie CPU, liczba strumieni HE-AAC, plan zasilania |
@@ -396,7 +481,7 @@ Windows czeka na zatrzymanie usługi do 10 s. Jeśli przy zatrzymaniu pojawia si
 
 Przy zatrzymaniu usługi ze stacjami z processingiem log ma wpis „Processing: instancje Stereo Tool (N) nie są usuwane przy zatrzymaniu usługi; pamięć zwalnia zakończenie procesu”. To zamierzone: usuwanie instancji Stereo Tool trwa około sekundy każda, a zakończenie procesu i tak zwalnia ich pamięć, więc usługa zatrzymuje się szybko. Wpis „Stereo Tool nie zakończył pracy w ciągu … s” znaczy, że Stereo Tool zawiesił się w wywołaniu (dołącz log do zgłoszenia) albo że stacja przy zatrzymaniu wciąż czekała na uruchomienie swojego Stereo Tool: uruchomienia idą jedno po drugim, około 1 s każde, więc zatrzymanie usługi zaraz po jej starcie z wieloma stacjami z processingiem też może go dać. Wtedy usługa kończy proces od razu, bez sprzątania pamięci (wpis „wątki Stereo Tool, które nie zakończyły pracy: N — proces kończy się natychmiast …”; pamięć zwalnia system), a zatrzymanie usługi jest zgłaszane normalnie.
 
-## 14. Znane ograniczenia
+## 15. Znane ograniczenia
 
 - **Panel tylko w zaufanej sieci.** Biblioteka HTTP panelu czyta bardzo długie pierwsze wiersze żądań w całości, zanim sprawdzi logowanie. Komputer z dostępem do portu panelu może w ten sposób zająć dużo pamięci usługi. Ustaw adres panelu na kartę sieci administracyjnej albo `127.0.0.1` (rozdział 4) i nie wystawiaj portu 8070 do internetu (z zewnątrz tylko przez odwrotne proxy z HTTPS i własnym uwierzytelnieniem). Poprawka przyjdzie z aktualizacją biblioteki, wspólną dla BounceAES Master i Bounce Encoder.
 - Panel obsługuje jedno żądanie na połączenie (zabezpieczenie przed przemycaniem żądań); dla panelu nie ma to odczuwalnego kosztu.
@@ -406,7 +491,7 @@ Przy zatrzymaniu usługi ze stacjami z processingiem log ma wpis „Processing: 
 - Adres i port panelu zmieniają się dopiero po restarcie usługi.
 - Brak kodeka AAC (pliku `libfdk-aac-2.dll`) wyłącza tylko strumienie AAC (rozdział 8).
 
-## 15. Licencje kodeków i Stereo Tool
+## 16. Licencje kodeków i Stereo Tool
 
 Bounce Encoder jest na licencji GPL-3.0-or-later. Kodeki MP3 i AAC oraz Stereo Tool to osobne biblioteki ładowane w czasie pracy; libogg, libFLAC i libsamplerate są wkompilowane w program:
 
@@ -424,9 +509,11 @@ Licencja FDK AAC nie jest zgodna z GPL, dlatego licencja Bounce Encoder ma dodat
 
 Pełne teksty licencji i nota Stereo Tool (`StereoTool-NOTICE.txt`, tylko z pełnym instalatorem) są w folderze programu (`licencje\`), zasady w pliku `LICENCJE.md`.
 
-## 16. Aktualizacja, odinstalowanie, podpisywanie
+## 17. Aktualizacja, odinstalowanie, podpisywanie
 
 **Aktualizacja:** uruchom nowy instalator. Zatrzyma usługę i ikonę, wymieni pliki i uruchomi usługę ponownie. Konfiguracja zostaje.
+
+**Co nowego w 1.2.0:** **wyjście AES67 stacji** (rozdział 11): każda stacja może nadawać swój gotowy sygnał (ten sam co strumienie Icecast, po Stereo Tool tylko gdy stacja ma processing) jako strumień AES67 L24 48 kHz stereo na adres `239.69.110.N`, z ogłoszeniem SAP i SDP do skopiowania lub pobrania, do nadajnika FM albo kodeka linku. Enkoder zostaje slave'em PTP: czeka na pierwszą synchronizację, a po niej nadaje dalej na podtrzymanym zegarze. Konflikt adresu jest ostrzeżeniem, adres nigdy nie zmienia się sam. Wyjście jest domyślnie wyłączone, a stacje bez niego działają jak w 1.1. Rozdziały od Statystyk w górę mają numery o jeden większe niż w 1.1.
 
 **Co nowego w 1.1.0:** processing **Stereo Tool** (Thimeo 11.07) na stacji (rozdział 10): każda stacja może mieć własny Stereo Tool z presetem `.sts` i własnym kluczem licencji (albo domyślnym z Ustawień…). Presety wgrywa się, pobiera i usuwa w oknie **Presety Stereo Tool…**; strojenie w interfejsie WWW Stereo Tool tej stacji (tylko na komputerze enkodera, `127.0.0.1`) i zapis jako nowy preset. Gdy Stereo Tool nie działa, nie nadąża albo licencja nie obejmuje ustawień, stacja nadaje sygnał bez processingu (nigdy ciszę), a panel pokazuje przyczynę. Interfejs WWW Stereo Tool pyta o własne, losowe hasło (przycisk **Pokaż hasło** w panelu). Funkcje sieciowe Stereo Tool z presetów (strumień, UECP, MicroMPX i inne) są zawsze wyłączone. Po awarii usługi z działającym processingiem stacje startują bez processingu, dopóki się go nie uruchomi ręcznie. Pełny instalator zawiera `libStereoTool_64.dll` (jest większy o około 30 MB, program o około 117 MB); instalator budowany na GitHubie jest bez niej (rozdział 10). Nowa stacja nigdy nie dostaje identyfikatora usuniętej. Stacje bez processingu działają jak w 1.0.4.
 

@@ -6,6 +6,7 @@
 // emptied by the API thread.
 #include <algorithm>
 
+#include "aes67_output.hpp"
 #include "bam/platform/time.hpp"
 #include "engine_internal.hpp"
 
@@ -229,10 +230,14 @@ void Station::process(uint64_t from, size_t frames) {
       m[f * 2 + 1] = static_cast<float>(g * double(m[f * 2 + 1]));
     }
   }
-  if (plan_->processing)
-    plan_->processing->push(mix_.data(), frames);  // a copy into its queue: never waits on Stereo Tool
-  else
+  if (plan_->processing) {
+    plan_->processing->push(mix_.data(), frames, from);  // a copy into its queue: never waits on Stereo Tool
+  } else {
     for (const auto& stream : plan_->streams) stream->push(mix_.data(), frames);
+    // the one writer of the AES67 output now: a worker switched away from has faded out before
+    // this plan was published (ProcessingWorker::set_aes67)
+    if (plan_->aes67) plan_->aes67->write(mix_.data(), frames, from);
+  }
 
   frames_since_peaks_ += frames;
   if (frames_since_peaks_ >= kPeakFrames) publish_peaks();

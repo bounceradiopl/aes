@@ -439,3 +439,19 @@ test("the Stereo Tool library line, also after a crash", () => {
     { text: "Stereo Tool 11.07: awaria Stereo Tool — uruchom ponownie usługę Bounce Encoder", warn: true });
   assert.equal(L.plural(64, "preset", "presety", "presetów"), "presety");
 });
+
+test("aes67 helpers", () => {
+  assert.equal(L.aes67DefaultAddress(0), "239.69.110.1");
+  assert.equal(L.aes67DefaultAddress(-1), "");
+  assert.equal(L.aes67AddressError(""), "");
+  assert.equal(L.aes67AddressError("239.1.2.3"), "");
+  assert.match(L.aes67AddressError("10.0.0.1"), /239/);
+  assert.match(L.aes67AddressError("239.1.2"), /239/);
+  assert.equal(L.aes67StateLabel({ state: "sending", address: "239.69.110.1" }), "nadaje · 239.69.110.1");
+  assert.equal(L.aes67StateLabel({ state: "waiting_for_ptp", reason: "czeka na zegar PTP" }), "czeka na zegar PTP");
+  assert.equal(L.aes67Dot({ state: "sending", conflict: "" }), "ok");
+  assert.equal(L.aes67Dot({ state: "sending", conflict: "X (127.0.0.2)" }), "warn");
+  assert.equal(L.aes67Dot({ state: "holdover" }), "warn");
+  assert.equal(L.aes67Dot({ state: "error" }), "err");
+  assert.equal(L.aes67Dot({ state: "off" }), "off");
+});

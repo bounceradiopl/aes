@@ -18,11 +18,13 @@
 #include <functional>
 #include <mutex>
 #include <new>
+#include <span>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "../encoder/src/aes67_output.hpp"
 #include "../encoder/src/engine_internal.hpp"
 #include "../encoder/src/stereotool_api.hpp"  // the web interface parameter indices
 #include "bam/encoder/stereotool.hpp"
@@ -74,15 +76,21 @@ using PW = bd::ProcessingWorker;
 constexpr uint32_t kRamp = be::kRampFrames;
 const std::string kUnlicensed = "Fake: Declipper, Fake: Multiband";
 
-// The worker's output, as the streams would get it.
+// The worker's output, as the streams would get it, and the mix position of every frame.
 struct Collector {
   std::mutex m;
   std::vector<float> out;
-  explicit Collector(size_t max_frames = 48000 * 20) { out.reserve(max_frames * 2); }
-  std::function<void(const float*, size_t)> tap() {
-    return [this](const float* s, size_t n) {
+  std::vector<uint64_t> positions;
+  explicit Collector(size_t max_frames = 48000 * 20) {
+    out.reserve(max_frames * 2);
+    positions.reserve(max_frames);
+  }
+  std::function<void(const float*, size_t, uint64_t)> tap() {
+    return [this](const float* s, size_t n, uint64_t pos) {
       std::lock_guard lock(m);
-      if (out.size() + n * 2 <= out.capacity()) out.insert(out.end(), s, s + n * 2);  // never reallocates
+      if (out.size() + n * 2 > out.capacity()) return;  // never reallocates
+      out.insert(out.end(), s, s + n * 2);
+      for (size_t k = 0; k < n; ++k) positions.push_back(pos + k);
     };
   }
   size_t frames() {
@@ -92,6 +100,10 @@ struct Collector {
   std::vector<float> copy() {
     std::lock_guard lock(m);
     return out;
+  }
+  std::vector<uint64_t> positions_copy() {
+    std::lock_guard lock(m);
+    return positions;
   }
 };
 
@@ -113,6 +125,9 @@ struct Input {
   size_t frames_now() const { return in.size() / 2; }
 };
 
+// The mix position of input frame 0 (input frame j is pushed as kFeedBase + j).
+constexpr uint64_t kFeedBase = 7'000'000;
+
 // Pushes `frames` more of the input in 10 ms blocks, one every `ns_per_block` (10 ms: real time).
 void feed(PW& w, Input& input, size_t frames, int64_t ns_per_block = 2'000'000, size_t block = 480) {
   int64_t next = bp::monotonic_ns();
@@ -120,7 +135,7 @@ void feed(PW& w, Input& input, size_t frames, int64_t ns_per_block = 2'000'000, 
     const size_t n = std::min(block, frames - done);
     const size_t from = input.frames();
     input.extend(n);
-    w.push(input.in.data() + from * 2, n);
+    w.push(input.in.data() + from * 2, n, kFeedBase + from);
     done += n;
     next += ns_per_block;
     bp::sleep_until_ns(next);
@@ -427,6 +442,38 @@ TEST_CASE("processing: the output is the input through Stereo Tool, aligned with
   w.stop();
   CHECK(w.status().state == be::ProcessingState::Off);
   CHECK(fake().value("live") == 0);  // the instance is deleted on stop
+}
+
+TEST_CASE("processing: delivered frames carry the positions their input frames were pushed with") {
+  UseFake use;
+  fake().set("gain", 0.5);
+  fake().set("latency", 512);
+  Collector col;
+  Input input;
+  PW w(settings(col), "s1");
+  REQUIRE(feed_until(w, input, be::ProcessingState::Running));
+  feed(w, input, 48000);
+  REQUIRE(drained(w, col, input));
+  const auto pos = col.positions_copy();
+  REQUIRE(pos.size() == col.frames());
+  for (size_t j = 0; j < pos.size(); ++j) REQUIRE(pos[j] == kFeedBase + j);
+}
+
+TEST_CASE("processing: a jump in the pushed position starts a new base from that frame") {
+  UseFake use;
+  Collector col;
+  Input input;
+  PW w(settings(col), "s1");
+  REQUIRE(feed_until(w, input, be::ProcessingState::Running));
+  const size_t before = input.frames();
+  constexpr uint64_t kJump = 900'000'000;
+  input.extend(4800);
+  for (size_t k = 0; k < 4800; k += 480) w.push(input.in.data() + (before + k) * 2, 480, kJump + k);
+  feed(w, input, 9600);  // contiguous again from kFeedBase + frames: a second jump (back)
+  REQUIRE(drained(w, col, input));
+  const auto pos = col.positions_copy();
+  for (size_t j = 0; j < 4800; ++j) CHECK(pos[before + j] == kJump + j);
+  CHECK(pos[before + 4800] == kFeedBase + before + 4800);
 }
 
 TEST_CASE("processing: switching processed <-> bypass crossfades over 240 frames, never a step above the ramp") {
@@ -760,7 +807,7 @@ TEST_CASE("processing: a station catch-up burst that Stereo Tool drains keeps pr
     const size_t n = std::min<size_t>(backlog, 24000);
     const size_t from = input.frames();
     input.extend(n);
-    w.push(input.in.data() + from * 2, n);
+    w.push(input.in.data() + from * 2, n, kFeedBase + from);
     backlog -= n;
   }
   feed(w, input, 72000, 10'000'000);  // 1.5 s of real time after it
@@ -854,7 +901,7 @@ TEST_CASE("processing: the queue from the station is bounded") {
   Input input;
   PW w(settings(col), "s9");
   input.extend(3 * 48000);
-  w.push(input.in.data(), input.frames());  // 3 s at once: only the newest 2 s can stay
+  w.push(input.in.data(), input.frames(), kFeedBase);  // 3 s at once: only the newest 2 s can stay
   CHECK(w.status().queue_dropped_frames >= 48000);
   CHECK(wait_until([&] { return col.frames() + w.delay_frames() + w.status().queue_dropped_frames >= input.frames(); }));
   CHECK(col.frames() <= input.frames() - 48000);
@@ -891,7 +938,7 @@ TEST_CASE("processing: no allocation per block on the output and Stereo Tool thr
   out_calls = 0;
   st_calls = 0;
   bd::ProcessingSettings s;
-  s.output_tap = [](const float*, size_t) {
+  s.output_tap = [](const float*, size_t, uint64_t) {
     const size_t i = out_calls.load();
     if (i < kMax) out_allocs[i] = t_new_calls;
     out_calls.store(i + 1);
@@ -903,6 +950,7 @@ TEST_CASE("processing: no allocation per block on the output and Stereo Tool thr
   };
   Input input(48000 * 8);
   PW w(s, "s11");
+  w.set_aes67(std::make_shared<bd::Aes67Output>(1000, 11));  // written after each tap call
   REQUIRE(feed_until(w, input, be::ProcessingState::Running));
   feed(w, input, 9600);
   const size_t out0 = out_calls, st0 = st_calls;
@@ -939,6 +987,84 @@ TEST_CASE("processing: streams are handed over like a plan and released off the 
   feed(w, input, 4800);
   w.set_streams({});  // the list the output thread let go of is released here
   CHECK(stream.use_count() == 1);
+}
+
+TEST_CASE("processing: the AES67 output gets the delivered frames at their positions, handed over like the streams") {
+  UseFake use;
+  fake().set("gain", 0.5);
+  fake().set("latency", 512);
+  constexpr uint32_t kD = 4800;
+  auto aes67 = std::make_shared<bd::Aes67Output>(1000, 7);
+  aes67->set_delay(kD);
+  Collector col;
+  Input input;
+  PW w(settings(col), "s13");
+  w.set_aes67(aes67);
+  REQUIRE(feed_until(w, input, be::ProcessingState::Running));
+  feed(w, input, 24000);
+  REQUIRE(drained(w, col, input));
+  const auto out = col.copy();
+  const auto pos = col.positions_copy();
+  // packet T carries the frame delivered with position T - kD (L24), whatever the worker made of it
+  const uint64_t last = kFeedBase + pos.size();
+  const uint64_t from = last - 9600 + kD, to = last - 480 + kD;
+  size_t checked = 0;
+  for (uint64_t now = from; now <= to; now += 12) {
+    aes67->pump(now, 1, [&](std::span<const uint8_t> p) {
+      const uint32_t ts = uint32_t(p[4]) << 24 | uint32_t(p[5]) << 16 | uint32_t(p[6]) << 8 | p[7];
+      if (ts < from + 600) return;  // the first packets fade in
+      for (size_t i = 12, f = 0; i + 6 <= p.size(); i += 6, ++f) {
+        const size_t j = size_t(ts + f - kD - kFeedBase);
+        REQUIRE(pos[j] == ts + f - kD);
+        const int32_t left = int32_t(uint32_t(p[i]) << 24 | uint32_t(p[i + 1]) << 16 | uint32_t(p[i + 2]) << 8);
+        CHECK(left == (int32_t(double(out[j * 2]) * 2147483648.0) & int32_t(0xffffff00)));
+        ++checked;
+      }
+    });
+  }
+  CHECK(checked > 6000);
+  CHECK(aes67->stats().gaps == 0);
+  w.set_aes67(nullptr);
+  feed(w, input, 4800);
+  w.set_aes67(nullptr);  // the output the output thread let go of is released here
+  CHECK(aes67.use_count() == 1);
+}
+
+TEST_CASE("processing: switched on and off, the worker and the station never both write the AES67 output") {
+  // The engine's protocol, with this thread as the station: it pushes into a new worker after its
+  // last direct write, and writes the output itself again only once the worker it switches away
+  // from has faded out (faded_out(), or stop()). The worker writes the output in the same
+  // delivery the tap sees, so a tap call during the direct writes would be a second writer.
+  UseFake use;
+  auto aes67 = std::make_shared<bd::Aes67Output>(1000, 8);
+  std::atomic<bool> direct{false};
+  std::atomic<int> late{0}, delivered{0};
+  Input input(48000 * 8);
+  for (int round = 0; round < 3; ++round) {
+    bd::ProcessingSettings s;
+    s.output_tap = [&](const float*, size_t, uint64_t) {
+      if (direct.load()) ++late;
+      ++delivered;
+    };
+    PW w(s, "tg");
+    w.set_aes67(aes67);
+    direct.store(false);  // the last direct write was before; the first push follows
+    const int before = delivered.load();
+    feed(w, input, 9600);
+    REQUIRE(wait_until([&] { return delivered.load() > before; }));
+    w.fade_out();
+    for (int k = 0; k < 500 && !w.faded_out(); ++k) feed(w, input, 480);  // until the station takes the plan
+    REQUIRE(w.faded_out());
+    direct.store(true);
+    for (int k = 0; k < 20; ++k) {  // direct writes while the old worker still gets the mix
+      const size_t from = input.frames();
+      input.extend(480);
+      aes67->write(input.in.data() + from * 2, 480, kFeedBase + from);
+      w.push(input.in.data() + from * 2, 480, kFeedBase + from);
+      bp::sleep_ns(2'000'000);
+    }
+  }
+  CHECK(late.load() == 0);
 }
 
 TEST_CASE("processing: a new preset is loaded into the running instance, aligned, with crossfades") {
@@ -1103,6 +1229,26 @@ TEST_CASE("processing: fade_out() ramps the output down over 240 frames, then ha
     CHECK(out[(before + k) * 2] == static_cast<float>(g * double(0.25f)));
   }
   CHECK(out.back() == 0.0f);
+}
+
+TEST_CASE("processing: a faded-out worker never moves the delay of the output the station owns again") {
+  UseFake use;
+  Collector col;
+  Input input;
+  input.dc = 0.5f;
+  PW w(settings(col), "fo2");
+  REQUIRE(feed_until(w, input, be::ProcessingState::Running));
+  feed(w, input, 4800);
+  w.fade_out();
+  feed(w, input, 4800);
+  REQUIRE(wait_until([&] { return w.faded_out(); }));
+  auto out = std::make_shared<bd::Aes67Output>(1000, 5);
+  out->set_delay(1234);
+  w.set_aes67(out, 5000);  // taken by the output thread, which must not sync
+  feed(w, input, 4800);
+  REQUIRE(wait_until([&] { return out.use_count() > 1; }));
+  bp::sleep_ns(100'000'000);
+  CHECK(out->delay() == 1234);
 }
 
 TEST_CASE("processing: key, station name, home folder, web port and preset reach the instance; no key in reasons") {

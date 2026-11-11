@@ -33,21 +33,25 @@ const char* library_name(Codec c) {
 
 AudioQueue::AudioQueue(size_t capacity_frames) : ring_(capacity_frames * 2), capacity_(capacity_frames) {}
 
-void AudioQueue::push(const float* stereo, size_t frames) {
+void AudioQueue::put(const float* stereo, size_t frames, bool has_pos, uint64_t pos) {
   if (capacity_ == 0 || frames == 0) return;
   {
     std::lock_guard lock(m_);
+    if (!has_pos) pos = tail_pos_;
     if (frames > capacity_) {  // only the newest capacity_ frames can stay
       dropped_.fetch_add(frames - capacity_, std::memory_order_relaxed);
       stereo += (frames - capacity_) * 2;
+      pos += frames - capacity_;
       frames = capacity_;
     }
-    if (size_ + frames > capacity_) {  // the stream fell behind: drop the oldest
-      const size_t over = size_ + frames - capacity_;
-      head_ = (head_ + over) % capacity_;
-      size_ -= over;
-      dropped_.fetch_add(over, std::memory_order_relaxed);
+    if (size_ + frames > capacity_) drop_oldest(size_ + frames - capacity_);  // the stream fell behind
+    if (size_ == 0) {
+      head_pos_ = pos;
+    } else if (pos != tail_pos_) {
+      if (jumps_n_ == kJumps) drop_oldest(size_t(jumps_[jump_first_].index - head_index_));
+      jumps_[(jump_first_ + jumps_n_++) % kJumps] = Jump{head_index_ + size_, pos};
     }
+    tail_pos_ = pos + frames;
     size_t tail = (head_ + size_) % capacity_;
     const size_t first = std::min(frames, capacity_ - tail);
     std::memcpy(ring_.data() + tail * 2, stereo, first * 2 * sizeof(float));
@@ -57,15 +61,35 @@ void AudioQueue::push(const float* stereo, size_t frames) {
   cv_.notify_one();
 }
 
-size_t AudioQueue::pop(float* out, size_t max_frames, int wait_ms) {
+void AudioQueue::drop_oldest(size_t frames) {
+  head_ = (head_ + frames) % capacity_;
+  size_ -= frames;
+  dropped_.fetch_add(frames, std::memory_order_relaxed);
+  advance(frames);
+}
+
+void AudioQueue::advance(size_t frames) {
+  head_index_ += frames;
+  head_pos_ += frames;
+  for (; jumps_n_ > 0 && jumps_[jump_first_].index <= head_index_; --jumps_n_) {
+    const Jump& j = jumps_[jump_first_];
+    head_pos_ = j.pos + (head_index_ - j.index);
+    jump_first_ = (jump_first_ + 1) % kJumps;
+  }
+}
+
+size_t AudioQueue::pop(float* out, size_t max_frames, int wait_ms, uint64_t* pos) {
   std::unique_lock lock(m_);
   cv_.wait_for(lock, std::chrono::milliseconds(wait_ms), [&] { return size_ > 0 || woken_; });
-  const size_t n = std::min(max_frames, size_);
+  size_t n = std::min(max_frames, size_);
+  if (jumps_n_ > 0) n = std::min(n, size_t(jumps_[jump_first_].index - head_index_));  // up to the next jump
+  if (pos) *pos = head_pos_;
   const size_t first = std::min(n, capacity_ - head_);
   std::memcpy(out, ring_.data() + head_ * 2, first * 2 * sizeof(float));
   if (first < n) std::memcpy(out + first * 2, ring_.data(), (n - first) * 2 * sizeof(float));
   head_ = n == 0 ? head_ : (head_ + n) % capacity_;
   size_ -= n;
+  advance(n);
   return n;
 }
 

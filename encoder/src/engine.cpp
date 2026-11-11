@@ -18,7 +18,12 @@
 #include <set>
 #include <thread>
 
+#include "aes67_output.hpp"
+#include "aes67_sap.hpp"
+#include "aes67_sender.hpp"
+#include "bam/auth.hpp"  // random_hex: the RTP SSRC of an AES67 output
 #include "bam/config.hpp"  // ptime_us_to_frames
+#include "bam/constants.hpp"  // kRtpPort
 #include "bam/gain.hpp"
 #include "bam/log.hpp"
 #include "bam/platform/time.hpp"
@@ -28,6 +33,9 @@
 
 namespace bam::encoder {
 
+using detail::Aes67Output;
+using detail::Aes67Sap;
+using detail::Aes67Sender;
 using detail::InputRx;
 using detail::ProcessingEvent;
 using detail::ProcessingSettings;
@@ -46,6 +54,23 @@ constexpr int64_t kHousekeepingNs = 100'000'000;        // housekeeping thread p
 // A removed input keeps receiving this long, so the station can fade it out on real audio.
 constexpr int64_t kLingerNs = 500'000'000;
 constexpr int64_t kInterfaceCheckNs = 2'000'000'000;  // the automatic interface, looked up again
+// The AES67 output's delay D (mix position -> RTP timestamp, spec §3) = the station's receive
+// latency + these two + the processing delay.
+constexpr uint32_t kAes67TickFrames = 480;    // the station's 10 ms tick
+constexpr uint32_t kAes67MarginFrames = 480;  // 10 ms
+
+uint32_t random_ssrc() { return static_cast<uint32_t>(std::stoul(random_hex(4), nullptr, 16)); }
+
+// "1 ms", "1,333 ms"
+std::string ptime_text(uint32_t us) {
+  std::string s = std::to_string(us / 1000);
+  if (us % 1000) {
+    char buf[8];
+    std::snprintf(buf, sizeof buf, ",%03u", unsigned(us % 1000));
+    s += buf;
+  }
+  return s + " ms";
+}
 
 // Stops the workers side by side: each IcecastClient::stop() may take a few hundred ms, a
 // processing worker up to its Stereo Tool stop timeout (5 s) when Stereo Tool hangs.
@@ -176,6 +201,13 @@ struct StationRuntime {
   std::unique_ptr<Station> station;
   ProcessingRuntime proc;
   uint64_t fade_in = 0;  // StationPlan::fade_in: counts the switches away from a processing worker
+  uint32_t latency_frames = 0;  // the last plan's
+  // The AES67 output (null: switched off), rebuilt only for another packet time.
+  std::shared_ptr<Aes67Output> aes67;
+  uint32_t aes67_ptime_us = 0;  // as built
+  std::string aes67_address;    // as last given to the sender
+  uint32_t aes67_ssrc = random_ssrc();  // one per station runtime: edits keep the RTP identity
+  std::string aes67_conflict;  // another announcer of the address (housekeeping), else empty
 };
 
 struct EncoderEngine::Impl {
@@ -195,6 +227,12 @@ struct EncoderEngine::Impl {
   // only they still hold) once the engine has the only reference, never on the network thread.
   std::vector<std::shared_ptr<const detail::RxSet>> retired_rx_sets;
   int64_t iface_checked_ns = 0;  // the automatic interface was last looked up (housekeeping)
+  // AES67 outputs: one sender while any station has one
+  std::unique_ptr<Aes67Sender> aes67_sender;
+  std::unique_ptr<Aes67Sap> aes67_sap;  // while any output is announced
+  int64_t aes67_iface_tried_ns = 0;  // the last retry of a failed multicast interface
+  bool ptp_ever_locked = false;  // since start(): the outputs may send (spec §4)
+  bool ptp_holdover = false;     // locked once, not now
 
   std::mutex hk_m;
   std::condition_variable hk_cv;
@@ -233,6 +271,15 @@ struct EncoderEngine::Impl {
                                                                      const std::vector<std::shared_ptr<ProcessingWorker>>& finished) const;
   void processing_housekeeping(StationRuntime& rt, int64_t now);
   void publish(StationRuntime& rt);
+  void update_aes67(StationRuntime& rt);
+  void update_aes67_sender();
+  void aes67_housekeeping();
+  void update_aes67_sap();
+  std::string build_aes67_sdp(const StationConfig& st) const;
+  bool aes67_allowed() const { return ptp_ever_locked || !opts.aes67_require_ptp; }
+  static uint32_t aes67_base(const StationRuntime& rt);  // the delay without the worker's own
+  static uint32_t aes67_delay(const StationRuntime& rt);
+  Aes67Status aes67_status(const StationConfig& sc, const StationRuntime* rt) const;
   void update_rx_set();
   void release_rx_sets();
   void check_interface(int64_t now);
@@ -451,6 +498,7 @@ void EncoderEngine::Impl::update_processing(StationRuntime& rt, const EncoderCon
   std::shared_ptr<const std::atomic<bool>> old_instance;  // a replaced worker's: the same home folder
   if (replaces(p, w)) {
     p.worker->fade_out();  // apply() asked for it already and waited for every station at once
+    if (rt.aes67) rt.aes67->expect_hole();
     if (!p.worker->faded_out()) {
       // its output thread must be done before the station's new path hands anything to the streams
       log_warning(who + "wyjście processingu nie wyciszyło się w " + wait_text(kFadeOutWaitNs) + ", zatrzymane");
@@ -526,6 +574,7 @@ void EncoderEngine::Impl::fade_out_leaving_workers(const EncoderConfig& next) {
     auto it = stations.find(sc.id);
     if (!sc.enabled || it == stations.end() || !replaces(it->second->proc, processing_wanted(next, index))) continue;
     it->second->proc.worker->fade_out();
+    if (it->second->aes67) it->second->aes67->expect_hole();  // the hole until publish() is no gap
     leaving.push_back(it->second->proc.worker.get());
   }
   const int64_t until = platform::monotonic_ns() + kFadeOutWaitNs;
@@ -543,20 +592,161 @@ void EncoderEngine::Impl::publish(StationRuntime& rt) {
     latency = std::max(latency, e->rx->latency_frames);
   }
   plan->latency_frames = latency ? latency : kDefaultLatencyFrames;
+  rt.latency_frames = plan->latency_frames;
   std::vector<std::shared_ptr<StreamWorker>> streams = active_streams(rt);
   if (rt.proc.worker) {
-    // the worker feeds the streams (taken at its next block, before the station's first push)
+    // the worker feeds the streams and the AES67 output (taken at its next block, before the
+    // station's first push); a worker that went has faded out before this (update_processing)
     rt.proc.worker->set_streams(std::move(streams));
+    rt.proc.worker->set_aes67(rt.aes67, aes67_base(rt));
     plan->processing = rt.proc.worker;
   } else {
     plan->streams = std::move(streams);
+    plan->aes67 = rt.aes67;
   }
   plan->fade_in = rt.fade_in;
+  if (rt.aes67) rt.aes67->set_delay(aes67_delay(rt));
   if (rt.station) {
     rt.station->publish(std::move(plan));
   } else {
     rt.station = std::make_unique<Station>(clock, std::move(plan));
     log_info("Stacja \"" + rt.cfg.name + "\" uruchomiona");
+  }
+}
+
+uint32_t EncoderEngine::Impl::aes67_base(const StationRuntime& rt) {
+  // a station with processing gets one more block: the worker's output thread runs a block behind
+  return rt.latency_frames + kAes67TickFrames + kAes67MarginFrames + (rt.proc.worker ? kAes67MarginFrames : 0);
+}
+
+uint32_t EncoderEngine::Impl::aes67_delay(const StationRuntime& rt) {
+  return aes67_base(rt) + (rt.proc.worker ? rt.proc.worker->delay_frames() : 0);
+}
+
+// The station's AES67 output from rt.cfg: built when switched on, rebuilt for another packet time,
+// dropped when switched off (publish() then hands the plan and the worker the new one, or none).
+// A new address or name keeps it (the sender gets the address in update_aes67_sender()).
+void EncoderEngine::Impl::update_aes67(StationRuntime& rt) {
+  const Aes67OutputConfig& o = rt.cfg.aes67_output;
+  const std::string who = "Stacja \"" + rt.cfg.name + "\": wyjście AES67 ";
+  if (!o.enabled) {
+    if (rt.aes67) log_info(who + "wyłączone");
+    rt.aes67.reset();
+    rt.aes67_ptime_us = 0;
+    rt.aes67_address.clear();
+    return;
+  }
+  const std::string address = aes67_address(rt.cfg);
+  if (rt.aes67 && rt.aes67_ptime_us == o.ptime_us) {
+    if (address != rt.aes67_address) log_info(who + "nadaje teraz na adres " + address);
+    rt.aes67_address = address;
+    return;
+  }
+  log_info(who + (rt.aes67 ? "nowy czas pakietu: " + ptime_text(o.ptime_us)
+                           : "włączone: " + address + ":" + std::to_string(kRtpPort) + ", „" + aes67_name(rt.cfg) +
+                                 "”, pakiet " + ptime_text(o.ptime_us)));
+  rt.aes67 = std::make_shared<Aes67Output>(o.ptime_us, rt.aes67_ssrc);
+  rt.aes67_ptime_us = o.ptime_us;
+  rt.aes67_address = address;
+}
+
+// The sender gets every station's output; it runs only while there is one.
+void EncoderEngine::Impl::update_aes67_sender() {
+  Aes67Sender::Outputs outputs;
+  for (const auto& [id, rt] : stations)
+    if (rt->aes67) outputs.emplace_back(rt->aes67_address, rt->aes67);
+  if (outputs.empty()) {
+    aes67_sender.reset();
+    return;
+  }
+  if (!aes67_sender) {
+    aes67_sender = std::make_unique<Aes67Sender>(clock);
+    aes67_sender->set_interface(iface);
+    aes67_iface_tried_ns = platform::monotonic_ns();
+    if (const std::string err = aes67_sender->error(); !err.empty()) log_warning("Wyjście AES67: " + err);
+    if (!aes67_allowed())
+      log_info(opts.enable_ptp ? "Wyjście AES67: czeka na zegar PTP (nie nadaje przed pierwszą synchronizacją)"
+                               : "Wyjście AES67: PTP wyłączony — wyjście AES67 wymaga zegara PTP");
+  }
+  aes67_sender->set_allowed(aes67_allowed());
+  aes67_sender->set_outputs(std::move(outputs));
+}
+
+// Every kHousekeepingNs: the outputs send from the first PTP lock on (or at once when the test
+// option allows), and keep sending when the master is lost (holdover, logged).
+void EncoderEngine::Impl::aes67_housekeeping() {
+  const bool locked = ptp && ptp->status().state == PtpState::Locked;
+  if (locked && !ptp_ever_locked) {
+    ptp_ever_locked = true;
+    if (aes67_sender && opts.aes67_require_ptp) log_info("Wyjście AES67: zegar PTP zsynchronizowany, wyjścia nadają");
+  }
+  if (aes67_sender) aes67_sender->set_allowed(aes67_allowed());
+  // a card that was not up yet at start: tried again like the inputs
+  if (aes67_sender && !aes67_sender->error().empty() && !iface.empty()) {
+    const int64_t now = platform::monotonic_ns();
+    if (now - aes67_iface_tried_ns >= detail::input_retry_ns()) {
+      aes67_iface_tried_ns = now;
+      aes67_sender->set_interface(iface);
+      if (aes67_sender->error().empty()) log_info("Wyjście AES67: nadawanie przez kartę " + iface + " działa");
+    }
+  }
+  update_aes67_sap();
+  const bool holdover = ptp_ever_locked && !locked;
+  if (holdover != ptp_holdover) {
+    ptp_holdover = holdover;
+    if (aes67_sender) {
+      if (holdover)
+        log_warning("Wyjście AES67: zegar podtrzymany (brak mastera PTP), wyjścia nadają dalej");
+      else
+        log_info("Wyjście AES67: zegar PTP znów podąża za masterem");
+    }
+  }
+}
+
+std::string EncoderEngine::Impl::build_aes67_sdp(const StationConfig& st) const {
+  const Aes67OutputConfig& o = st.aes67_output;
+  SdpStream s;
+  s.session_name = aes67_name(st);
+  s.origin_address = iface.empty() ? "0.0.0.0" : iface;
+  s.multicast_address = aes67_address(st);
+  s.ttl = kMulticastTtl;
+  s.port = kRtpPort;
+  s.payload_type = 98;
+  s.encoding = Encoding::L24;
+  s.sample_rate = 48000;
+  s.channels = 2;
+  s.frames_per_packet = ptime_us_to_frames(o.ptime_us);
+  s.ptime_ms = s.frames_per_packet * 1000.0 / 48000;
+  const PtpStatus ps = ptp ? ptp->status() : PtpStatus{};
+  if (ps.has_master) {
+    s.ptp_gmid = ps.grandmaster.to_string();
+    s.ptp_domain = ps.domain;
+  } else {
+    s.ptp_domain = config.ptp_domain;
+  }
+  // "BEN\0" + slot; the version only changes with this output's own stream
+  const uint16_t version =
+      sap_hash(s.session_name + "|" + s.multicast_address + "|" + std::to_string(o.ptime_us) + "|" + s.ptp_gmid + "|" + s.origin_address);
+  return generate_sdp(s, 0x42454E00u + static_cast<uint64_t>(st.processing.web_port_slot), version);
+}
+
+// Announced: the outputs that are switched on and allowed to send (not waiting for PTP, no
+// socket error). The SAP thread exists only while there is one; also notes address conflicts.
+void EncoderEngine::Impl::update_aes67_sap() {
+  std::map<std::string, std::string> sdps;
+  if (opts.enable_sap && aes67_sender && aes67_sender->error().empty() && aes67_allowed() && !iface.empty())
+    for (const auto& [id, rt] : stations)
+      if (rt->aes67) sdps[id] = build_aes67_sdp(rt->cfg);
+  if (sdps.empty()) aes67_sap.reset();
+  else {
+    if (!aes67_sap) aes67_sap = std::make_unique<Aes67Sap>();
+    aes67_sap->set_announcements(iface, std::move(sdps));
+  }
+  for (const auto& [id, rt] : stations) {
+    const std::string c = aes67_sap && rt->aes67 ? aes67_sap->conflict(rt->aes67_address, iface) : std::string();
+    if (c != rt->aes67_conflict && !c.empty())
+      log_warning("Wyjście AES67 stacji „" + rt->cfg.name + "”: ten sam adres ogłasza " + c);
+    rt->aes67_conflict = c;
   }
 }
 
@@ -595,6 +785,11 @@ void EncoderEngine::Impl::apply(const EncoderConfig& next) {
   const std::string next_iface = next.interface_ip.empty() ? detail::default_interface_ip() : next.interface_ip;
   if (next_iface.empty()) log_warning("Nie znaleziono aktywnej karty sieciowej IPv4");
   if (next_iface != iface) log_info("Bounce Encoder: karta sieciowa " + (next_iface.empty() ? std::string("(brak)") : next_iface));
+  if (next_iface != iface && aes67_sender) {
+    aes67_sender->set_interface(next_iface);
+    aes67_iface_tried_ns = platform::monotonic_ns();
+    if (const std::string err = aes67_sender->error(); !err.empty()) log_warning("Wyjście AES67: " + err);
+  }
   iface = next_iface;
   if (opts.enable_ptp && (!ptp || ptp->domain() != next.ptp_domain || ptp->iface() != iface)) {
     ptp.reset();
@@ -649,6 +844,7 @@ void EncoderEngine::Impl::apply(const EncoderConfig& next) {
       rt->streams[s.id] = std::move(w);
     }
     update_processing(*rt, next, index, finished);
+    update_aes67(*rt);
     publish(*rt);
     kept[sc.id] = std::move(rt);
   }
@@ -659,8 +855,10 @@ void EncoderEngine::Impl::apply(const EncoderConfig& next) {
     log_info("Stacja \"" + rt->cfg.name + "\" zatrzymana");
   }
   stations = std::move(kept);
+  update_aes67_sender();
   update_rx_set();
   config = next;
+  update_aes67_sap();
   // after the new plans: a station may still push into an old worker until its next tick (a copy
   // into a queue nobody reads); the worker itself goes once the station let go of the plan
   stop_workers(std::move(finished));
@@ -709,9 +907,12 @@ void EncoderEngine::Impl::housekeeping() {
     }
     rt->station->collect();
     processing_housekeeping(*rt, now);
+    // a station without a worker: D follows the input latency (the worker syncs its own D)
+    if (rt->aes67 && !rt->proc.worker && rt->aes67->delay() != aes67_base(*rt)) rt->aes67->set_delay(aes67_base(*rt));
   }
   if (rx_changed) update_rx_set();
   release_rx_sets();
+  aes67_housekeeping();
   check_interface(now);
 }
 
@@ -771,6 +972,8 @@ void EncoderEngine::Impl::processing_housekeeping(StationRuntime& rt, int64_t no
 }
 
 void EncoderEngine::Impl::shutdown() {
+  aes67_sap.reset();  // withdraws the announcements
+  aes67_sender.reset();  // before the stations: nothing is sent from a station being torn down
   std::vector<std::shared_ptr<StreamWorker>> workers;
   std::vector<std::shared_ptr<ProcessingWorker>> processing;
   for (auto& [id, rt] : stations) {
@@ -824,6 +1027,8 @@ bool EncoderEngine::start(const EncoderConfig& config, std::string* error) {
   }
   m.iface.clear();
   m.iface_checked_ns = m.started_ns;
+  m.ptp_ever_locked = false;
+  m.ptp_holdover = false;
   m.rx = std::make_unique<RxThread>(m.clock);
   m.running = true;
   m.hold_after_unclean_end(config);
@@ -880,6 +1085,16 @@ void EncoderEngine::apply_config(const EncoderConfig& config) {
     std::string err;
     if (!m.store.remove_station_home(id, &err)) log_warning("Stereo Tool: " + err);
   }
+}
+
+std::optional<std::string> EncoderEngine::aes67_sdp(const std::string& station_id, std::string* error) const {
+  std::lock_guard lock(impl_->m);
+  auto it = impl_->stations.find(station_id);
+  if (it == impl_->stations.end() || !it->second->aes67) {
+    if (error) *error = "wyjście AES67 stacji jest wyłączone";
+    return std::nullopt;
+  }
+  return impl_->build_aes67_sdp(it->second->cfg);
 }
 
 EncoderConfig EncoderEngine::config() const {
@@ -965,7 +1180,39 @@ StationStatus EncoderEngine::Impl::station_status(const StationConfig& sc) const
   }
   st.processing.enabled = sc.processing.enabled;
   st.processing.preset = sc.processing.preset;
+  st.aes67 = aes67_status(sc, rt);
   return st;
+}
+
+Aes67Status EncoderEngine::Impl::aes67_status(const StationConfig& sc, const StationRuntime* rt) const {
+  Aes67Status a;
+  a.address = aes67_address(sc);
+  a.name = aes67_name(sc);
+  a.ptime_us = sc.aes67_output.ptime_us;
+  if (!rt || !rt->aes67) return a;  // Off
+  a.conflict = rt->aes67_conflict;
+  const detail::Aes67Stats stats = rt->aes67->stats();
+  a.packets = stats.packets;
+  a.gaps = stats.gaps;
+  a.send_errors = stats.send_errors;
+  double input_delay_s = 0;
+  for (const InputConfig& in : sc.inputs)
+    if (in.enabled) input_delay_s = std::max(input_delay_s, in.delay_s);
+  a.output_latency_ms = rt->aes67->delay() * 1000.0 / kStationRate + input_delay_s * 1000.0;
+  const std::string err = aes67_sender ? aes67_sender->error() : std::string();
+  if (!err.empty()) {
+    a.state = Aes67State::Error;
+    a.reason = err;
+  } else if (!aes67_allowed()) {
+    a.state = Aes67State::WaitingForPtp;
+    a.reason = opts.enable_ptp ? "czeka na zegar PTP" : "PTP wyłączony — wyjście AES67 wymaga zegara PTP";
+  } else if (ptp_ever_locked && !(ptp && ptp->status().state == PtpState::Locked)) {
+    a.state = Aes67State::Holdover;
+    a.reason = "zegar podtrzymany (brak mastera PTP)";
+  } else {
+    a.state = Aes67State::Sending;
+  }
+  return a;
 }
 
 EncoderStatus EncoderEngine::status() const {
