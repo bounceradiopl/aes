@@ -18,6 +18,7 @@
 #include <unistd.h>  // fsync, fileno
 #endif
 
+#include "bam/constants.hpp"  // kSapGroup
 #include "bam/config.hpp"  // min_rx_latency_us, kMinRxLatencyUs, kMaxRxLatencyUs
 #include "bam/encoder/dsp.hpp"
 #include "bam/ipv4.hpp"
@@ -644,6 +645,10 @@ std::vector<EncoderConfigIssue> validate_config(const EncoderConfig& c) {
       const auto ip = parse_ipv4(ao.address);
       if (!ao.address.empty() && (!ip || (*ip)[0] != 239))
         add(of + "address", label + "adres wyjścia AES67 musi być adresem multicast 239.x.x.x");
+      else if (ip && ipv4_to_string(*ip) == kSapGroup)
+        add(of + "address", label + "adres 239.255.255.255 jest zarezerwowany dla ogłoszeń SAP, wybierz inny adres wyjścia AES67");
+      if (ao.name.size() > kMaxNameBytes) add(of + "name", label + "nazwa wyjścia AES67 może mieć najwyżej 64 bajty");
+      if (has_control(ao.name)) add(of + "name", label + "nazwa wyjścia AES67 nie może zawierać znaków sterujących");
       if (std::find(std::begin(kAes67PtimesUs), std::end(kAes67PtimesUs), ao.ptime_us) == std::end(kAes67PtimesUs))
         add(of + "ptime_us", label + "czas pakietu wyjścia AES67 musi wynosić 1, 1,333 albo 4 ms");
       const std::string addr = aes67_address(st);
@@ -720,6 +725,7 @@ std::vector<std::string> normalize_config(EncoderConfig& c) {
     c.next_station_number = next_station;
     st.processing.license_key = trim_blanks(st.processing.license_key);
     st.processing.license_key_clear = false;
+    if (const auto ip = parse_ipv4(st.aes67_output.address)) st.aes67_output.address = ipv4_to_string(*ip);  // canonical
 
     for (size_t j = 0; j < st.inputs.size(); ++j) {
       auto& in = st.inputs[j];

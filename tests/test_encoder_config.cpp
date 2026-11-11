@@ -1441,6 +1441,25 @@ TEST_CASE("encoder config: AES67 output validation") {
   bad.stations[1].inputs = {in};
   CHECK(issues_for(bad).find("pętla") != std::string::npos);
 
+  bad = c;  // the output's name is checked like the station's
+  bad.stations[0].aes67_output = {true, "Linia\r\nZ", "", 1000};
+  CHECK(issues_for(bad).find("stations[0].aes67_output.name") != std::string::npos);
+  bad.stations[0].aes67_output.name = std::string(65, 'x');
+  CHECK(issues_for(bad).find("stations[0].aes67_output.name") != std::string::npos);
+  bad.stations[0].aes67_output.name = std::string(64, 'x');
+  CHECK(issues_for(bad).find("aes67_output.name") == std::string::npos);
+
+  bad = c;  // the SAP group is not an output address
+  bad.stations[0].aes67_output = {true, "", "239.255.255.255", 1000};
+  CHECK(issues_for(bad).find("stations[0].aes67_output.address") != std::string::npos);
+
+  // an explicit address is stored in canonical form (leading zeros dropped)
+  auto norm = c;
+  norm.stations[0].aes67_output = {true, "", "239.001.1.1", 1000};
+  be::normalize_config(norm);
+  CHECK(norm.stations[0].aes67_output.address == "239.1.1.1");
+  CHECK(issues_for(norm).find("aes67") == std::string::npos);
+
   auto ok = c;  // an output that is off is not checked for duplicates or loops
   ok.stations[0].aes67_output = {false, "", "239.5.5.6", 1000};
   ok.stations[1].inputs = {in};
