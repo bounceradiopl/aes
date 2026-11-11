@@ -1030,23 +1030,32 @@ function aes67Block() {
   const sdpUrl = `/api/stations/${encodeURIComponent(sid)}/aes67.sdp`;
   const copy = el("button", { type: "button", class: "mini", dataset: { icon: "copy" } }, "Kopiuj SDP");
   const download = el("button", { type: "button", class: "mini", dataset: { icon: "download" } }, "Pobierz SDP");
-  download.addEventListener("click", () => {  // the route answers with Content-Disposition: attachment
-    const link = el("a", { href: sdpUrl, download: `${sid}.sdp` });
-    document.body.append(link);
-    link.click();
-    link.remove();
-  });
-  const sdpText = el("textarea", { class: "sdp-text", readOnly: true, rows: 8, hidden: true, "aria-label": "SDP wyjścia AES67" });
-  copy.addEventListener("click", async () => {
+  // fetched first: a plain link would save the 409 JSON body of a stopped output as a .sdp file
+  const fetchSdp = async () => {
     let r;
     try {
       r = await api(sdpUrl);
     } catch (e) {
       if (!(e instanceof AuthRequired)) toast("Brak połączenia z usługą: nie pobrano SDP", "err");
-      return;
+      return null;
     }
-    if (!r.ok) { toast(r.data?.error || `Nie można pobrać SDP (HTTP ${r.status})`, "err"); return; }
-    const sdp = String(r.data ?? "");
+    if (!r.ok) { toast(r.data?.error || `Nie można pobrać SDP (HTTP ${r.status})`, "err"); return null; }
+    return String(r.data ?? "");
+  };
+  download.addEventListener("click", async () => {
+    const sdp = await fetchSdp();
+    if (sdp == null) return;
+    const url = URL.createObjectURL(new Blob([sdp], { type: "application/sdp" }));
+    const link = el("a", { href: url, download: `${sid}.sdp`, hidden: true });
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  });
+  const sdpText = el("textarea", { class: "sdp-text", readOnly: true, rows: 8, hidden: true, "aria-label": "SDP wyjścia AES67" });
+  copy.addEventListener("click", async () => {
+    const sdp = await fetchSdp();
+    if (sdp == null) return;
     try {
       await navigator.clipboard.writeText(sdp);
       sdpText.hidden = true;
@@ -1067,7 +1076,7 @@ function aes67Block() {
     const rows = [
       ["Stan", on ? L.aes67StateLabel(v) : lst?.enabled ? "wyłączone" : "stacja wyłączona"],
       ["Adres", on && v.address ? `${v.address}:5004` : "—"],
-      ["Opóźnienie wyjścia", on && v.state === "sending" ? `${L.fmtNum(v.output_latency_ms, 1)} ms` : "—"],
+      ["Opóźnienie wyjścia", on && (v.state === "sending" || v.state === "holdover") ? `${L.fmtNum(v.output_latency_ms, 1)} ms` : "—"],
       ["Pakiety · Luki", on ? `${L.fmtNum(v.packets)} · ${L.fmtNum(v.gaps)}` : "—"],
     ];
     facts.replaceChildren(...rows.flatMap(([k, val]) => [el("dt", {}, k), el("dd", {}, val)]));
