@@ -2450,4 +2450,19 @@ TEST_CASE("encoder HTTP: AES67 output in the station API, the status and the SDP
     CHECK(sdp->get_header_value("Content-Disposition") == "attachment; filename=\"Radio Zrodlo.sdp\"");
     CHECK(sdp->body.rfind("v=0", 0) == 0);
   }
+
+  SUBCASE("a station name with quotes and ../ gives a safe file name; CR/LF never gets that far") {
+    json bad = station_json("Rad\r\nio", true, "zrodlo123");
+    CHECK(f.post("/api/stations", bad)->status == 400);  // control characters are refused
+
+    st["name"] = "Ra\"d../../io";
+    st["aes67_output"]["enabled"] = true;
+    r = f.put("/api/stations/" + id, st);
+    REQUIRE_MESSAGE(r->status == 200, r->body);
+    REQUIRE(wait_for([&] { return f.get("/api/status")["stations"][0]["aes67"]["state"] == "sending"; }, 10000));
+    auto sdp = f.client->Get("/api/stations/" + id + "/aes67.sdp", f.auth);
+    REQUIRE(sdp);
+    CHECK_MESSAGE(sdp->status == 200, sdp->body);
+    CHECK(sdp->get_header_value("Content-Disposition") == "attachment; filename=\"Ra_d.._.._io.sdp\"");
+  }
 }
