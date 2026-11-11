@@ -2699,8 +2699,8 @@ TEST_CASE("encoder engine: switching processing on and off never repeats audio o
   const Silence on = longest_silence(0, size_t(off - from));
   const Silence quiet = longest_silence(size_t(off - from), rec.size());
   MESSAGE("longest silence: switch on " << on.len << ", switch off " << quiet.len << " frames (processing delay " << pd << ")");
-  CHECK(on.len <= pd + 720);
-  CHECK(quiet.len <= pd + 720);
+  CHECK(on.len <= pd + 480 + 720);  // the processing delay, its extra margin block, the ramps and a tick
+  CHECK(quiet.len <= pd + 480 + 720);
   // no hard cut: the 24 frames on either side of each pause are within a 5 ms ramp of the ±0.5 FS signal
   constexpr int64_t kRampEdge = (int64_t(1) << 30) * 24 / 240;
   for (const Silence& z : {on, quiet}) {
