@@ -85,7 +85,7 @@ Processing stacji w Bounce Encoder 1.1 używa biblioteki **Stereo Tool** (`libSt
   potrzebuje własnego klucza licencji od Thimeo.
 - Biblioteka jest dołączona do **pełnego** instalatora Bounce Encoder **dla Bounce** (BOUNCE SP.
   Z O.O. jest licencjobiorcą Stereo Tool), budowanego lokalnie (`makensis /DWITH_STEREOTOOL=…`,
-  ENCODER-INSTALL.md, rozdział 16). **Przekazanie instalatora albo pliku `libStereoTool_64.dll`
+  ENCODER-INSTALL.md, rozdział 17). **Przekazanie instalatora albo pliku `libStereoTool_64.dll`
   poza Bounce wymaga zgody Thimeo**, a odbiorca potrzebuje własnych licencji Stereo Tool. Bez tego
   pliku Bounce Encoder działa jak wersja 1.0: processing jest niedostępny, stacje nadają sygnał bez
   processingu.
