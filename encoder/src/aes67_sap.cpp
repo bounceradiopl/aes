@@ -17,6 +17,7 @@ namespace {
 constexpr int64_t kAnnounceNs = 30LL * 1'000'000'000;
 constexpr int64_t kExpireCheckNs = 10LL * 1'000'000'000;
 constexpr int64_t kRetryNs = 5LL * 1'000'000'000;
+constexpr int kMaxDrainPerPass = 64;  // received packets handled per pass under the lock
 
 // The session id of the SDP's o= line.
 std::string session_id_of(const std::string& sdp) {
@@ -136,7 +137,9 @@ void Aes67Sap::run() {
     if (ready[0]) {
       int n;
       std::lock_guard lock(m_);
-      while ((n = sock->recv(buf, nullptr)) >= 0) directory_.on_packet(std::span<const uint8_t>(buf.data(), size_t(n)), t);
+      // a bounded drain: a SAP flood must not hold m_ for ever (the rest is read next pass)
+      for (int k = 0; k < kMaxDrainPerPass && (n = sock->recv(buf, nullptr)) >= 0; ++k)
+        directory_.on_packet(std::span<const uint8_t>(buf.data(), size_t(n)), t);
     }
     if (t - last_expire > kExpireCheckNs) {
       std::lock_guard lock(m_);

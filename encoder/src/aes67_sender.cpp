@@ -22,7 +22,7 @@ void fail_next_aes67_interfaces(int n) { g_fail_interfaces.store(n); }
 Aes67Sender::Aes67Sender(const ClockSource& clock) : clock_(clock) {
   std::string err;
   socket_ = platform::UdpSocket::open(0, &err);
-  if (!socket_) error_ = "nie można otworzyć gniazda nadawczego AES67: " + err;
+  if (!socket_) set_error("nie można otworzyć gniazda nadawczego AES67: " + err);
   thread_ = std::thread([this] { run(); });
 }
 
@@ -48,29 +48,37 @@ void Aes67Sender::set_interface(const std::string& iface_ip) {
     std::string err;
     socket_ = platform::UdpSocket::open(0, &err);
     if (!socket_) {
-      error_ = "nie można otworzyć gniazda nadawczego AES67: " + err;
+      set_error("nie można otworzyć gniazda nadawczego AES67: " + err);
       return;
     }
   }
   if (iface_ip.empty()) {
-    error_ = "nie znaleziono aktywnej karty sieciowej IPv4";
+    set_error("nie znaleziono aktywnej karty sieciowej IPv4");
     return;
   }
   bool failed = false;
   for (int n = g_fail_interfaces.load(); n > 0 && !failed;)
     failed = g_fail_interfaces.compare_exchange_weak(n, n - 1);
   if (failed || !socket_->set_multicast_out(iface_ip, kMulticastTtl, true)) {
-    error_ = "nie można nadawać multicastu przez kartę " + iface_ip;
+    set_error("nie można nadawać multicastu przez kartę " + iface_ip);
     return;
   }
   socket_ok_ = true;
-  error_.clear();
+  set_error({});
 }
 
 void Aes67Sender::set_allowed(bool send) { allowed_.store(send, std::memory_order_relaxed); }
 
+void Aes67Sender::set_error(std::string text) {
+  std::lock_guard lock(err_m_);
+  error_ = std::move(text);
+  has_error_.store(!error_.empty(), std::memory_order_release);
+}
+
+// Not under m_ (which the real-time pass holds): the flag answers "none" without any lock.
 std::string Aes67Sender::error() const {
-  std::lock_guard lock(m_);
+  if (!has_error_.load(std::memory_order_acquire)) return {};
+  std::lock_guard lock(err_m_);
   return error_;
 }
 
@@ -90,7 +98,7 @@ void Aes67Sender::run() {
     const MediaClock clock = clock_.get(&generation);  // the mapping and its generation together
     const uint64_t now = clock.sample_at(platform::monotonic_ns());
     for (const auto& entry : outputs_) {
-      const auto* e = &entry;  // one pointer: the sink fits std::function's own storage
+      const auto* e = &entry;  // two pointers: the sink still fits std::function's small buffer
       e->second->pump(now, generation, [this, e](std::span<const uint8_t> p) {
         // A full socket buffer (non-blocking send) clears within microseconds: retry briefly.
         for (int attempt = 0; attempt < kSendAttempts; ++attempt) {

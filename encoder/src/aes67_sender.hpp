@@ -44,14 +44,18 @@ class Aes67Sender {
 
  private:
   void run();
+  void set_error(std::string text);
 
   const ClockSource& clock_;
-  // Held by the thread through each pass: outputs_, socket_, socket_ok_, error_.
+  // Held by the thread through each pass: outputs_, socket_, socket_ok_.
   mutable std::mutex m_;
   Outputs outputs_;
   std::optional<platform::UdpSocket> socket_;
   bool socket_ok_ = false;  // open, with the multicast interface set
+  // the error text has its own lock, so error() never waits for a pass
+  mutable std::mutex err_m_;
   std::string error_;
+  std::atomic<bool> has_error_{false};
   std::atomic<bool> allowed_{false};
   std::atomic<bool> running_{true};
   std::thread thread_;
